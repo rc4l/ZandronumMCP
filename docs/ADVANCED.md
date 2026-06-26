@@ -33,9 +33,11 @@ Then build Zandronum for your OS:
   built from source. Use the turnkey harness
   [rc4l/zandronum-macos-compile](https://github.com/rc4l/zandronum-macos-compile):
   run `SOUND=1 ./build.sh`, apply the overlay to its `src/zandronum`, then
-  `SOUND=1 ./build.sh` again. The build links some dylibs by absolute path, so to
-  get a portable folder run `.github/scripts/package-macos-engine.sh <engine-root>
-  out.zip` (it bundles the dylibs and rewrites their load paths to `@loader_path`).
+  `SOUND=1 ./build.sh` again. That harness's `build.sh` assembles a relocatable,
+  ad-hoc-signed `build/Zandronum.app` (binary + game data + dylibs under
+  `Contents/MacOS`, load paths rewritten to `@loader_path`). Our
+  `.github/scripts/package-macos-engine.sh` just verifies that bundle (bridge
+  compiled in, no absolute paths) and zips it — `build.sh` owns the bundling.
   This is exactly what CI does — see [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ## Launch the game manually
