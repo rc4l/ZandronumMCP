@@ -68,8 +68,11 @@ jobs:
           fi
 
   # 2. Build the bridge-patched Windows engine and ship it.
+  #    Pinned to windows-2022: build.ps1 hardcodes the CMake generator to
+  #    "Visual Studio 17 2022", so the runner must have VS 2022. windows-latest
+  #    has moved to a newer VS that the generator can't find.
   engine-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: write   # needed to attach the asset to the Release
     steps:
