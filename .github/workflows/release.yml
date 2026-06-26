@@ -1,0 +1,122 @@
+name: Release
+
+# Ships the two distribution artifacts (see README "Setup"):
+#   1. the MCP server -> npm  (so users can `npx -y zandronum-mcp`)
+#   2. a prebuilt, bridge-patched Zandronum engine -> GitHub Release asset
+#      (so users skip the source build entirely)
+#
+# Triggers:
+#   * push a tag like v0.1.0  -> publishes npm + attaches the engine to the Release
+#   * manual run (Actions tab) -> builds the engine and uploads it as a workflow
+#     artifact only (no publish, no Release) — handy for testing the build.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      zandronum_ref:
+        description: "Zandronum source revision/tag to build (hg ref)"
+        required: false
+        default: "ZA_3.2.1"
+
+env:
+  # Zandronum source revision the overlay anchors are verified against
+  # (see engine-bridge/anchors.md). Override via the manual-run input.
+  ZANDRONUM_REF: ${{ github.event.inputs.zandronum_ref || 'ZA_3.2.1' }}
+  # The Windows build system (CMake + deps + build.ps1). A stock binary cannot
+  # be patched, so we build from source using rc4l's ready-made build harness.
+  BUILD_REPO: rc4l/zandronum-windows
+  BUILD_REF: main
+
+jobs:
+  # 1. Publish the MCP server to npm (only on a version tag).
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run coverage     # gate publish on the 100% suite
+      # `npm publish` runs prepublishOnly (build) automatically.
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # 2. Build the bridge-patched Windows engine and ship it.
+  engine-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # needed to attach the asset to the Release
+    steps:
+      - name: Checkout zandronum-mcp (overlay + apply-bridge)
+        uses: actions/checkout@v4
+        with:
+          path: mcp
+
+      - name: Checkout the Windows build system
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BUILD_REPO }}
+          ref: ${{ env.BUILD_REF }}
+          path: engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Mercurial (build.ps1 pulls the Zandronum source via hg)
+        shell: pwsh
+        run: |
+          choco install hg -y
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\Mercurial"
+
+      - name: Build stock Zandronum (downloads deps + source, configures CMake)
+        shell: pwsh
+        working-directory: engine
+        run: ./build.ps1 -ZandronumRef $env:ZANDRONUM_REF
+
+      - name: Apply the MCP bridge overlay to the source
+        shell: pwsh
+        working-directory: engine
+        run: node ../mcp/engine-bridge/apply-bridge.mjs --src src/zandronum
+
+      - name: Rebuild the patched engine (CMake auto-reconfigures for new sources)
+        shell: pwsh
+        working-directory: engine
+        run: ./deps/cmake/bin/cmake.exe --build build --config Release --target zdoom
+
+      - name: Package the runnable engine
+        shell: pwsh
+        working-directory: engine
+        run: |
+          if (-not (Test-Path build/Release/zandronum.exe)) {
+            throw "build/Release/zandronum.exe missing — patched build failed"
+          }
+          Compress-Archive -Path build/Release/* -DestinationPath "$env:GITHUB_WORKSPACE/zandronum-mcp-engine-windows-x64.zip" -Force
+
+      - name: Upload as a workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zandronum-mcp-engine-windows-x64
+          path: zandronum-mcp-engine-windows-x64.zip
+
+      - name: Attach to the Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zandronum-mcp-engine-windows-x64.zip
+
+# ---------------------------------------------------------------------------
+# Linux / macOS engine builds are not wired up yet: this repo only has a proven
+# Windows build harness (rc4l/zandronum-windows). The bridge itself is fully
+# cross-platform (see engine-bridge/anchors.md), so adding them is "build stock
+# Zandronum the normal way for that OS, run apply-bridge.mjs, rebuild" — they
+# just need their own dependency/build recipe before being trustworthy in CI.
+# Until then, Linux/macOS users build from source (README "Build Zandronum").
+# ---------------------------------------------------------------------------

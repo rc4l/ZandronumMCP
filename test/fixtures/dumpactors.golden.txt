@@ -1,0 +1,10 @@
+1772 object class types total
+Actor	Ed Num	SpawnID	Filter	Source
+
+Actor	-1	0	0:All	zandronum.pk3:actors/actor.txt
+
+ActorMover	9074	0	0:All	zandronum.pk3:actors/shared/movingcamera.txt
+
+AimingCamera	9073	0	0:All	zandronum.pk3:actors/shared/camera.txt
+
+ArtiBoostArmor	8041	22	4:Hexen	zandronum.pk3:actors/hexen/boostarmor.txt

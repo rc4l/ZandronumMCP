@@ -1,0 +1,55 @@
+{
+  "name": "zandronum-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for driving and introspecting a local Zandronum dev build.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rc4l/ZandronumMCP.git"
+  },
+  "homepage": "https://github.com/rc4l/ZandronumMCP#readme",
+  "bugs": "https://github.com/rc4l/ZandronumMCP/issues",
+  "bin": {
+    "zandronum-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "engine-bridge",
+    "PROTOCOL.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "zandronum",
+    "doom",
+    "modelcontextprotocol"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
