@@ -148,6 +148,18 @@ export class BridgeClient extends EventEmitter {
     socket.write(encodeMessage({ v: PROTOCOL_VERSION, t: "event", evtype, subtype, data1, data2 }));
   }
 
+  /**
+   * Set the engine's master pause flag directly (fire-and-forget; requires the
+   * "time" cap). Unpausing lets a backgrounded window keep advancing tics, which
+   * single-player otherwise freezes on focus loss. Callers should gate on
+   * `supports("time")` and degrade gracefully on older bridges.
+   */
+  setPause(paused: boolean): void {
+    const socket = this.socket;
+    if (!socket) throw new Error("Not connected");
+    socket.write(encodeMessage({ v: PROTOCOL_VERSION, t: "setpause", paused: paused ? 1 : 0 }));
+  }
+
   private failAllPending(err: Error): void {
     for (const cmd of this.pending) {
       clearTimeout(cmd.timer);

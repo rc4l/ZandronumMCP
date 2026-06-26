@@ -147,4 +147,27 @@ describe("BridgeClient <-> FakeBridge", () => {
     const c = new BridgeClient({ port: 1 });
     expect(() => c.sendEvent(4, 1, 10, 0)).toThrow(/Not connected/);
   });
+
+  it("sends setpause(true) as paused:1", async () => {
+    bridge = await FakeBridge.start();
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+    const received = bridge.waitForPause();
+    client.setPause(true);
+    expect(await received).toBe(1);
+  });
+
+  it("sends setpause(false) as paused:0", async () => {
+    bridge = await FakeBridge.start();
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+    const received = bridge.waitForPause();
+    client.setPause(false);
+    expect(await received).toBe(0);
+  });
+
+  it("throws when setting pause before connecting", () => {
+    const c = new BridgeClient({ port: 1 });
+    expect(() => c.setPause(false)).toThrow(/Not connected/);
+  });
 });

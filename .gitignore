@@ -4,3 +4,5 @@ coverage/
 *.log
 .DS_Store
 .vitest/
+# Local mod projects used for manual testing — not part of the server.
+mods/

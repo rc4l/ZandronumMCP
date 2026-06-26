@@ -17,8 +17,11 @@ The single source of truth for the wire contract between the **engine bridge**
 `hello` — sent once, immediately on connect. `caps` lists what the bridge
 supports so the client can degrade gracefully:
 ```json
-{"v":1,"t":"hello","engine":"zandronum","bridge":"0.2.0","caps":["cmd","event"]}
+{"v":1,"t":"hello","engine":"zandronum","bridge":"0.3.0","caps":["cmd","event","time"]}
 ```
+
+`caps` values: `cmd` (console commands), `event` (input events), `time` (the
+`setpause` control below).
 
 `out` — one line of console output, streamed asynchronously:
 ```json
@@ -37,6 +40,14 @@ Fire-and-forget; the engine sends no reply. Menus read GUI key events
 (`evtype=4` EV_GUI_Event, `subtype=1` EV_GUI_KeyDown, `data1=GK_*`):
 ```json
 {"v":1,"t":"event","evtype":4,"subtype":1,"data1":10,"data2":0}
+```
+
+`setpause` — set the engine's master pause flag directly (requires the `time`
+cap). Fire-and-forget; no reply. `paused` is `1` to pause, `0` to resume.
+Single-player Zandronum force-pauses on window-defocus with no cvar to opt out,
+so the MCP drives the flag itself to keep a backgrounded instance ticking:
+```json
+{"v":1,"t":"setpause","paused":0}
 ```
 
 ## Correlation

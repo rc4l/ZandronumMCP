@@ -35,7 +35,9 @@ export class FakeBridge {
   private readonly swallowCommands: boolean;
   private readonly hello?: Record<string, unknown>;
   private readonly eventWaiters: Array<(e: RecordedEvent) => void> = [];
+  private readonly pauseWaiters: Array<(v: number) => void> = [];
   readonly events: RecordedEvent[] = [];
+  readonly pauses: number[] = [];
   port = 0;
 
   private constructor(server: net.Server, opts: FakeBridgeOptions) {
@@ -104,6 +106,10 @@ export class FakeBridge {
           };
           this.events.push(ev);
           for (const w of this.eventWaiters.splice(0)) w(ev);
+        } else if (msg.t === "setpause") {
+          const v = Number(msg.paused);
+          this.pauses.push(v);
+          for (const w of this.pauseWaiters.splice(0)) w(v);
         }
       }
     });
@@ -139,6 +145,11 @@ export class FakeBridge {
   /** Resolve with the next input event the client posts. */
   waitForEvent(): Promise<RecordedEvent> {
     return new Promise((resolve) => this.eventWaiters.push(resolve));
+  }
+
+  /** Resolve with the next setpause value (0/1) the client posts. */
+  waitForPause(): Promise<number> {
+    return new Promise((resolve) => this.pauseWaiters.push(resolve));
   }
 
   close(): Promise<void> {

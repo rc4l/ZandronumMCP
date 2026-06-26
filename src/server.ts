@@ -69,7 +69,7 @@ async function clientFor(instance: number) {
 
 const instanceArg = z.number().int().positive().default(1);
 
-const server = new McpServer({ name: "zandronum-mcp", version: "0.1.0" });
+const server = new McpServer({ name: "zandronum-mcp", version: "0.2.0" });
 
 server.registerTool(
   "run_command",
@@ -348,6 +348,57 @@ server.registerTool(
     }
     const shot = await captureScreenshot(client, { dir: SCREENSHOT_DIR });
     return { content: [{ type: "image", data: shot.base64, mimeType: "image/png" }] };
+  },
+);
+
+// --- time control -----------------------------------------------------------
+// Single-player Zandronum hard-pauses when its window loses focus (no cvar to
+// disable it), which freezes the simulation whenever the MCP drives a
+// backgrounded instance. These tools set the engine's pause flag directly so
+// time-based behavior — charge weapons, projectiles, animations, monster AI —
+// is actually testable headless. The TICRATE (35 tics/sec) is fixed in Doom.
+const TICRATE = 35;
+const NO_TIME_CAP =
+  "This engine bridge has no time-control support (rebuild/redownload with the latest bridge).";
+
+server.registerTool(
+  "set_pause",
+  {
+    title: "Pause or resume the game",
+    description:
+      "Set the engine's master pause flag directly. Use this to resume a backgrounded instance that auto-paused on focus loss, so the simulation keeps advancing while the MCP drives it.",
+    inputSchema: { instance: instanceArg, paused: z.boolean() },
+  },
+  async ({ instance, paused }) => {
+    const client = await clientFor(instance);
+    if (!client.supports("time")) {
+      return { isError: true, content: [{ type: "text", text: NO_TIME_CAP }] };
+    }
+    client.setPause(paused);
+    return { content: [{ type: "text", text: paused ? "paused" : "resumed" }] };
+  },
+);
+
+server.registerTool(
+  "step",
+  {
+    title: "Advance the game by N tics",
+    description:
+      "Resume the game, let it run for the given number of tics (35 tics = 1 second), then pause again. Lets you advance the simulation a deterministic-ish amount to observe time-based effects (charging, projectiles, animations) without keeping the window focused.",
+    inputSchema: {
+      instance: instanceArg,
+      tics: z.number().int().positive().default(35),
+    },
+  },
+  async ({ instance, tics }) => {
+    const client = await clientFor(instance);
+    if (!client.supports("time")) {
+      return { isError: true, content: [{ type: "text", text: NO_TIME_CAP }] };
+    }
+    client.setPause(false);
+    await sleep((tics / TICRATE) * 1000);
+    client.setPause(true);
+    return { content: [{ type: "text", text: `advanced ~${tics} tic(s)` }] };
   },
 );
 

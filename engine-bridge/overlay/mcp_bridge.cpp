@@ -45,6 +45,12 @@
 // server does for stdin. Forward-declared to avoid pulling in c_dispatch.h.
 void AddCommandString(char *text, int keynum);
 
+// The engine's global pause flag (defined in g_game.cpp). The MCP drives it
+// directly so a backgrounded, defocused window can keep advancing tics — vital
+// for automated testing, because single-player auto-pauses on focus loss
+// (S_SetSoundPaused in i_input.cpp forces `paused = -1`, with no cvar to opt out).
+extern int paused;
+
 // Post a synthetic input event (implemented in mcp_event.cpp, which owns the
 // engine-header includes so this socket TU doesn't have to).
 void MCP_PostInputEvent( int type, int subtype, int data1, int data2 );
@@ -58,6 +64,8 @@ namespace
 	struct InboundMsg
 	{
 		bool        isEvent;
+		bool        isPause;               // setpause control (isPause == true)
+		int         pauseVal;              // target value for the engine `paused` flag
 		std::string text;                  // command text (isEvent == false)
 		int         evtype, subtype, d1, d2; // event fields (isEvent == true)
 	};
@@ -192,7 +200,7 @@ namespace
 				g_rxbuf.clear();
 			}
 
-			SendLine( "{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.2.0\",\"caps\":[\"cmd\",\"event\"]}" );
+			SendLine( "{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.3.0\",\"caps\":[\"cmd\",\"event\",\"time\"]}" );
 
 			char buf[1024];
 			for ( ;; )
@@ -207,10 +215,21 @@ namespace
 					std::string line = g_rxbuf.substr( 0, nl );
 					g_rxbuf.erase( 0, nl + 1 );
 
-					if ( line.find( "\"t\":\"event\"" ) != std::string::npos )
+					if ( line.find( "\"t\":\"setpause\"" ) != std::string::npos )
+					{
+						InboundMsg msg;
+						msg.isEvent = false;
+						msg.isPause = true;
+						msg.pauseVal = 0;
+						msg.evtype = msg.subtype = msg.d1 = msg.d2 = 0;
+						ExtractInt( line, "paused", msg.pauseVal );
+						g_inbound.push_back( msg );
+					}
+					else if ( line.find( "\"t\":\"event\"" ) != std::string::npos )
 					{
 						InboundMsg msg;
 						msg.isEvent = true;
+						msg.isPause = false;
 						msg.evtype = msg.subtype = msg.d1 = msg.d2 = 0;
 						ExtractInt( line, "evtype", msg.evtype );
 						ExtractInt( line, "subtype", msg.subtype );
@@ -225,6 +244,7 @@ namespace
 						{
 							InboundMsg msg;
 							msg.isEvent = false;
+							msg.isPause = false;
 							msg.text = text;
 							msg.evtype = msg.subtype = msg.d1 = msg.d2 = 0;
 							g_inbound.push_back( msg );
@@ -290,7 +310,9 @@ void MCP_Bridge_Poll()
 			if ( !g_inbound.empty() ) { msg = g_inbound.front(); g_inbound.pop_front(); have = true; }
 		}
 		if ( !have ) break;
-		if ( msg.isEvent )
+		if ( msg.isPause )
+			paused = msg.pauseVal;
+		else if ( msg.isEvent )
 			MCP_PostInputEvent( msg.evtype, msg.subtype, msg.d1, msg.d2 );
 		else
 			AddCommandString( const_cast<char *>( msg.text.c_str() ), 0 );
