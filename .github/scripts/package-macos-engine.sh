@@ -23,6 +23,8 @@ set -euo pipefail
 
 NEW_NAME="zandronum-mcp-hooks"            # MCP-hooked engine; not stock Zandronum
 DISPLAY_NAME="Zandronum MCP Hooks"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ICNS="$SCRIPT_DIR/../../assets/$NEW_NAME.icns"   # committed square app icon
 
 ENGINE_ROOT="${1:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
 OUT_ZIP="${2:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
@@ -44,6 +46,16 @@ PL="$APP/Contents/Info.plist"
   || /usr/libexec/PlistBuddy -c "Add :CFBundleName string $DISPLAY_NAME" "$PL"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$PL" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $DISPLAY_NAME" "$PL"
+
+# Icon: own it here rather than rely on build.sh's make_icon (best-effort, needs
+# Pillow on the runner, and on failure leaves a bogus CFBundleIconFile). Drop any
+# icon build.sh produced and install our committed square app icon.
+[[ -f "$ICNS" ]] || { echo "ERROR: app icon missing at $ICNS" >&2; exit 1; }
+rm -f "$APP/Contents/Resources/"*.icns
+mkdir -p "$APP/Contents/Resources"
+cp "$ICNS" "$APP/Contents/Resources/$NEW_NAME.icns"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $NEW_NAME" "$PL" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string $NEW_NAME" "$PL"
 
 # 2. Renaming + the plist edits invalidate the prior bundle seal. Re-seal with
 #    build.sh's exact sequence (sign each dylib, then deep-sign the bundle) so the
