@@ -56,28 +56,33 @@ $env:ZANDRONUM_BRIDGE_PORT = "7777"; ./zandronum.exe -iwad freedoom2.wad
 The bridge only starts when that variable is set, so a normal launch is unaffected.
 Instance 1 uses 7777, instance 2 uses 7778, and so on.
 
-On macOS, run `zandronum` from inside its unzipped folder — the bundled SDL/FMOD
-dylibs sit next to the binary (it's an Intel build, launched automatically under
-Rosetta 2). The MCP also sets `DYLD_LIBRARY_PATH` to that folder when it launches
-the engine for you.
+On macOS the prebuilt engine ships as **`Zandronum.app`** (an Intel build, launched
+under Rosetta 2; the SDL/FMOD dylibs and game data live in `Contents/MacOS`
+alongside the binary). Point `ZANDRONUM_EXE` at the `.app` — the MCP resolves it to
+`Contents/MacOS/zandronum` and sets `DYLD_LIBRARY_PATH` for you. To launch by hand,
+run the inner binary directly so the bridge env is in scope:
+
+```bash
+ZANDRONUM_BRIDGE_PORT=7777 Zandronum.app/Contents/MacOS/zandronum -iwad freedoom2.wad
+```
 
 ### Gatekeeper / "Apple could not verify…"
 
-The prebuilt engine is ad-hoc signed but **not notarized** (a paid Apple Developer
-ID would be required — stock Zandronum isn't notarized either), so a copy you
-*download* carries the `com.apple.quarantine` flag and Gatekeeper refuses it. This
-also kills it when spawned, not just when double-clicked. The MCP clears the flag
-automatically before launching (`launch_instance` runs `xattr -dr
-com.apple.quarantine` on the engine folder). To run it yourself, do it once:
+The app is ad-hoc signed but **not notarized** (a paid Apple Developer ID would be
+required — stock Zandronum isn't notarized either), so a *downloaded* copy carries
+the `com.apple.quarantine` flag and Gatekeeper refuses it. This also kills it when
+spawned, not just when double-clicked. The MCP clears the flag automatically before
+launching (`launch_instance` runs `xattr -dr com.apple.quarantine` on the engine
+folder). To run it yourself, do it once:
 
 ```bash
-xattr -dr com.apple.quarantine /path/to/zandronum-mcp-engine-macos-x64
+xattr -dr com.apple.quarantine /path/to/Zandronum.app
 ```
 
 The ad-hoc signature is enough to *execute* once quarantine is gone; the flag is
 the only thing Gatekeeper gates. A self-built engine is never quarantined, so this
 only affects downloads. (For a no-friction download you'd sign with a Developer ID
-and notarize the zip in CI — not wired up here.)
+and notarize the app in CI — not wired up here.)
 
 ## Run the server from source
 

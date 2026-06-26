@@ -1,6 +1,20 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, waitForPort, tryConnect } from "../src/process/launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, waitForPort, tryConnect } from "../src/process/launch.js";
+
+describe("resolveEngineExe", () => {
+  it("resolves a macOS .app bundle to its inner executable", () => {
+    expect(resolveEngineExe("/Apps/Zandronum.app")).toBe("/Apps/Zandronum.app/Contents/MacOS/zandronum");
+  });
+  it("tolerates a trailing slash and case", () => {
+    expect(resolveEngineExe("/Apps/Zandronum.APP/")).toBe("/Apps/Zandronum.APP/Contents/MacOS/zandronum");
+  });
+  it("leaves a direct binary path untouched", () => {
+    expect(resolveEngineExe("/Apps/Zandronum.app/Contents/MacOS/zandronum")).toBe("/Apps/Zandronum.app/Contents/MacOS/zandronum");
+    expect(resolveEngineExe("/games/zandronum")).toBe("/games/zandronum");
+    expect(resolveEngineExe("C:/games/zandronum.exe")).toBe("C:/games/zandronum.exe");
+  });
+});
 
 describe("clearQuarantine", () => {
   it("does nothing off macOS", () => {

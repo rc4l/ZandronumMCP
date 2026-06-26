@@ -5,6 +5,7 @@ import { z } from "zod";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
+import { resolveEngineExe } from "./process/launch.js";
 import { hasBridge } from "./process/verify.js";
 import { parseStartupErrors, tailLines } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
@@ -34,7 +35,10 @@ const BASE_PORT = Number.parseInt(process.env.ZANDRONUM_BRIDGE_PORT ?? "7777", 1
 const SCREENSHOT_DIR = process.env.ZANDRONUM_SCREENSHOT_DIR ?? ".";
 // Path to the zandronum binary (zandronum.exe on Windows; the `zandronum`
 // executable on Linux/macOS), used by launch_instance.
-const ZANDRONUM_EXE = process.env.ZANDRONUM_EXE;
+// Accept either the macOS .app bundle or the binary directly.
+const ZANDRONUM_EXE = process.env.ZANDRONUM_EXE
+  ? resolveEngineExe(process.env.ZANDRONUM_EXE)
+  : undefined;
 
 const portFor = (instance: number) => BASE_PORT + (instance - 1);
 // Default WAD to read maps from (usually the IWAD).
@@ -1060,7 +1064,7 @@ server.registerTool(
   },
   async ({ instance, iwad, files, map, skill, fullscreen, width, height, extraArgs }) => {
     if (!ZANDRONUM_EXE) {
-      return { isError: true, content: [{ type: "text", text: "Set ZANDRONUM_EXE to the zandronum binary path (zandronum.exe on Windows, ./zandronum on Linux/macOS) to launch instances." }] };
+      return { isError: true, content: [{ type: "text", text: "Set ZANDRONUM_EXE to the engine path (zandronum.exe on Windows, Zandronum.app on macOS, ./zandronum on Linux) to launch instances." }] };
     }
     if (!existsSync(ZANDRONUM_EXE)) {
       return { isError: true, content: [{ type: "text", text: `ZANDRONUM_EXE not found at ${ZANDRONUM_EXE} — check the path.` }] };

@@ -1,6 +1,18 @@
 import net from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
+
+/**
+ * Accept `ZANDRONUM_EXE` pointing at either the macOS `.app` bundle or the binary
+ * directly. A `.app` resolves to its inner executable so users can set the
+ * friendly bundle path (e.g. `…/Zandronum.app`); anything else is returned as-is.
+ */
+export function resolveEngineExe(exe: string): string {
+  const trimmed = exe.replace(/[/\\]+$/, "");
+  return trimmed.toLowerCase().endsWith(".app")
+    ? join(trimmed, "Contents", "MacOS", "zandronum")
+    : exe;
+}
 
 /**
  * Best-effort strip of `com.apple.quarantine` from the engine folder on macOS.
