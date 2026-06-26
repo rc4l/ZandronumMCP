@@ -31,6 +31,8 @@ ENGINE_ROOT="${1:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
 OUT_ZIP="${2:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
 BUILD="$ENGINE_ROOT/build"
 DEPLIB="$ENGINE_ROOT/deps/x86/lib"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ICNS="$SCRIPT_DIR/../../assets/zandronum.icns"   # committed in this repo
 WORK="$(mktemp -d)"
 STAGE="$WORK/stage"                  # flat scratch: surgery + signing happen here
 mkdir -p "$STAGE"
@@ -85,14 +87,18 @@ fi
 #    bundle behaves exactly like the flat layout that already works.
 APP="$WORK/Zandronum.app"
 MACOS="$APP/Contents/MacOS"
-mkdir -p "$MACOS"
+mkdir -p "$MACOS" "$APP/Contents/Resources"
 mv "$STAGE"/* "$MACOS/"
+# Dock/Finder icon (the official Zandronum icon, converted to .icns).
+[[ -f "$ICNS" ]] || { echo "ERROR: icon missing at $ICNS" >&2; exit 1; }
+cp "$ICNS" "$APP/Contents/Resources/Zandronum.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleExecutable</key>           <string>zandronum</string>
+	<key>CFBundleIconFile</key>             <string>Zandronum</string>
 	<key>CFBundleIdentifier</key>           <string>com.rc4l.zandronum-mcp-engine</string>
 	<key>CFBundleName</key>                 <string>Zandronum</string>
 	<key>CFBundleDisplayName</key>          <string>Zandronum (MCP)</string>
