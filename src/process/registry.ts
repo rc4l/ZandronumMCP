@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { BridgeClient } from "../bridge/transport.js";
-import { buildLaunchArgs, waitForPort, type LaunchOptions } from "./launch.js";
+import { buildLaunchArgs, buildLaunchEnv, waitForPort, type LaunchOptions } from "./launch.js";
 
 export interface InstanceConfig {
   id: number;
@@ -55,7 +55,7 @@ export class InstanceRegistry {
   async launch(config: LaunchConfig, io: LaunchIo): Promise<BridgeClient> {
     const host = config.host ?? "127.0.0.1";
     const args = buildLaunchArgs(config);
-    const env: NodeJS.ProcessEnv = { ...process.env, ZANDRONUM_BRIDGE_PORT: String(config.port) };
+    const env = buildLaunchEnv(config.exe, config.port);
     if (config.logFile) env.ZANDRONUM_BRIDGE_LOG = config.logFile;
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);

@@ -30,8 +30,11 @@ function buildFixture(): string {
   const src = join(root, "src");
   mkdirSync(join(src, "g_shared"), { recursive: true });
 
+  // First include is Windows-only and guarded (mirrors the real d_main.cpp). The
+  // bridge include must skip it and land on the first UNCONDITIONAL include, else
+  // non-Windows builds compile the bridge header out and its symbols go undeclared.
   writeFileSync(join(src, "d_main.cpp"),
-    '#include "doomdef.h"\n#include "d_main.h"\n\nvoid D_DoomLoop ()\n{\n\tswitch ( NETWORK_GetState( ))\n\t{\n\t}\n}\n');
+    '#ifdef _WIN32\n#include <direct.h>\n#else\n#include <sys/stat.h>\n#endif\n#include "doomdef.h"\n#include "d_main.h"\n\nvoid D_DoomLoop ()\n{\n\tswitch ( NETWORK_GetState( ))\n\t{\n\t}\n}\n');
   writeFileSync(join(src, "c_console.cpp"),
     '#include "templates.h"\n\nvoid C_Foo()\n{\n\tI_PrintStr (outlinecopy);\n}\n');
   writeFileSync(join(src, "v_text.cpp"),
@@ -100,6 +103,24 @@ describe("findAnchorIndex", () => {
   });
   it("throws when the anchor is missing", () => {
     expect(() => findAnchorIndex(lines, "nope", undefined)).toThrow(/Anchor .* not found/);
+  });
+  it("requireTopLevel skips matches inside #if/#endif blocks", () => {
+    const guarded = [
+      "#ifdef _WIN32",
+      "#include <direct.h>",   // guarded — must be skipped
+      "#else",
+      "#include <sys/stat.h>", // guarded — must be skipped
+      "#endif",
+      '#include "doomdef.h"',  // first top-level include
+    ];
+    // Without the flag it grabs the first match (the guarded one)...
+    expect(findAnchorIndex(guarded, "^\\s*#include", undefined)).toBe(1);
+    // ...with it, the first unconditional include wins.
+    expect(findAnchorIndex(guarded, "^\\s*#include", undefined, true)).toBe(5);
+  });
+  it("requireTopLevel handles nested conditionals", () => {
+    const nested = ["#if A", "#ifdef B", "#include <x>", "#endif", "#endif", "#include <y>"];
+    expect(findAnchorIndex(nested, "^\\s*#include", undefined, true)).toBe(5);
   });
 });
 

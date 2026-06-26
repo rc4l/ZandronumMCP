@@ -1,6 +1,30 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { buildLaunchArgs, waitForPort, tryConnect } from "../src/process/launch.js";
+import { buildLaunchArgs, buildLaunchEnv, waitForPort, tryConnect } from "../src/process/launch.js";
+
+describe("buildLaunchEnv", () => {
+  it("always sets the bridge port from the instance port", () => {
+    const env = buildLaunchEnv("/games/zandronum.exe", 7778, {}, "win32");
+    expect(env.ZANDRONUM_BRIDGE_PORT).toBe("7778");
+    expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
+  });
+
+  it("preserves the base env", () => {
+    const env = buildLaunchEnv("/games/zandronum", 7777, { PATH: "/usr/bin" }, "linux");
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
+  });
+
+  it("on macOS points DYLD_LIBRARY_PATH at the engine's folder (for the SDL2 dlopen)", () => {
+    const env = buildLaunchEnv("/Apps/zandronum/zandronum", 7777, {}, "darwin");
+    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/zandronum");
+  });
+
+  it("on macOS prepends to an existing DYLD_LIBRARY_PATH rather than clobbering it", () => {
+    const env = buildLaunchEnv("/Apps/zandronum/zandronum", 7777, { DYLD_LIBRARY_PATH: "/opt/lib" }, "darwin");
+    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/zandronum:/opt/lib");
+  });
+});
 
 describe("buildLaunchArgs", () => {
   it("returns nothing for empty options", () => {

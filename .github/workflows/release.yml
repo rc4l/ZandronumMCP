@@ -1,14 +1,19 @@
 name: Release
 
-# Ships the two distribution artifacts (see README "Setup"):
+# Ships the distribution artifacts (see README "Setup"):
 #   1. the MCP server -> npm  (so users can `npx -y zandronum-mcp`)
-#   2. a prebuilt, bridge-patched Zandronum engine -> GitHub Release asset
+#   2. a prebuilt, bridge-patched Zandronum engine, per OS -> GitHub Release assets
 #      (so users skip the source build entirely)
 #
+# The two engine builds (Windows + macOS) run in PARALLEL. The release is atomic:
+# nothing is published unless the test suite passes AND BOTH engines build. If
+# either engine build fails the dependent publish jobs are skipped, so no engine
+# asset is attached and nothing is pushed to npm — the release is cancelled.
+#
 # Triggers:
-#   * push a tag like v0.1.0  -> publishes npm + attaches the engine to the Release
-#   * manual run (Actions tab) -> builds the engine and uploads it as a workflow
-#     artifact only (no publish, no Release) — handy for testing the build.
+#   * push a tag like v0.1.0  -> publishes npm + attaches both engines to the Release
+#   * manual run (Actions tab) -> builds both engines and uploads them as workflow
+#     artifacts only (no publish, no Release) — handy for testing the builds.
 
 on:
   push:
@@ -24,57 +29,37 @@ env:
   # Zandronum source revision the overlay anchors are verified against
   # (see engine-bridge/anchors.md). Override via the manual-run input.
   ZANDRONUM_REF: ${{ github.event.inputs.zandronum_ref || 'ZA_3.2.1' }}
-  # The Windows build system (CMake + deps + build.ps1). A stock binary cannot
-  # be patched, so we build from source using rc4l's ready-made build harness
-  # (the one with maintained, known-working CI).
-  BUILD_REPO: rc4l/zandronum-windows-compile
-  BUILD_REF: main
+  # A stock binary cannot be patched, so we build from source using rc4l's
+  # ready-made, CI-proven build harnesses (one per OS).
+  WINDOWS_BUILD_REPO: rc4l/zandronum-windows-compile
+  WINDOWS_BUILD_REF: main
+  MACOS_BUILD_REPO: rc4l/zandronum-macos-compile
+  MACOS_BUILD_REF: main
 
 jobs:
-  # 1. Publish the MCP server to npm (only on a version tag).
-  #    Uses npm Trusted Publishing (OIDC) — no stored NPM_TOKEN secret. The
-  #    publisher must be configured once on npmjs.com (Package settings ->
-  #    Trusted Publisher: GitHub Actions, repo rc4l/ZandronumMCP, workflow
-  #    release.yml). See README/notes.
-  publish-npm:
-    if: startsWith(github.ref, 'refs/tags/v')
+  # 0. Gate everything on the test suite. Every publish path depends (transitively)
+  #    on this, so a red suite cancels the whole release before any engine builds.
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write   # mint the OIDC token npm exchanges for publish auth
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Trusted Publishing requires Node >= 22.14 and npm >= 11.5.1.
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
-          # npm's guidance: do not cache deps in release builds.
+          node-version: 20
+          cache: npm
       - run: npm ci
-      - run: npm run coverage     # gate publish on the 100% suite
-      # Belt-and-suspenders: make sure npm is new enough for OIDC.
-      - run: npm install -g npm@latest
-      # No token: npm authenticates via GitHub OIDC and attaches provenance.
-      # `npm publish` runs prepublishOnly (build) automatically. Skip if this
-      # exact version is already on npm (e.g. the very first release, published
-      # manually to create the package before Trusted Publishing was set up).
-      - name: Publish to npm (skip if version already exists)
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          if npm view "zandronum-mcp@$VERSION" version >/dev/null 2>&1; then
-            echo "zandronum-mcp@$VERSION already published — skipping."
-          else
-            npm publish
-          fi
+      - run: npm run typecheck
+      - run: npm run coverage     # the 100% suite
 
-  # 2. Build the bridge-patched Windows engine and ship it.
+  # 1. Build the bridge-patched Windows engine -> workflow artifact.
   #    Pinned to windows-2022: build.ps1 hardcodes the CMake generator to
   #    "Visual Studio 17 2022", so the runner must have VS 2022. windows-latest
   #    has moved to a newer VS that the generator can't find.
   engine-windows:
+    needs: [test]
     runs-on: windows-2022
     permissions:
-      contents: write   # needed to attach the asset to the Release
+      contents: read
     steps:
       - name: Checkout zandronum-mcp (overlay + apply-bridge)
         uses: actions/checkout@v4
@@ -84,8 +69,8 @@ jobs:
       - name: Checkout the Windows build system
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.BUILD_REPO }}
-          ref: ${{ env.BUILD_REF }}
+          repository: ${{ env.WINDOWS_BUILD_REPO }}
+          ref: ${{ env.WINDOWS_BUILD_REF }}
           path: engine
 
       - uses: actions/setup-node@v4
@@ -139,23 +124,129 @@ jobs:
           }
           Compress-Archive -Path build/Release/* -DestinationPath "$env:GITHUB_WORKSPACE/zandronum-mcp-engine-windows-x64.zip" -Force
 
-      - name: Upload as a workflow artifact (always)
+      - name: Upload the engine as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: zandronum-mcp-engine-windows-x64
           path: zandronum-mcp-engine-windows-x64.zip
+          if-no-files-found: error
 
-      - name: Attach to the Release (tag pushes only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  # 2. Build the bridge-patched macOS engine -> workflow artifact.
+  #    FMOD Ex ships x86_64 only, so this is an Intel build that runs under
+  #    Rosetta 2 (see rc4l/zandronum-macos-compile). build.sh links sdl12-compat
+  #    by an absolute build-machine path, so package-macos-engine.sh relocates the
+  #    dylibs to @loader_path to make the zip portable.
+  engine-macos:
+    needs: [test]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout zandronum-mcp (overlay + apply-bridge + packager)
+        uses: actions/checkout@v4
+        with:
+          path: mcp
+
+      - name: Checkout the macOS build system
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MACOS_BUILD_REPO }}
+          ref: ${{ env.MACOS_BUILD_REF }}
+          path: engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rosetta 2 (needed to build/run the x86_64 FMOD engine)
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Build stock Zandronum (deps from source + hg source + CMake)
+        working-directory: engine
+        env:
+          SOUND: "1"
+          ZANDRONUM_REF: ${{ env.ZANDRONUM_REF }}
+        run: ./build.sh
+
+      - name: Apply the MCP bridge overlay to the source
+        working-directory: engine
+        run: node ../mcp/engine-bridge/apply-bridge.mjs --src src/zandronum
+
+      # Re-running build.sh reconfigures CMake (picking up the overlay sources),
+      # recompiles, and re-stages the runtime dylibs. Safe to repeat: `hg update`
+      # to the pinned tag preserves the applied overlay.
+      - name: Rebuild the patched engine
+        working-directory: engine
+        env:
+          SOUND: "1"
+          ZANDRONUM_REF: ${{ env.ZANDRONUM_REF }}
+        run: ./build.sh
+
+      - name: Package the runnable, relocatable engine
+        working-directory: engine
+        run: bash ../mcp/.github/scripts/package-macos-engine.sh "$PWD" "$GITHUB_WORKSPACE/zandronum-mcp-engine-macos-x64.zip"
+
+      - name: Upload the engine as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zandronum-mcp-engine-macos-x64
+          path: zandronum-mcp-engine-macos-x64.zip
+          if-no-files-found: error
+
+  # 3. Attach BOTH engines to the GitHub Release (tag pushes only). Depends on
+  #    both engine jobs, so a single failure means this never runs and the Release
+  #    gets no partial set of assets.
+  attach-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [engine-windows, engine-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to attach assets to the Release
+    steps:
+      - name: Download both engine artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Attach the engines to the Release
         uses: softprops/action-gh-release@v2
         with:
-          files: zandronum-mcp-engine-windows-x64.zip
+          files: dist/**/*.zip
+          fail_on_unmatched_files: true
 
-# ---------------------------------------------------------------------------
-# Linux / macOS engine builds are not wired up yet: this repo only has a proven
-# Windows build harness (rc4l/zandronum-windows). The bridge itself is fully
-# cross-platform (see engine-bridge/anchors.md), so adding them is "build stock
-# Zandronum the normal way for that OS, run apply-bridge.mjs, rebuild" — they
-# just need their own dependency/build recipe before being trustworthy in CI.
-# Until then, Linux/macOS users build from source (README "Build Zandronum").
-# ---------------------------------------------------------------------------
+  # 4. Publish the MCP server to npm — LAST, because it is irreversible. Gated on
+  #    attach-release (and thus on both engines + the test suite): npm only ships
+  #    once the engines are built and attached.
+  #    Uses npm Trusted Publishing (OIDC) — no stored NPM_TOKEN secret. The
+  #    publisher must be configured once on npmjs.com (Package settings ->
+  #    Trusted Publisher: GitHub Actions, repo rc4l/ZandronumMCP, workflow
+  #    release.yml). See README/notes.
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [attach-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # mint the OIDC token npm exchanges for publish auth
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted Publishing requires Node >= 22.14 and npm >= 11.5.1.
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+          # npm's guidance: do not cache deps in release builds.
+      - run: npm ci
+      # Belt-and-suspenders: make sure npm is new enough for OIDC.
+      - run: npm install -g npm@latest
+      # No token: npm authenticates via GitHub OIDC and attaches provenance.
+      # `npm publish` runs prepublishOnly (build) automatically. Skip if this
+      # exact version is already on npm (e.g. the very first release, published
+      # manually to create the package before Trusted Publishing was set up).
+      - name: Publish to npm (skip if version already exists)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "zandronum-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "zandronum-mcp@$VERSION already published — skipping."
+          else
+            npm publish
+          fi

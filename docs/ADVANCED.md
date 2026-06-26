@@ -6,9 +6,10 @@ manually, Linux/macOS, and working on this server. If you just want to use it, t
 
 ## Build the engine yourself
 
-Only needed if you're not grabbing a prebuilt binary from
-[Releases](https://github.com/rc4l/ZandronumMCP/releases) — e.g. on Linux/macOS, or
-if you want a custom build.
+Prebuilt, bridge-patched engines for **Windows** (`zandronum-mcp-engine-windows-x64.zip`)
+and **macOS** (`zandronum-mcp-engine-macos-x64.zip`) are attached to every
+[Release](https://github.com/rc4l/ZandronumMCP/releases) — grab one and skip this
+section. Build it yourself only on Linux, or if you want a custom build.
 
 Patch your Zandronum source tree (your AI agent can run this for you):
 
@@ -17,17 +18,25 @@ node engine-bridge/apply-bridge.mjs --src path/to/zandronum
 ```
 
 It copies in the overlay files and adds a few one-line, idempotent hooks;
-`--revert` undoes it.
+`--revert` undoes it. The bridge builds on all platforms (Winsock on Windows, BSD
+sockets elsewhere).
 
-Then build Zandronum its normal way — this is Zandronum's own CMake build, not ours.
-New to it? Start from the official guides at <https://wiki.zandronum.com/>
-("Compiling Zandronum") to get the toolchain set up.
+Then build Zandronum for your OS:
 
-- Windows: however you normally build it.
-- Linux / macOS: `cmake -B build -DCMAKE_BUILD_TYPE=Release . && cmake --build build`
-  from the source tree.
-
-The bridge builds on all three (Winsock on Windows, BSD sockets elsewhere).
+- **Windows / Linux:** build Zandronum its normal way — this is Zandronum's own
+  CMake build, not ours. New to it? Start from the official guides at
+  <https://wiki.zandronum.com/> ("Compiling Zandronum"). On Linux that's roughly
+  `cmake -B build -DCMAKE_BUILD_TYPE=Release . && cmake --build build` from the
+  source tree.
+- **macOS:** a plain `cmake` build does **not** work — FMOD Ex is x86_64-only (so
+  the engine builds for Intel and runs under Rosetta 2) and several deps must be
+  built from source. Use the turnkey harness
+  [rc4l/zandronum-macos-compile](https://github.com/rc4l/zandronum-macos-compile):
+  run `SOUND=1 ./build.sh`, apply the overlay to its `src/zandronum`, then
+  `SOUND=1 ./build.sh` again. The build links some dylibs by absolute path, so to
+  get a portable folder run `.github/scripts/package-macos-engine.sh <engine-root>
+  out.zip` (it bundles the dylibs and rewrites their load paths to `@loader_path`).
+  This is exactly what CI does — see [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ## Launch the game manually
 
@@ -46,6 +55,11 @@ $env:ZANDRONUM_BRIDGE_PORT = "7777"; ./zandronum.exe -iwad freedoom2.wad
 
 The bridge only starts when that variable is set, so a normal launch is unaffected.
 Instance 1 uses 7777, instance 2 uses 7778, and so on.
+
+On macOS, run `zandronum` from inside its unzipped folder — the bundled SDL/FMOD
+dylibs sit next to the binary (it's an Intel build, launched automatically under
+Rosetta 2). The MCP also sets `DYLD_LIBRARY_PATH` to that folder when it launches
+the engine for you.
 
 ## Run the server from source
 
