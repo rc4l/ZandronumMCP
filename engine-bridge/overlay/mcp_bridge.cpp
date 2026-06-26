@@ -181,6 +181,27 @@ namespace
 		}
 	}
 
+	// Append one console line to the startup logfile if ZANDRONUM_BRIDGE_LOG is set.
+	// Opened lazily on the first console output -- which happens during early startup
+	// (DECORATE/ACS parsing), BEFORE the socket bridge is up -- so this captures the
+	// compile/fatal errors that abort the engine before any MCP client can connect.
+	void LogWrite( const char *text )
+	{
+		static bool  checked = false;
+		static FILE *logf    = NULL;
+		if ( !checked )
+		{
+			checked = true;
+			const char *path = getenv( "ZANDRONUM_BRIDGE_LOG" );
+			if ( path && path[0] ) logf = fopen( path, "w" );
+		}
+		if ( logf )
+		{
+			fputs( text, logf );
+			fflush( logf ); // per-line flush so a crash still leaves the error on disk
+		}
+	}
+
 	void ListenThread()
 	{
 		for ( ;; )
@@ -321,7 +342,9 @@ void MCP_Bridge_Poll()
 
 void MCP_Bridge_TeeOutput( const char *text )
 {
-	if ( !g_enabled || g_client == MCP_INVALID_SOCKET || text == NULL ) return;
+	if ( text == NULL ) return;
+	LogWrite( text ); // capture to the startup logfile even before the bridge is up
+	if ( !g_enabled || g_client == MCP_INVALID_SOCKET ) return;
 	std::string esc;
 	JsonEscape( text, esc );
 	std::string json = "{\"v\":1,\"t\":\"out\",\"level\":0,\"text\":\"";
