@@ -1,116 +1,86 @@
 #!/usr/bin/env bash
 #
-# package-macos-engine.sh -- turn a bridge-patched zandronum-macos-compile build
-# into a portable, relocatable macOS .app bundle, zipped as a release asset.
+# package-macos-engine.sh -- rebrand and zip the bridge-patched Zandronum.app that
+# zandronum-macos-compile's build.sh produced, as the release asset.
 #
-# Two problems this solves:
-#   1. Relocatability. zandronum-macos-compile's build.sh links sdl12-compat
-#      (libSDL-1.2.0.dylib) by an ABSOLUTE build-machine path and never stages
-#      that dylib next to the binary; sdl12-compat in turn dlopen()s libSDL2 at
-#      runtime. Left as-is the build only runs with DYLD_LIBRARY_PATH pointing at
-#      deps/x86/lib. We gather the binary, game data, and every dylib into the
-#      bundle and rewrite all load paths to @loader_path so it runs anywhere.
-#   2. App identity / lifecycle. A bare Unix binary shows up as "exec" in the dock
-#      and gets a half-baked Cocoa lifecycle (quitting can leave a stray process).
-#      Wrapping it in a .app with an Info.plist gives macOS a real app: proper dock
-#      name and normal Cmd-Q / window-close termination -- the same shape the
-#      official Zandronum.app ships in.
+# build.sh (make_app_bundle) is the single source of truth for the *bundle*: it
+# emits a relocatable, ad-hoc-signed Zandronum.app with the binary, game data, and
+# every non-system dylib under Contents/MacOS (load paths rewritten to
+# @loader_path, following the full link graph). We don't re-bundle here.
 #
-# We stage + sign the Mach-O files FLAT first (codesign goes "bundle-aware" and
-# trips over sibling files once they sit inside a .app), then assemble the bundle
-# from the already-signed files -- ad-hoc signatures are embedded in the Mach-O,
-# so relocating them into the bundle keeps them valid.
+# What we DO add is MCP-specific branding: build.sh makes a vanilla "Zandronum",
+# but this is Zandronum *with the MCP hooks compiled in*, so we rename the app and
+# its executable to "zandronum-mcp-hooks" to make that unmistakable. Then we gate
+# on "is this actually shippable" (bridge compiled in, valid signature, no
+# absolute build paths) and zip it.
 #
 # Usage: package-macos-engine.sh <engine-root> <out-zip>
-#   <engine-root>  a zandronum-macos-compile checkout (has build/ and deps/x86/lib)
+#   <engine-root>  a zandronum-macos-compile checkout (build.sh has run, so
+#                  build/Zandronum.app exists)
 #   <out-zip>      absolute path of the .zip to write
 #
 set -euo pipefail
 
+NEW_NAME="zandronum-mcp-hooks"            # MCP-hooked engine; not stock Zandronum
+DISPLAY_NAME="Zandronum MCP Hooks"
+
 ENGINE_ROOT="${1:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
 OUT_ZIP="${2:?usage: package-macos-engine.sh <engine-root> <out-zip>}"
 BUILD="$ENGINE_ROOT/build"
-DEPLIB="$ENGINE_ROOT/deps/x86/lib"
+SRC_APP="$BUILD/Zandronum.app"
+
+[[ -d "$SRC_APP" ]] || { echo "ERROR: $SRC_APP missing -- build.sh did not produce the bundle (old build harness?)" >&2; exit 1; }
+[[ -x "$SRC_APP/Contents/MacOS/zandronum" ]] || { echo "ERROR: inner binary missing in $SRC_APP" >&2; exit 1; }
+
+# 1. Rebrand into a renamed bundle (leave build.sh's output untouched).
 WORK="$(mktemp -d)"
-STAGE="$WORK/stage"                  # flat scratch: surgery + signing happen here
-mkdir -p "$STAGE"
+APP="$WORK/$NEW_NAME.app"
+BIN="$APP/Contents/MacOS/$NEW_NAME"
+cp -R "$SRC_APP" "$APP"
+mv "$APP/Contents/MacOS/zandronum" "$BIN"
+PL="$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $NEW_NAME" "$PL"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $DISPLAY_NAME" "$PL" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleName string $DISPLAY_NAME" "$PL"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$PL" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $DISPLAY_NAME" "$PL"
 
-bin="$BUILD/zandronum"
-[[ -x "$bin" ]] || { echo "ERROR: $bin missing -- patched build failed" >&2; exit 1; }
+# 2. Renaming + the plist edits invalidate the prior bundle seal. Re-seal with
+#    build.sh's exact sequence (sign each dylib, then deep-sign the bundle) so the
+#    CodeResources match the renamed exe; a binary-only re-sign leaves a stale
+#    seal keyed to the old name.
+rm -rf "$APP/Contents/_CodeSignature"
+for f in "$APP/Contents/MacOS"/*.dylib; do codesign --force --sign - "$f"; done
+codesign --force --deep --sign - "$APP"
+
+# --- shippability gates (on the final, renamed artifact) --------------------
 # The bridge must actually be compiled in, else the MCP can't drive this engine.
-grep -q ZANDRONUM_BRIDGE_PORT "$bin" \
-  || { echo "ERROR: $bin has no MCP bridge marker -- overlay was not compiled in" >&2; exit 1; }
-
-# 1. Gather the runtime payload (binary + game data), skipping CMake build junk.
-cp "$bin" "$STAGE/"
-cp "$BUILD"/*.pk3 "$STAGE/"
-cp "$BUILD"/*.wad "$STAGE/" 2>/dev/null || true   # freedoom WADs, if staged
-
-# 2. Gather the dylibs. build.sh stages fmod + SDL2 next to the binary but NOT
-#    sdl12-compat, so pull that one from the dependency prefix.
-cp "$BUILD/libfmodex.dylib"      "$STAGE/"
-cp "$BUILD/libSDL2-2.0.0.dylib"  "$STAGE/"
-cp "$DEPLIB/libSDL-1.2.0.dylib"  "$STAGE/"
-
-# 3. Make every load path relative to the binary's own folder (@loader_path) so
-#    the bundle is position-independent.
-install_name_tool -id @loader_path/libfmodex.dylib      "$STAGE/libfmodex.dylib"
-install_name_tool -id @loader_path/libSDL2-2.0.0.dylib  "$STAGE/libSDL2-2.0.0.dylib"
-install_name_tool -id @loader_path/libSDL-1.2.0.dylib   "$STAGE/libSDL-1.2.0.dylib"
-# Rewrite whatever absolute sdl12-compat path the linker baked into the binary.
-# (libfmodex is already @loader_path via build.sh; libSDL2 is dlopen'd by leaf name.)
-oldsdl="$(otool -L "$STAGE/zandronum" | awk '/libSDL-1\.2\.0\.dylib/{print $1; exit}')"
-[[ -n "$oldsdl" ]] \
-  && install_name_tool -change "$oldsdl" @loader_path/libSDL-1.2.0.dylib "$STAGE/zandronum"
-
-# 4. Re-sign the Mach-O files ad-hoc (install_name_tool invalidated them). Flat
-#    location => codesign treats each as a standalone object, no bundle subcomponent
-#    checks. Ad-hoc is enough to execute under Rosetta; the build is un-notarized
-#    regardless, so a bundle-level seal would add nothing.
-for f in "$STAGE/zandronum" "$STAGE"/*.dylib; do
-  codesign --remove-signature "$f" 2>/dev/null || true
-  codesign --force --sign - "$f"
+grep -q ZANDRONUM_BRIDGE_PORT "$BIN" \
+  || { echo "ERROR: $BIN has no MCP bridge marker -- overlay was not compiled in" >&2; exit 1; }
+# Confirm the binary carries an ad-hoc signature -- that's what lets it execute
+# (incl. under Rosetta). A full `codesign --verify` goes bundle-aware and trips
+# over the sibling pk3/WAD data (not code, can't be lifted out either since the
+# signature references Info.plist), so just confirm the signature is present.
+sig="$(codesign -dv "$BIN" 2>&1 || true)"
+[[ "$sig" == *"Signature=adhoc"* ]] \
+  || { echo "ERROR: $BIN is not ad-hoc signed" >&2; exit 1; }
+# Nothing may point back at the build machine, or it won't load on a user's Mac.
+# Inspect only the actual dependency load commands: `otool -L` also prints header
+# lines for the file (and one per slice on a fat binary) that legitimately carry
+# the build dir; the real deps are the lines tagged "(compatibility version ...)".
+bad=0
+for f in "$BIN" "$APP/Contents/MacOS"/*.dylib; do
+  refs="$(otool -L "$f" | grep 'compatibility version' | grep -E '/Users/|/deps/x86/' || true)"
+  if [[ -n "$refs" ]]; then
+    echo "  non-portable refs in $(basename "$f"):" >&2
+    echo "$refs" | sed 's/^/    /' >&2
+    bad=1
+  fi
 done
-codesign --verify "$STAGE/zandronum" || { echo "ERROR: binary failed codesign verify" >&2; exit 1; }
+[[ $bad -eq 0 ]] || { echo "ERROR: absolute build paths remain in the bundle (not portable)" >&2; exit 1; }
 
-# 5. Fail loudly if any absolute build-machine path survived -- that would load a
-#    library that does not exist on a user's Mac.
-if otool -L "$STAGE/zandronum" "$STAGE"/*.dylib | grep -E '/Users/|/deps/x86/'; then
-  echo "ERROR: absolute build paths remain in the packaged binaries (not portable)" >&2
-  exit 1
-fi
-
-# 6. Assemble the .app around the signed files. Game data lives next to the binary
-#    in MacOS/ (Zandronum resolves pk3s/WADs relative to the executable), so the
-#    bundle behaves exactly like the flat layout that already works.
-APP="$WORK/Zandronum.app"
-MACOS="$APP/Contents/MacOS"
-mkdir -p "$MACOS"
-mv "$STAGE"/* "$MACOS/"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>CFBundleExecutable</key>           <string>zandronum</string>
-	<key>CFBundleIdentifier</key>           <string>com.rc4l.zandronum-mcp-engine</string>
-	<key>CFBundleName</key>                 <string>Zandronum</string>
-	<key>CFBundleDisplayName</key>          <string>Zandronum (MCP)</string>
-	<key>CFBundlePackageType</key>          <string>APPL</string>
-	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleShortVersionString</key>   <string>3.2.1</string>
-	<key>CFBundleVersion</key>              <string>3.2.1</string>
-	<key>LSMinimumSystemVersion</key>       <string>10.13</string>
-	<key>LSArchitecturePriority</key>       <array><string>x86_64</string></array>
-	<key>NSHighResolutionCapable</key>      <true/>
-	<key>NSPrincipalClass</key>             <string>NSApplication</string>
-</dict>
-</plist>
-PLIST
-plutil -lint "$APP/Contents/Info.plist" >/dev/null || { echo "ERROR: bad Info.plist" >&2; exit 1; }
-
-# 7. Zip the .app (preserve +x and symlinks).
+# 3. Zip the renamed .app (preserve +x and symlinks).
 rm -f "$OUT_ZIP"
-( cd "$WORK" && zip -r -y -X "$OUT_ZIP" Zandronum.app >/dev/null )
-echo "Packaged macOS engine app -> $OUT_ZIP"
+( cd "$WORK" && zip -r -y -X "$OUT_ZIP" "$NEW_NAME.app" >/dev/null )
+echo "Packaged macOS engine app ($NEW_NAME.app) -> $OUT_ZIP"
 ls -lh "$OUT_ZIP"

@@ -5,12 +5,13 @@ import { execFileSync } from "node:child_process";
 /**
  * Accept `ZANDRONUM_EXE` pointing at either the macOS `.app` bundle or the binary
  * directly. A `.app` resolves to its inner executable so users can set the
- * friendly bundle path (e.g. `…/Zandronum.app`); anything else is returned as-is.
+ * friendly bundle path (e.g. `…/zandronum-mcp-hooks.app`); anything else is
+ * returned as-is.
  */
 export function resolveEngineExe(exe: string): string {
   const trimmed = exe.replace(/[/\\]+$/, "");
   return trimmed.toLowerCase().endsWith(".app")
-    ? join(trimmed, "Contents", "MacOS", "zandronum")
+    ? join(trimmed, "Contents", "MacOS", "zandronum-mcp-hooks")
     : exe;
 }
 

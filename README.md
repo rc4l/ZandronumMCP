@@ -11,10 +11,10 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
 1. **Download the engine.** Grab the build for your OS from
    [Releases](https://github.com/rc4l/ZandronumMCP/releases) and unzip it anywhere.
-   - **Windows:** `zandronum-mcp-engine-windows-x64.zip` → point `ZANDRONUM_EXE` at `zandronum.exe`.
-   - **macOS:** `zandronum-mcp-engine-macos-x64.zip` unzips to **`Zandronum.app`** (Intel build,
-     runs under Rosetta 2) → point `ZANDRONUM_EXE` at the `Zandronum.app` (the MCP finds the
-     binary inside it).
+   - **Windows:** `zandronum-mcp-engine-windows-x64.zip` → point `ZANDRONUM_EXE` at `zandronum-mcp-hooks.exe`.
+   - **macOS:** `zandronum-mcp-engine-macos-x64.zip` unzips to **`zandronum-mcp-hooks.app`** (Intel
+     build, runs under Rosetta 2) → point `ZANDRONUM_EXE` at the `.app` (the MCP finds the binary
+     inside it).
    - **Linux or a custom build:**
      [build it yourself](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).
 
