@@ -49,8 +49,15 @@ export function hasMarker(file, marker) {
  * Index of the first line matching `anchor` (a regex source string), optionally
  * only after the first line matching `scopeAfter`. Case-insensitive, mirroring
  * PowerShell's default -match. Throws (naming the pattern) if a landmark is gone.
+ *
+ * When `requireTopLevel` is set, only a match OUTSIDE every `#if/#ifdef/#ifndef`
+ * block counts. This matters for the `#include "mcp_*.h"` insertions: the first
+ * `#include` in a file can be platform-guarded (e.g. d_main.cpp opens with
+ * Windows-only `#include <direct.h>` inside `#ifdef _WIN32`). Anchoring there
+ * would bury the bridge include in a branch that non-Windows compiles out,
+ * leaving its symbols undeclared — so we skip to the first unconditional include.
  */
-export function findAnchorIndex(lines, anchor, scopeAfter) {
+export function findAnchorIndex(lines, anchor, scopeAfter, requireTopLevel = false) {
   let start = 0;
   if (scopeAfter) {
     start = -1;
@@ -61,7 +68,15 @@ export function findAnchorIndex(lines, anchor, scopeAfter) {
     if (start < 0) throw new Error(`Scope anchor /${scopeAfter}/ not found.`);
   }
   const re = new RegExp(anchor, "i");
+  let depth = 0;
   for (let i = start; i < lines.length; i++) {
+    if (requireTopLevel) {
+      if (depth === 0 && re.test(lines[i])) return i;
+      const t = lines[i].trim();
+      if (/^#\s*(if|ifdef|ifndef)\b/.test(t)) depth++;
+      else if (/^#\s*endif\b/.test(t)) depth = Math.max(0, depth - 1);
+      continue;
+    }
     if (re.test(lines[i])) return i;
   }
   throw new Error(`Anchor /${anchor}/ not found (see anchors.md -- upstream may have moved).`);
@@ -75,7 +90,7 @@ export function appendBlock(file, body) {
 }
 
 /** Idempotent, marker-guarded one-line insertion before/after an anchor. */
-export function insertLine(file, { anchor, line, marker, position = "After", scopeAfter }, log) {
+export function insertLine(file, { anchor, line, marker, position = "After", scopeAfter, requireTopLevel = false }, log) {
   const name = basename(file);
   if (hasMarker(file, marker)) {
     log(`  = already patched: ${name} (${marker})`);
@@ -84,7 +99,7 @@ export function insertLine(file, { anchor, line, marker, position = "After", sco
   const text = readFileSync(file, "utf8");
   const eol = detectEol(text);
   const lines = text.split(/\r?\n/);
-  const idx = findAnchorIndex(lines, anchor, scopeAfter);
+  const idx = findAnchorIndex(lines, anchor, scopeAfter, requireTopLevel);
   const at = position === "After" ? idx + 1 : idx;
   lines.splice(at, 0, line);
   writeFileSync(file, lines.join(eol));
@@ -134,7 +149,7 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
 
   // 2. d_main.cpp -- include + per-frame poll inside D_DoomLoop (all modes).
   insertLine(dmain, {
-    anchor: "^\\s*#include",
+    anchor: "^\\s*#include", requireTopLevel: true,
     line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
   }, log);
   insertLine(dmain, {
@@ -145,7 +160,7 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
 
   // 3. c_console.cpp -- include + tee every printed line.
   insertLine(cconsole, {
-    anchor: "^\\s*#include",
+    anchor: "^\\s*#include", requireTopLevel: true,
     line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
   }, log);
   insertLine(cconsole, {
@@ -155,7 +170,7 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
 
   // 3a. v_text.cpp -- tee every drawn HUD string (DrawTextV is the funnel).
   insertLine(vtext, {
-    anchor: "^\\s*#include",
+    anchor: "^\\s*#include", requireTopLevel: true,
     line: '#include "mcp_hud.h"', marker: '#include "mcp_hud.h"',
   }, log);
   insertLine(vtext, {
@@ -167,7 +182,7 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
   // 3a'. v_draw.cpp -- tee every drawn HUD image (non-virtual DrawTexture funnel;
   //      font glyphs are filtered out inside the tee).
   insertLine(vdraw, {
-    anchor: "^\\s*#include",
+    anchor: "^\\s*#include", requireTopLevel: true,
     line: '#include "mcp_hud.h"', marker: '#include "mcp_hud.h"',
   }, log);
   insertLine(vdraw, {
