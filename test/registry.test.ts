@@ -38,15 +38,32 @@ describe("InstanceRegistry", () => {
     expect(registry.has(1)).toBe(false);
   });
 
-  it("launch spawns with the right args/env, waits, and attaches", async () => {
+  it("closeAll kills launched children too (no stray processes)", async () => {
+    bridge = await FakeBridge.start();
+    let killed = false;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 7, kill: () => (killed = true) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    registry.closeAll();
+    expect(killed).toBe(true);
+    expect(registry.has(1)).toBe(false);
+  });
+
+  it("launch spawns with the right args/env, clears quarantine, waits, and attaches", async () => {
     bridge = await FakeBridge.start();
     const spawned: Array<{ exe: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const dequarantined: string[] = [];
     const io: LaunchIo = {
       spawn: (exe, args, _cwd, env) => {
         spawned.push({ exe, args, env });
         return { pid: 123, kill: () => {} };
       },
       waitForPort: async () => {},
+      clearQuarantine: (exe) => void dequarantined.push(exe),
     };
     registry = new InstanceRegistry();
     const client = await registry.launch(
@@ -57,6 +74,7 @@ describe("InstanceRegistry", () => {
     expect(spawned[0].args).toEqual(["-iwad", "freedoom2.wad"]);
     expect(spawned[0].env.ZANDRONUM_BRIDGE_PORT).toBe(String(bridge.port));
     expect(spawned[0].env.ZANDRONUM_BRIDGE_LOG).toBe("C:/tmp/inst1.log");
+    expect(dequarantined).toEqual(["zandronum.exe"]);
     expect(registry.has(1)).toBe(true);
     expect(registry.get(1)).toBe(client);
   });
@@ -67,6 +85,7 @@ describe("InstanceRegistry", () => {
     const io: LaunchIo = {
       spawn: () => ({ pid: 1, kill: () => (killed = true) }),
       waitForPort: async () => {},
+      clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
     await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -99,6 +118,9 @@ describe("defaultLaunchIo", () => {
     try {
       await defaultLaunchIo.waitForPort("127.0.0.1", port);
       expect(typeof child.pid).toBe("number");
+      // No-op off macOS; on macOS it best-effort clears quarantine. Either way
+      // it must never throw for a path that isn't quarantined.
+      expect(() => defaultLaunchIo.clearQuarantine(process.execPath)).not.toThrow();
     } finally {
       child.kill();
     }

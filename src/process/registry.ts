@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { BridgeClient } from "../bridge/transport.js";
-import { buildLaunchArgs, buildLaunchEnv, waitForPort, type LaunchOptions } from "./launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, waitForPort, type LaunchOptions } from "./launch.js";
 
 export interface InstanceConfig {
   id: number;
@@ -17,15 +17,22 @@ export interface ChildHandle {
 export interface LaunchIo {
   spawn: (exe: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) => ChildHandle;
   waitForPort: (host: string, port: number) => Promise<void>;
+  /** Clear macOS quarantine from the engine folder so Gatekeeper won't kill it. */
+  clearQuarantine: (exe: string) => void;
 }
 
 export const defaultLaunchIo: LaunchIo = {
   spawn: (exe, args, cwd, env) => {
     const cp = nodeSpawn(exe, args, { cwd, env, detached: true, stdio: "ignore" });
     cp.unref();
-    return { pid: cp.pid, kill: () => void cp.kill() };
+    // SIGKILL, not the default SIGTERM: the engine doesn't reliably stop on a
+    // graceful terminate, so force-kill to avoid leaving a stray process behind.
+    // (Note: this still can't reap a process already wedged in the kernel during
+    // teardown — see the macOS/Rosetta exit-hang issue.)
+    return { pid: cp.pid, kill: () => void cp.kill("SIGKILL") };
   },
   waitForPort: (host, port) => waitForPort(host, port),
+  clearQuarantine: (exe) => clearQuarantine(exe),
 };
 
 export interface LaunchConfig extends LaunchOptions {
@@ -57,6 +64,7 @@ export class InstanceRegistry {
     const args = buildLaunchArgs(config);
     const env = buildLaunchEnv(config.exe, config.port);
     if (config.logFile) env.ZANDRONUM_BRIDGE_LOG = config.logFile;
+    io.clearQuarantine(config.exe);
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
     await io.waitForPort(host, config.port);
@@ -87,7 +95,11 @@ export class InstanceRegistry {
     }
   }
 
+  /** Kill every launched child and detach every client. Called on MCP shutdown
+   *  so games the server spawned don't outlive it as stray dock processes. */
   closeAll(): void {
+    for (const child of this.children.values()) child.kill();
+    this.children.clear();
     for (const client of this.clients.values()) client.close();
     this.clients.clear();
   }
