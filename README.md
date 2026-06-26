@@ -14,9 +14,8 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    (Windows for now — other platforms:
    [build it yourself](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).)
 
-2. **Add the server.** In VS Code, put this in `.vscode/mcp.json` (Cursor, Claude
-   Desktop, Windsurf, etc. use the same block but with `"mcpServers"` instead of
-   `"servers"`):
+2. Learn how to add MCP Servers to your preferred editor. In VS Code, put this in `.vscode/mcp.json` (Cursor, Claude
+   Desktop, Windsurf, etc. uses something similar. Go look it up yourself or have your AI agent do it for you)
 
    ```json
    {
@@ -33,20 +32,9 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    }
    ```
 
-   Point `ZANDRONUM_EXE` at the `zandronum.exe` you just unzipped, then restart.
-   (Claude Code is simplest — skip the JSON: `claude mcp add zandronum -- npx -y zandronum-mcp`.)
+   Point `ZANDRONUM_EXE` at the `zandronum.exe` you just unzipped, then restart your chat session.
 
-3. **Go.** Ask your agent to launch the game and start working.
-
-## What it can do
-
-Some of the tools your agent gets:
-
-- run_command — run any console command
-- summon — spawn an actor
-- give — give yourself an item
-- load_map — load a map (MAP01, E1M1, ...)
-- list_actor_classes — list the actors the game knows about
+3. You're done. You can now ask your agent to start working on the engine or start making mods.
 
 ## Advanced
 
