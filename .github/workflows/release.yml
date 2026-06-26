@@ -25,8 +25,9 @@ env:
   # (see engine-bridge/anchors.md). Override via the manual-run input.
   ZANDRONUM_REF: ${{ github.event.inputs.zandronum_ref || 'ZA_3.2.1' }}
   # The Windows build system (CMake + deps + build.ps1). A stock binary cannot
-  # be patched, so we build from source using rc4l's ready-made build harness.
-  BUILD_REPO: rc4l/zandronum-windows
+  # be patched, so we build from source using rc4l's ready-made build harness
+  # (the one with maintained, known-working CI).
+  BUILD_REPO: rc4l/zandronum-windows-compile
   BUILD_REF: main
 
 jobs:
@@ -93,6 +94,23 @@ jobs:
         run: |
           choco install hg -y
           Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\Mercurial"
+
+      # build.ps1 pulls NASM from www.nasm.us, which times out from CI runners.
+      # Get-NASM skips the download if deps/nasm/nasm.exe already exists, so stage
+      # it from Chocolatey's reliable CDN first.
+      - name: Pre-provide NASM (avoid the flaky www.nasm.us download)
+        shell: pwsh
+        working-directory: engine
+        run: |
+          choco install nasm -y --no-progress
+          $nasm = "C:\Program Files\NASM\nasm.exe"
+          if (-not (Test-Path $nasm)) {
+            $found = Get-ChildItem "C:\Program Files\NASM" -Recurse -Filter nasm.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $nasm = $found.FullName } else { throw "nasm.exe not found after choco install" }
+          }
+          New-Item -ItemType Directory -Force -Path deps/nasm | Out-Null
+          Copy-Item $nasm deps/nasm/nasm.exe -Force
+          Write-Host "Staged NASM at deps/nasm/nasm.exe (from $nasm)"
 
       - name: Build stock Zandronum (downloads deps + source, configures CMake)
         shell: pwsh
