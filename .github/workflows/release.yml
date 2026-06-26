@@ -31,9 +31,16 @@ env:
 
 jobs:
   # 1. Publish the MCP server to npm (only on a version tag).
+  #    Uses npm Trusted Publishing (OIDC) — no stored NPM_TOKEN secret. The
+  #    publisher must be configured once on npmjs.com (Package settings ->
+  #    Trusted Publisher: GitHub Actions, repo rc4l/ZandronumMCP, workflow
+  #    release.yml). See README/notes.
   publish-npm:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # mint the OIDC token npm exchanges for publish auth
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,10 +50,11 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
       - run: npm run coverage     # gate publish on the 100% suite
+      # Trusted Publishing needs npm >= 11.5.1; Node 20 ships npm 10.
+      - run: npm install -g npm@latest
+      # No token: npm authenticates via GitHub OIDC and attaches provenance.
       # `npm publish` runs prepublishOnly (build) automatically.
       - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # 2. Build the bridge-patched Windows engine and ship it.
   engine-windows:
