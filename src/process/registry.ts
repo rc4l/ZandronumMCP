@@ -25,7 +25,11 @@ export const defaultLaunchIo: LaunchIo = {
   spawn: (exe, args, cwd, env) => {
     const cp = nodeSpawn(exe, args, { cwd, env, detached: true, stdio: "ignore" });
     cp.unref();
-    return { pid: cp.pid, kill: () => void cp.kill() };
+    // SIGKILL, not the default SIGTERM: the engine doesn't reliably stop on a
+    // graceful terminate, so force-kill to avoid leaving a stray process behind.
+    // (Note: this still can't reap a process already wedged in the kernel during
+    // teardown — see the macOS/Rosetta exit-hang issue.)
+    return { pid: cp.pid, kill: () => void cp.kill("SIGKILL") };
   },
   waitForPort: (host, port) => waitForPort(host, port),
   clearQuarantine: (exe) => clearQuarantine(exe),
@@ -91,7 +95,11 @@ export class InstanceRegistry {
     }
   }
 
+  /** Kill every launched child and detach every client. Called on MCP shutdown
+   *  so games the server spawned don't outlive it as stray dock processes. */
   closeAll(): void {
+    for (const child of this.children.values()) child.kill();
+    this.children.clear();
     for (const client of this.clients.values()) client.close();
     this.clients.clear();
   }

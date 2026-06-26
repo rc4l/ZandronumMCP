@@ -17,15 +17,6 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    binary. (Linux or a custom build:
    [build it yourself](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).)
 
-   > **macOS first run — "Apple could not verify…":** the engine isn't notarized
-   > (like Zandronum itself), so Gatekeeper blocks the downloaded copy. The MCP
-   > clears this for you when it launches the game. To run it by hand, clear the
-   > download flag once:
-   > ```bash
-   > xattr -dr com.apple.quarantine /path/to/zandronum-mcp-engine-macos-x64
-   > ```
-   > (or open **System Settings → Privacy & Security → Open Anyway** after the first block).
-
 2. Learn how to add MCP Servers to your preferred editor. In VS Code, put this in `.vscode/mcp.json` (Cursor, Claude
    Desktop, Windsurf, etc. uses something similar. Go look it up yourself or have your AI agent do it for you)
 

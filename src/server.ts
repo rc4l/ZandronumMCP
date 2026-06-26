@@ -1141,11 +1141,31 @@ server.registerTool(
   },
 );
 
+// Kill any games we launched when the server goes away, so they don't linger as
+// stray dock processes after the editor closes the MCP session. Detached + unref
+// keeps the game off our event loop, but it also means nothing else reaps it.
+let cleanedUp = false;
+function cleanupAndExit(code: number): void {
+  if (!cleanedUp) {
+    cleanedUp = true;
+    try { registry.closeAll(); } catch { /* best-effort */ }
+  }
+  process.exit(code);
+}
+
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stdout is the MCP channel; logs go to stderr.
   process.stderr.write(`zandronum-mcp ready (bridge ${DEFAULT_HOST}:${BASE_PORT}+)\n`);
+
+  // The client closing stdin (session ended) or a terminating signal both mean
+  // "shut down" — reap launched instances first. `exit` is the sync safety net.
+  process.stdin.on("end", () => cleanupAndExit(0));
+  process.stdin.on("close", () => cleanupAndExit(0));
+  process.on("SIGINT", () => cleanupAndExit(0));
+  process.on("SIGTERM", () => cleanupAndExit(0));
+  process.on("exit", () => { try { registry.closeAll(); } catch { /* best-effort */ } });
 }
 
 main().catch((err: unknown) => {

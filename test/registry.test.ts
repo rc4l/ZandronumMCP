@@ -38,6 +38,21 @@ describe("InstanceRegistry", () => {
     expect(registry.has(1)).toBe(false);
   });
 
+  it("closeAll kills launched children too (no stray processes)", async () => {
+    bridge = await FakeBridge.start();
+    let killed = false;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 7, kill: () => (killed = true) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    registry.closeAll();
+    expect(killed).toBe(true);
+    expect(registry.has(1)).toBe(false);
+  });
+
   it("launch spawns with the right args/env, clears quarantine, waits, and attaches", async () => {
     bridge = await FakeBridge.start();
     const spawned: Array<{ exe: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
