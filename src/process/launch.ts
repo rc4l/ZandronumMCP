@@ -1,4 +1,28 @@
 import net from "node:net";
+import { dirname } from "node:path";
+
+/**
+ * Build the child-process environment for a launched instance: the bridge port
+ * the engine listens on, plus — on macOS — the dylib search path the engine
+ * bundle needs. The macOS release engine ships its SDL/FMOD dylibs next to the
+ * binary; sdl12-compat dlopen()s libSDL2 by leaf name at runtime, which dyld
+ * only resolves via DYLD_LIBRARY_PATH, so we point it at the binary's folder.
+ * (`@loader_path` covers the directly-linked dylibs; this covers the dlopen.)
+ * Pure and parameterised so both branches are unit-testable off-platform.
+ */
+export function buildLaunchEnv(
+  exe: string,
+  port: number,
+  base: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, ZANDRONUM_BRIDGE_PORT: String(port) };
+  if (platform === "darwin") {
+    const dir = dirname(exe);
+    env.DYLD_LIBRARY_PATH = env.DYLD_LIBRARY_PATH ? `${dir}:${env.DYLD_LIBRARY_PATH}` : dir;
+  }
+  return env;
+}
 
 /** Game options that map to Zandronum command-line arguments. */
 export interface LaunchOptions {
