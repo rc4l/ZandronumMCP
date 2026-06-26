@@ -53,8 +53,17 @@ jobs:
       # Trusted Publishing needs npm >= 11.5.1; Node 20 ships npm 10.
       - run: npm install -g npm@latest
       # No token: npm authenticates via GitHub OIDC and attaches provenance.
-      # `npm publish` runs prepublishOnly (build) automatically.
-      - run: npm publish
+      # `npm publish` runs prepublishOnly (build) automatically. Skip if this
+      # exact version is already on npm (e.g. the very first release, published
+      # manually to create the package before Trusted Publishing was set up).
+      - name: Publish to npm (skip if version already exists)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "zandronum-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "zandronum-mcp@$VERSION already published — skipping."
+          else
+            npm publish
+          fi
 
   # 2. Build the bridge-patched Windows engine and ship it.
   engine-windows:
