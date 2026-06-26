@@ -1,6 +1,35 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { buildLaunchArgs, buildLaunchEnv, waitForPort, tryConnect } from "../src/process/launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, waitForPort, tryConnect } from "../src/process/launch.js";
+
+describe("clearQuarantine", () => {
+  it("does nothing off macOS", () => {
+    const calls: Array<[string, string[]]> = [];
+    clearQuarantine("/games/zandronum.exe", "win32", (cmd, args) => void calls.push([cmd, args]));
+    clearQuarantine("/games/zandronum", "linux", (cmd, args) => void calls.push([cmd, args]));
+    expect(calls).toEqual([]);
+  });
+
+  it("on macOS runs `xattr -dr com.apple.quarantine` against the engine's folder", () => {
+    const calls: Array<[string, string[]]> = [];
+    clearQuarantine("/Apps/zandronum/zandronum", "darwin", (cmd, args) => void calls.push([cmd, args]));
+    expect(calls).toEqual([["xattr", ["-dr", "com.apple.quarantine", "/Apps/zandronum"]]]);
+  });
+
+  it("swallows failures (best-effort)", () => {
+    expect(() =>
+      clearQuarantine("/Apps/zandronum/zandronum", "darwin", () => {
+        throw new Error("xattr missing");
+      }),
+    ).not.toThrow();
+  });
+
+  it("uses a real default runner without throwing (covers the default exec path)", () => {
+    // platform forced to darwin but run defaulted: on a non-mac CI runner xattr is
+    // absent so execFileSync throws — which must be swallowed, not propagated.
+    expect(() => clearQuarantine("/nonexistent/zandronum", "darwin")).not.toThrow();
+  });
+});
 
 describe("buildLaunchEnv", () => {
   it("always sets the bridge port from the instance port", () => {

@@ -1,5 +1,34 @@
 import net from "node:net";
 import { dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+
+/**
+ * Best-effort strip of `com.apple.quarantine` from the engine folder on macOS.
+ *
+ * Engines downloaded from the GitHub Release are ad-hoc signed but not notarized,
+ * and the download tags every file with `com.apple.quarantine`. Gatekeeper then
+ * refuses the binary ("Apple could not verify..."), which also kills it when we
+ * spawn it. Clearing the attribute from the engine's directory lets the
+ * already-bridge-verified binary the user pointed us at actually launch — the
+ * same `xattr -dr` the manual instructions document, just done for them.
+ *
+ * No-op off macOS. Failures are swallowed: the user can still clear it by hand,
+ * or it may already be clear (e.g. a self-built engine). `platform`/`run` are
+ * injectable for tests.
+ */
+export function clearQuarantine(
+  exe: string,
+  platform: NodeJS.Platform = process.platform,
+  run: (cmd: string, args: string[]) => void = (cmd, args) =>
+    void execFileSync(cmd, args, { stdio: "ignore" }),
+): void {
+  if (platform !== "darwin") return;
+  try {
+    run("xattr", ["-dr", "com.apple.quarantine", dirname(exe)]);
+  } catch {
+    // not fatal — fall back to the manual instructions in the README
+  }
+}
 
 /**
  * Build the child-process environment for a launched instance: the bridge port

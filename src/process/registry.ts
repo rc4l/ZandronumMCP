@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { BridgeClient } from "../bridge/transport.js";
-import { buildLaunchArgs, buildLaunchEnv, waitForPort, type LaunchOptions } from "./launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, waitForPort, type LaunchOptions } from "./launch.js";
 
 export interface InstanceConfig {
   id: number;
@@ -17,6 +17,8 @@ export interface ChildHandle {
 export interface LaunchIo {
   spawn: (exe: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) => ChildHandle;
   waitForPort: (host: string, port: number) => Promise<void>;
+  /** Clear macOS quarantine from the engine folder so Gatekeeper won't kill it. */
+  clearQuarantine: (exe: string) => void;
 }
 
 export const defaultLaunchIo: LaunchIo = {
@@ -26,6 +28,7 @@ export const defaultLaunchIo: LaunchIo = {
     return { pid: cp.pid, kill: () => void cp.kill() };
   },
   waitForPort: (host, port) => waitForPort(host, port),
+  clearQuarantine: (exe) => clearQuarantine(exe),
 };
 
 export interface LaunchConfig extends LaunchOptions {
@@ -57,6 +60,7 @@ export class InstanceRegistry {
     const args = buildLaunchArgs(config);
     const env = buildLaunchEnv(config.exe, config.port);
     if (config.logFile) env.ZANDRONUM_BRIDGE_LOG = config.logFile;
+    io.clearQuarantine(config.exe);
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
     await io.waitForPort(host, config.port);
