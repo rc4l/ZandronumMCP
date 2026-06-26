@@ -6,6 +6,7 @@ import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
 import { hasBridge } from "./process/verify.js";
+import { parseStartupErrors, tailLines } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
@@ -54,6 +55,17 @@ function loadMap(file: string | undefined, map: string): MapData {
 }
 
 const registry = new InstanceRegistry();
+
+// Per-instance engine console logfile (ZANDRONUM_BRIDGE_LOG). Lets us read back
+// DECORATE/ACS compile errors when an instance dies before the bridge ever opens.
+const logFiles = new Map<number, string>();
+function logPathFor(instance: number): string | undefined {
+  const known = logFiles.get(instance);
+  if (known) return known;
+  return ZANDRONUM_EXE
+    ? path.join(path.dirname(ZANDRONUM_EXE), `mcp-bridge-${portFor(instance)}.log`)
+    : undefined;
+}
 
 /** Lazily attach to instance N (port = BASE_PORT + N-1) on first use. */
 async function clientFor(instance: number) {
@@ -1057,23 +1069,39 @@ server.registerTool(
       return { isError: true, content: [{ type: "text", text: `ZANDRONUM_EXE at ${ZANDRONUM_EXE} has no MCP bridge — that looks like a stock Zandronum (or GZDoom), which the MCP can't drive. Point it at a bridge-patched build: download one from the GitHub Releases, or build it yourself (see docs/ADVANCED.md).` }] };
     }
     const port = portFor(instance);
-    await registry.launch(
-      {
-        id: instance,
-        exe: ZANDRONUM_EXE,
-        cwd: path.dirname(ZANDRONUM_EXE),
-        port,
-        iwad,
-        files,
-        map,
-        skill,
-        fullscreen,
-        width,
-        height,
-        extraArgs,
-      },
-      defaultLaunchIo,
-    );
+    const logFile = path.join(path.dirname(ZANDRONUM_EXE), `mcp-bridge-${port}.log`);
+    logFiles.set(instance, logFile);
+    try {
+      await registry.launch(
+        {
+          id: instance,
+          exe: ZANDRONUM_EXE,
+          cwd: path.dirname(ZANDRONUM_EXE),
+          port,
+          logFile,
+          iwad,
+          files,
+          map,
+          skill,
+          fullscreen,
+          width,
+          height,
+          extraArgs,
+        },
+        defaultLaunchIo,
+      );
+    } catch (e) {
+      // The bridge never opened. Most often that's a DECORATE/ACS compile error
+      // that aborted startup — surface it from the captured log instead of just
+      // reporting the timeout.
+      const msg = e instanceof Error ? e.message : String(e);
+      let detail = " (no compile errors found in the engine log — it may have crashed, or the bridge build is stale)";
+      if (existsSync(logFile)) {
+        const errs = parseStartupErrors(readFileSync(logFile, "utf8"));
+        if (errs.length) detail = `\n\nEngine log shows:\n${errs.join("\n")}`;
+      }
+      return { isError: true, content: [{ type: "text", text: `Instance ${instance} failed to come up: ${msg}.${detail}` }] };
+    }
     return { content: [{ type: "text", text: `launched instance ${instance} on bridge port ${port}` }] };
   },
 );
@@ -1088,6 +1116,28 @@ server.registerTool(
   async ({ instance }) => {
     registry.kill(instance);
     return { content: [{ type: "text", text: `killed instance ${instance}` }] };
+  },
+);
+
+server.registerTool(
+  "get_startup_errors",
+  {
+    title: "Get engine startup errors",
+    description:
+      "Read the engine's captured console log for an instance and surface DECORATE/ACS compile errors and fatal startup errors. Works even when the bridge never came up (e.g. the engine aborted on a bad script) — exactly when the other tools can't connect.",
+    inputSchema: { instance: instanceArg },
+  },
+  async ({ instance }) => {
+    const logFile = logPathFor(instance);
+    if (!logFile || !existsSync(logFile)) {
+      return { isError: true, content: [{ type: "text", text: `No engine log for instance ${instance}. Launch it via launch_instance (which enables logging), then re-run this if it failed to start.` }] };
+    }
+    const log = readFileSync(logFile, "utf8");
+    const errors = parseStartupErrors(log);
+    const body = errors.length
+      ? `Detected ${errors.length} error line(s) in the engine log:\n\n${errors.join("\n")}`
+      : `No compile/fatal errors detected. Last lines of the engine log for context:\n\n${tailLines(log).join("\n")}`;
+    return { content: [{ type: "text", text: body }] };
   },
 );
 

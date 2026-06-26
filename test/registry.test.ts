@@ -50,12 +50,13 @@ describe("InstanceRegistry", () => {
     };
     registry = new InstanceRegistry();
     const client = await registry.launch(
-      { id: 1, exe: "zandronum.exe", cwd: ".", port: bridge.port, iwad: "freedoom2.wad" },
+      { id: 1, exe: "zandronum.exe", cwd: ".", port: bridge.port, iwad: "freedoom2.wad", logFile: "C:/tmp/inst1.log" },
       io,
     );
     expect(spawned[0].exe).toBe("zandronum.exe");
     expect(spawned[0].args).toEqual(["-iwad", "freedoom2.wad"]);
     expect(spawned[0].env.ZANDRONUM_BRIDGE_PORT).toBe(String(bridge.port));
+    expect(spawned[0].env.ZANDRONUM_BRIDGE_LOG).toBe("C:/tmp/inst1.log");
     expect(registry.has(1)).toBe(true);
     expect(registry.get(1)).toBe(client);
   });

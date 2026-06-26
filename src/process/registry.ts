@@ -34,6 +34,9 @@ export interface LaunchConfig extends LaunchOptions {
   cwd: string;
   port: number;
   host?: string;
+  /** If set, the engine writes its console log here (ZANDRONUM_BRIDGE_LOG) so
+   *  startup/compile errors can be read back even when the bridge never opens. */
+  logFile?: string;
 }
 
 /** Tracks bridge connections — and now child processes — for one or more instances. */
@@ -52,7 +55,8 @@ export class InstanceRegistry {
   async launch(config: LaunchConfig, io: LaunchIo): Promise<BridgeClient> {
     const host = config.host ?? "127.0.0.1";
     const args = buildLaunchArgs(config);
-    const env = { ...process.env, ZANDRONUM_BRIDGE_PORT: String(config.port) };
+    const env: NodeJS.ProcessEnv = { ...process.env, ZANDRONUM_BRIDGE_PORT: String(config.port) };
+    if (config.logFile) env.ZANDRONUM_BRIDGE_LOG = config.logFile;
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
     await io.waitForPort(host, config.port);
