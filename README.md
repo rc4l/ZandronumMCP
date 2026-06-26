@@ -14,12 +14,13 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    (Windows for now — other platforms:
    [build it yourself](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).)
 
-2. **Add the server to your editor/client.** Most (Claude Code, Claude Desktop,
-   Cursor, ...) take a JSON block:
+2. **Add the server.** In VS Code, put this in `.vscode/mcp.json` (Cursor, Claude
+   Desktop, Windsurf, etc. use the same block but with `"mcpServers"` instead of
+   `"servers"`):
 
    ```json
    {
-     "mcpServers": {
+     "servers": {
        "zandronum": {
          "command": "npx",
          "args": ["-y", "zandronum-mcp"],
@@ -32,8 +33,8 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    }
    ```
 
-   Point `ZANDRONUM_EXE` at the `zandronum.exe` you just unzipped, then restart your
-   client. Claude Code one-liner: `claude mcp add zandronum -- npx -y zandronum-mcp`.
+   Point `ZANDRONUM_EXE` at the `zandronum.exe` you just unzipped, then restart.
+   (Claude Code is simplest — skip the JSON: `claude mcp add zandronum -- npx -y zandronum-mcp`.)
 
 3. **Go.** Ask your agent to launch the game and start working.
 
