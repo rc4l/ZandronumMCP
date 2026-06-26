@@ -45,12 +45,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          # Trusted Publishing requires Node >= 22.14 and npm >= 11.5.1.
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
+          # npm's guidance: do not cache deps in release builds.
       - run: npm ci
       - run: npm run coverage     # gate publish on the 100% suite
-      # Trusted Publishing needs npm >= 11.5.1; Node 20 ships npm 10.
+      # Belt-and-suspenders: make sure npm is new enough for OIDC.
       - run: npm install -g npm@latest
       # No token: npm authenticates via GitHub OIDC and attaches provenance.
       # `npm publish` runs prepublishOnly (build) automatically. Skip if this
