@@ -122,6 +122,10 @@ jobs:
           if (-not (Test-Path build/Release/zandronum.exe)) {
             throw "build/Release/zandronum.exe missing — patched build failed"
           }
+          # This is Zandronum *with the MCP hooks compiled in*, not stock Zandronum
+          # — rename the exe so that's unmistakable. (Zandronum finds its pk3s next
+          # to the exe by directory, so the executable name doesn't matter to it.)
+          Rename-Item build/Release/zandronum.exe zandronum-mcp-hooks.exe
           Compress-Archive -Path build/Release/* -DestinationPath "$env:GITHUB_WORKSPACE/zandronum-mcp-engine-windows-x64.zip" -Force
 
       - name: Upload the engine as a workflow artifact
@@ -133,9 +137,10 @@ jobs:
 
   # 2. Build the bridge-patched macOS engine -> workflow artifact.
   #    FMOD Ex ships x86_64 only, so this is an Intel build that runs under
-  #    Rosetta 2 (see rc4l/zandronum-macos-compile). build.sh links sdl12-compat
-  #    by an absolute build-machine path, so package-macos-engine.sh relocates the
-  #    dylibs to @loader_path to make the zip portable.
+  #    Rosetta 2 (see rc4l/zandronum-macos-compile). build.sh assembles the
+  #    relocatable Zandronum.app; package-macos-engine.sh rebrands it to
+  #    zandronum-mcp-hooks.app, gates it (bridge marker, signature, no abs paths),
+  #    and zips it.
   engine-macos:
     needs: [test]
     runs-on: macos-latest

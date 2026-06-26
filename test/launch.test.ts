@@ -4,15 +4,15 @@ import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, wai
 
 describe("resolveEngineExe", () => {
   it("resolves a macOS .app bundle to its inner executable", () => {
-    expect(resolveEngineExe("/Apps/Zandronum.app")).toBe("/Apps/Zandronum.app/Contents/MacOS/zandronum");
+    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.app")).toBe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks");
   });
   it("tolerates a trailing slash and case", () => {
-    expect(resolveEngineExe("/Apps/Zandronum.APP/")).toBe("/Apps/Zandronum.APP/Contents/MacOS/zandronum");
+    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.APP/")).toBe("/Apps/zandronum-mcp-hooks.APP/Contents/MacOS/zandronum-mcp-hooks");
   });
   it("leaves a direct binary path untouched", () => {
-    expect(resolveEngineExe("/Apps/Zandronum.app/Contents/MacOS/zandronum")).toBe("/Apps/Zandronum.app/Contents/MacOS/zandronum");
-    expect(resolveEngineExe("/games/zandronum")).toBe("/games/zandronum");
-    expect(resolveEngineExe("C:/games/zandronum.exe")).toBe("C:/games/zandronum.exe");
+    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks")).toBe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks");
+    expect(resolveEngineExe("/games/zandronum-mcp-hooks")).toBe("/games/zandronum-mcp-hooks");
+    expect(resolveEngineExe("C:/games/zandronum-mcp-hooks.exe")).toBe("C:/games/zandronum-mcp-hooks.exe");
   });
 });
 
