@@ -1,6 +1,6 @@
 {
   "name": "zandronum-mcp",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "MCP server for driving and introspecting a local Zandronum dev build.",
   "type": "module",
   "repository": {
