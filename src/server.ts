@@ -3,8 +3,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
+import { hasBridge } from "./process/verify.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
@@ -997,6 +998,12 @@ server.registerTool(
   async ({ instance, iwad, files, map, skill, fullscreen, width, height, extraArgs }) => {
     if (!ZANDRONUM_EXE) {
       return { isError: true, content: [{ type: "text", text: "Set ZANDRONUM_EXE to the zandronum binary path (zandronum.exe on Windows, ./zandronum on Linux/macOS) to launch instances." }] };
+    }
+    if (!existsSync(ZANDRONUM_EXE)) {
+      return { isError: true, content: [{ type: "text", text: `ZANDRONUM_EXE not found at ${ZANDRONUM_EXE} — check the path.` }] };
+    }
+    if (!hasBridge(ZANDRONUM_EXE)) {
+      return { isError: true, content: [{ type: "text", text: `ZANDRONUM_EXE at ${ZANDRONUM_EXE} has no MCP bridge — that looks like a stock Zandronum (or GZDoom), which the MCP can't drive. Point it at a bridge-patched build: download one from the GitHub Releases, or build it yourself (see docs/ADVANCED.md).` }] };
     }
     const port = portFor(instance);
     await registry.launch(
