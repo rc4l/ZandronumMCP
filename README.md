@@ -34,7 +34,9 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
    Point `ZANDRONUM_EXE` at the `zandronum.exe` you just unzipped, then restart your chat session.
 
-3. You're done. You can now ask your agent to start working on the engine or start making mods.
+4. Verify with your preferred AI Agent by asking it, "Is Zandronum MCP loaded?" if it responds positively, then it is wired up.
+
+5. You're done. You can now ask your agent to start working on the engine or start making mods. Remember, the MCP only works with the custom build of Zandronum you downloaded or built from step 1.
 
 ## Advanced
 
