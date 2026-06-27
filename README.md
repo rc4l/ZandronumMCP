@@ -9,13 +9,13 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
 ## Setup
 
-1. **Download the engine.** Grab the build for your OS from
+1. Download the engine. Grab the build for your OS from
    [Releases](https://github.com/rc4l/ZandronumMCP/releases) and unzip it anywhere.
-   - **Windows:** `zandronum-mcp-engine-windows-x64.zip` → point `ZANDRONUM_EXE` at `zandronum-mcp-hooks.exe`.
-   - **macOS:** `zandronum-mcp-engine-macos-x64.zip` unzips to **`zandronum-mcp-hooks.app`** (Intel
+   - Windows: `zandronum-mcp-engine-windows-x64.zip` → point `ZANDRONUM_EXE` at `zandronum-mcp-hooks.exe`.
+   - macOS: `zandronum-mcp-engine-macos-x64.zip` unzips to **`zandronum-mcp-hooks.app`** (Intel
      build, runs under Rosetta 2) → point `ZANDRONUM_EXE` at the `.app` (the MCP finds the binary
      inside it).
-   - **Linux or a custom build:**
+   - Linux or a custom build:
      [build it yourself](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).
 
 2. Learn how to add MCP Servers to your preferred editor. In VS Code, put this in `.vscode/mcp.json` (Cursor, Claude
@@ -44,6 +44,6 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
 ## Advanced
 
-Building the engine yourself, Linux/macOS, launching manually, running the server
-from source, contributing →
-**[docs/ADVANCED.md](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md)**.
+Building the engine yourself, Linux, launching manually, running the server
+from source, contributing, etc: 
+[docs/ADVANCED.md](https://github.com/rc4l/ZandronumMCP/blob/main/docs/ADVANCED.md).
