@@ -41,10 +41,9 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
 ## Tools
 
-The server exposes 49 tools (run/cheat, ACS, scripts, map & render inspection, saves,
-process control, …). Your agent discovers them automatically; for a browsable list see
-**[README.tools.md](https://github.com/rc4l/ZandronumMCP/blob/main/README.tools.md)**
-(auto-generated from the source — `npm run docs:tools`).
+The server exposes tools (run, ACS, DECORATE, scripts, map & render inspection, saves,
+process control, etc). Your agent discovers them automatically; for a browsable list see
+[README.tools.md](https://github.com/rc4l/ZandronumMCP/blob/main/README.tools.md).
 
 ## Advanced
 
