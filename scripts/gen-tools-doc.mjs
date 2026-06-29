@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+//
+// gen-tools-doc.mjs -- auto-generate README.tools.md from src/server.ts.
+//
+// Parses the real source with the TypeScript compiler API (already a
+// devDependency), so it never runs the MCP server and never drifts from the
+// code. Tools are grouped by the `// --- section ---` header comments in
+// server.ts, in source order. Run: `npm run docs:tools`.
+//
+import ts from "typescript";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const serverPath = join(root, "src", "server.ts");
+const outPath = join(root, "README.tools.md");
+const source = readFileSync(serverPath, "utf8");
+
+const sf = ts.createSourceFile(serverPath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const lineOf = (pos) => sf.getLineAndCharacterOfPosition(pos).line;
+
+// 1. `// --- label ----` comment lines become category headers (skip the
+//    non-tool "configuration" block at the top).
+const sections = [];
+source.split("\n").forEach((text, i) => {
+  const m = text.match(/^\/\/ ---+\s*(.*?)\s*-*\s*$/);
+  if (m && !/^configuration/i.test(m[1])) {
+    sections.push({ line: i, label: m[1].replace(/\s*\(.*\)\s*$/, "").trim() });
+  }
+});
+const categoryForLine = (line) => {
+  let cat = "General";
+  for (const s of sections) {
+    if (s.line < line) cat = s.label;
+    else break;
+  }
+  return cat;
+};
+
+// 2. Resolve a string-literal value (tolerating "a" + "b" concatenation).
+const strVal = (node) => {
+  if (!node) return undefined;
+  if (ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return (strVal(node.left) ?? "") + (strVal(node.right) ?? "");
+  }
+  return undefined;
+};
+const propVal = (obj, key) => {
+  const p = obj.properties.find(
+    (pr) => ts.isPropertyAssignment(pr) && pr.name && pr.name.getText(sf) === key,
+  );
+  return p ? strVal(p.initializer) : undefined;
+};
+
+// 3. Collect every server.registerTool("name", { title, description, ... }, ...).
+const tools = [];
+const visit = (node) => {
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "registerTool"
+  ) {
+    const [nameArg, metaArg] = node.arguments;
+    const name = strVal(nameArg);
+    if (name && metaArg && ts.isObjectLiteralExpression(metaArg)) {
+      tools.push({
+        name,
+        title: propVal(metaArg, "title") ?? "",
+        description: (propVal(metaArg, "description") ?? "").replace(/\s+/g, " ").trim(),
+        category: categoryForLine(lineOf(node.getStart(sf))),
+      });
+    }
+  }
+  ts.forEachChild(node, visit);
+};
+visit(sf);
+
+if (tools.length === 0) {
+  console.error("No tools found — did server.registerTool() change shape?");
+  process.exit(1);
+}
+
+// 4. Group by category in first-seen (source) order and emit markdown.
+const order = [];
+const byCat = new Map();
+for (const t of tools) {
+  if (!byCat.has(t.category)) {
+    byCat.set(t.category, []);
+    order.push(t.category);
+  }
+  byCat.get(t.category).push(t);
+}
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+let md = `# Tools
+
+> **Auto-generated** from \`src/server.ts\` by \`scripts/gen-tools-doc.mjs\` — do not
+> edit by hand; run \`npm run docs:tools\` to regenerate.
+
+The MCP server exposes **${tools.length} tools**. Your agent also discovers them at
+runtime via each tool's \`description\`, so this is mainly for browsing.
+`;
+for (const cat of order) {
+  md += `\n## ${cap(cat)}\n\n`;
+  for (const t of byCat.get(cat)) {
+    md += `- **\`${t.name}\`** — ${t.description}\n`;
+  }
+}
+
+writeFileSync(outPath, md);
+console.log(`Wrote ${outPath} — ${tools.length} tools across ${order.length} categories.`);

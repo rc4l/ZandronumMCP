@@ -87,6 +87,7 @@ const instanceArg = z.number().int().positive().default(1);
 
 const server = new McpServer({ name: "zandronum-mcp", version: "0.2.0" });
 
+// --- commands, cheats & input -----------------------------------------------
 server.registerTool(
   "run_command",
   {
@@ -965,6 +966,7 @@ server.registerTool(
 
 const mapFileArg = z.string().optional();
 
+// --- map geometry (read-only) -----------------------------------------------
 server.registerTool(
   "map_info",
   {
@@ -1044,6 +1046,7 @@ server.registerTool(
   },
 );
 
+// --- process management -----------------------------------------------------
 server.registerTool(
   "launch_instance",
   {
