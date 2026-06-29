@@ -28,6 +28,7 @@
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "dev": "tsx src/server.ts",
+    "docs:tools": "node scripts/gen-tools-doc.mjs",
     "start": "node dist/server.js",
     "prepublishOnly": "npm run build"
   },

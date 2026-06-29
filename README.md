@@ -39,6 +39,13 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
 5. You're done. You can now ask your agent to start working on the engine or start making mods. Remember, the MCP only works with the custom build of Zandronum you downloaded or built from step 1.
 
+## Tools
+
+The server exposes 49 tools (run/cheat, ACS, scripts, map & render inspection, saves,
+process control, …). Your agent discovers them automatically; for a browsable list see
+**[README.tools.md](https://github.com/rc4l/ZandronumMCP/blob/main/README.tools.md)**
+(auto-generated from the source — `npm run docs:tools`).
+
 ## Advanced
 
 Building the engine yourself, Linux, launching manually, running the server
