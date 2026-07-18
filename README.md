@@ -4,6 +4,10 @@
 
 # zandronum-mcp
 
+![version](https://img.shields.io/npm/v/zandronum-mcp?label=version&color=blue)
+![last release](https://img.shields.io/github/release-date/rc4l/ZandronumMCP?label=last%20release&color=blue)
+![tools](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rc4l/ZandronumMCP/main/.github/badges/tools.json)
+
 Let an AI assistant supercharge Zandronum development from your editor: Write C++ code, ACS, DECORATE, fix bugs, the works.
 
 
