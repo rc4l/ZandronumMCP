@@ -32,6 +32,32 @@
   #define mcp_close_socket   ::close
 #endif
 
+// --- Portable process shim --------------------------------------------------
+// Used by the parent-death watchdog (below): an engine the MCP launched must not
+// outlive the MCP that launched it, or it lingers as a stale bridge holding its
+// port. These give us the current PID and a liveness check for the parent PID.
+#ifdef _WIN32
+  #include <process.h>
+  static int  mcp_getpid()          { return (int)GetCurrentProcessId(); }
+  static bool mcp_pid_alive( int pid )
+  {
+      HANDLE h = OpenProcess( SYNCHRONIZE, FALSE, (DWORD)pid );
+      if ( h == NULL ) return false;               // gone (or unqueryable)
+      DWORD w = WaitForSingleObject( h, 0 );
+      CloseHandle( h );
+      return w == WAIT_TIMEOUT;                     // still running
+  }
+#else
+  #include <signal.h>
+  #include <errno.h>
+  static int  mcp_getpid()          { return (int)getpid(); }
+  static bool mcp_pid_alive( int pid )
+  {
+      // kill(pid,0): 0 => alive; EPERM => alive but not ours; ESRCH => gone.
+      return ::kill( (pid_t)pid, 0 ) == 0 || errno == EPERM;
+  }
+#endif
+
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -108,6 +134,43 @@ namespace
 			return 0; // disabled / opt-in
 		int port = atoi( env );
 		return ( port > 0 && port < 65536 ) ? port : 0;
+	}
+
+	// The MCP server passes its own PID in ZANDRONUM_BRIDGE_PARENT_PID so a launched
+	// engine can tell when its controller has died and exit instead of lingering as
+	// an orphan on its bridge port. 0 = unset (engine started by hand, not by the
+	// MCP) -> the watchdog stays off and the engine behaves exactly as before.
+	int ParentPid()
+	{
+		const char *env = getenv( "ZANDRONUM_BRIDGE_PARENT_PID" );
+		if ( env == NULL || env[0] == '\0' ) return 0;
+		int pid = atoi( env );
+		return pid > 0 ? pid : 0;
+	}
+
+	// Watchdog: once the launching MCP process is gone, this engine is an orphan by
+	// definition (it exists only to serve that MCP), so vanish immediately. We use
+	// _exit rather than a clean shutdown on purpose: an orphan should just release
+	// its port and disappear, and skipping the engine's graphics/Rosetta teardown
+	// avoids the macOS exit-hang that would otherwise leave a wedged process behind.
+	void WatchdogThread( int parentPid )
+	{
+		int misses = 0;
+		for ( ;; )
+		{
+			std::this_thread::sleep_for( std::chrono::milliseconds( 1500 ) );
+			if ( mcp_pid_alive( parentPid ) ) { misses = 0; continue; }
+			// Require two consecutive misses (~3s) so a momentary PID-reuse race
+			// can't kill an engine whose parent is actually still alive.
+			if ( ++misses >= 2 )
+			{
+#ifdef _WIN32
+				TerminateProcess( GetCurrentProcess(), 0 );
+#else
+				_exit( 0 );
+#endif
+			}
+		}
 	}
 
 	// Extract the value of the JSON "text" field from a single-line command.
@@ -221,7 +284,13 @@ namespace
 				g_rxbuf.clear();
 			}
 
-			SendLine( "{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.3.0\",\"caps\":[\"cmd\",\"event\",\"time\"]}" );
+			// hello now advertises this engine's PID so the MCP can verify it attached
+			// to the process it just spawned (and not a stale bridge on the same port).
+			char hello[256];
+			snprintf( hello, sizeof( hello ),
+				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.4.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\"]}",
+				mcp_getpid() );
+			SendLine( hello );
 
 			char buf[1024];
 			for ( ;; )
@@ -284,6 +353,13 @@ namespace
 		g_initialized = true;
 		int port = BridgePort();
 		if ( port == 0 ) return; // opt-in: only runs with ZANDRONUM_BRIDGE_PORT set
+
+		// Arm the parent-death watchdog before anything else. Start it even if the
+		// bind below fails (e.g. a stale engine already holds the port): a bridgeless
+		// engine is exactly the kind that must still self-exit when the MCP dies.
+		int ppid = ParentPid();
+		if ( ppid != 0 )
+			std::thread( WatchdogThread, ppid ).detach();
 
 #ifdef _WIN32
 		WSADATA wsa;

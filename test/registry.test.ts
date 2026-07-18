@@ -79,6 +79,50 @@ describe("InstanceRegistry", () => {
     expect(registry.get(1)).toBe(client);
   });
 
+  it("accepts the attach when the engine's hello pid matches the spawned child", async () => {
+    bridge = await FakeBridge.start({
+      hello: { v: 1, t: "hello", engine: "fake", pid: 123, caps: ["cmd"] },
+    });
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => {} }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    expect(registry.has(1)).toBe(true);
+  });
+
+  it("rejects (and kills) when the bridge pid is a stranger squatting the port", async () => {
+    bridge = await FakeBridge.start({
+      hello: { v: 1, t: "hello", engine: "fake", pid: 999, caps: ["cmd"] },
+    });
+    let killed = false;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => (killed = true) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await expect(
+      registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io),
+    ).rejects.toThrow(/stale instance is squatting/);
+    expect(killed).toBe(true);
+    expect(registry.has(1)).toBe(false);
+  });
+
+  it("stays backward-compatible: an older bridge with no pid still attaches", async () => {
+    bridge = await FakeBridge.start(); // default hello has no pid
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => {} }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    expect(registry.has(1)).toBe(true);
+  });
+
   it("kill stops the process and detaches", async () => {
     bridge = await FakeBridge.start();
     let killed = false;

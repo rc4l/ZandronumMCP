@@ -79,8 +79,16 @@ export function buildLaunchEnv(
   port: number,
   base: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
+  parentPid: number = process.pid,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base, ZANDRONUM_BRIDGE_PORT: String(port) };
+  const env: NodeJS.ProcessEnv = {
+    ...base,
+    ZANDRONUM_BRIDGE_PORT: String(port),
+    // The engine's watchdog exits the game if this PID (the MCP server) dies, so a
+    // launched instance can never outlive the session that spawned it and linger
+    // as a stale bridge. See mcp_bridge.cpp WatchdogThread.
+    ZANDRONUM_BRIDGE_PARENT_PID: String(parentPid),
+  };
   if (platform === "darwin") {
     const dir = dirname(exe);
     env.DYLD_LIBRARY_PATH = env.DYLD_LIBRARY_PATH ? `${dir}:${env.DYLD_LIBRARY_PATH}` : dir;
@@ -133,6 +141,24 @@ export function tryConnect(host: string, port: number): Promise<boolean> {
       resolve(false);
     });
   });
+}
+
+/**
+ * Return the first port >= `start` that nothing is currently listening on, by
+ * probing with a throwaway TCP connect. Used so a launch never collides with a
+ * stale engine (or anything else) squatting the conventional instance port —
+ * the launcher picks the next free port instead of silently attaching to it.
+ */
+export async function findFreePort(
+  start: number,
+  host = "127.0.0.1",
+  span = 20,
+  connect: (h: string, p: number) => Promise<boolean> = tryConnect,
+): Promise<number> {
+  for (let port = start; port < start + span; port++) {
+    if (!(await connect(host, port))) return port; // nothing answered -> free
+  }
+  throw new Error(`no free bridge port in [${start}, ${start + span})`);
 }
 
 /** Poll until host:port accepts a connection, or throw after `attempts` tries. */

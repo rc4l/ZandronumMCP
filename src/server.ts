@@ -5,7 +5,8 @@ import { z } from "zod";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
-import { resolveEngineExe, resolveScreenshotDir } from "./process/launch.js";
+import { resolveEngineExe, resolveScreenshotDir, findFreePort } from "./process/launch.js";
+import { reapOrphanEngines } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
 import { parseStartupErrors, tailLines, crashLogPath } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
@@ -42,6 +43,11 @@ const ZANDRONUM_EXE = process.env.ZANDRONUM_EXE
 const SCREENSHOT_DIR = resolveScreenshotDir(ZANDRONUM_EXE, process.env.ZANDRONUM_SCREENSHOT_DIR);
 
 const portFor = (instance: number) => BASE_PORT + (instance - 1);
+// Ports actually chosen at launch. launch_instance picks the first FREE port at or
+// above the conventional one, so a stale process squatting the default can't cause
+// a silent mis-attach. Everything else resolves an instance's port through here.
+const launchedPorts = new Map<number, number>();
+const effectivePort = (instance: number) => launchedPorts.get(instance) ?? portFor(instance);
 // Default WAD to read maps from (usually the IWAD).
 const ZANDRONUM_IWAD = process.env.ZANDRONUM_IWAD;
 
@@ -68,17 +74,17 @@ function logPathFor(instance: number): string | undefined {
   const known = logFiles.get(instance);
   if (known) return known;
   return ZANDRONUM_EXE
-    ? path.join(path.dirname(ZANDRONUM_EXE), `mcp-bridge-${portFor(instance)}.log`)
+    ? path.join(path.dirname(ZANDRONUM_EXE), `mcp-bridge-${effectivePort(instance)}.log`)
     : undefined;
 }
 
-/** Lazily attach to instance N (port = BASE_PORT + N-1) on first use. */
+/** Lazily attach to instance N on first use (default port unless launch picked one). */
 async function clientFor(instance: number) {
   if (!registry.has(instance)) {
     await registry.attach({
       id: instance,
       host: DEFAULT_HOST,
-      port: BASE_PORT + (instance - 1),
+      port: effectivePort(instance),
     });
   }
   return registry.get(instance);
@@ -354,7 +360,8 @@ server.registerTool(
   },
   async ({ instance, open, steps }) => {
     const client = await clientFor(instance);
-    if (open) await client.runCommand(open);
+    // Opening a menu can load assets, so give it more than the 5s default.
+    if (open) await client.runCommand(open, 15000);
     if (steps.length > 0) {
       if (!client.supports("event")) {
         return { isError: true, content: [{ type: "text", text: "This engine bridge has no input support (rebuild with the latest bridge)." }] };
@@ -1076,7 +1083,10 @@ server.registerTool(
     if (!hasBridge(ZANDRONUM_EXE)) {
       return { isError: true, content: [{ type: "text", text: `ZANDRONUM_EXE at ${ZANDRONUM_EXE} has no MCP bridge — that looks like a stock Zandronum (or GZDoom), which the MCP can't drive. Point it at a bridge-patched build: download one from the GitHub Releases, or build it yourself (see docs/ADVANCED.md).` }] };
     }
-    const port = portFor(instance);
+    // Pick the first free port at/above the conventional one for this instance, so a
+    // stale engine (or anything) squatting the default port can't cause a mis-attach.
+    const port = await findFreePort(portFor(instance));
+    launchedPorts.set(instance, port);
     const logFile = path.join(path.dirname(ZANDRONUM_EXE), `mcp-bridge-${port}.log`);
     logFiles.set(instance, logFile);
     try {
@@ -1123,7 +1133,39 @@ server.registerTool(
   },
   async ({ instance }) => {
     registry.kill(instance);
+    launchedPorts.delete(instance);
+    logFiles.delete(instance);
     return { content: [{ type: "text", text: `killed instance ${instance}` }] };
+  },
+);
+
+server.registerTool(
+  "reset",
+  {
+    title: "Reset — reap all engine instances",
+    description:
+      "Kill every instance this session launched AND best-effort reap orphaned engine processes left by earlier sessions (that could otherwise squat bridge ports). Use this to recover from stale instances / port collisions before relaunching.",
+    inputSchema: {},
+  },
+  async () => {
+    registry.closeAll();
+    launchedPorts.clear();
+    logFiles.clear();
+    if (!ZANDRONUM_EXE) {
+      return { content: [{ type: "text", text: "Reset tracked instances. (ZANDRONUM_EXE unset, so no orphan sweep.)" }] };
+    }
+    const r = await reapOrphanEngines(ZANDRONUM_EXE);
+    const lines = [
+      `Reset complete. Reaped ${r.killed.length} orphaned engine process(es).`,
+    ];
+    if (r.survivors.length) {
+      lines.push(
+        `${r.survivors.length} process(es) survived SIGKILL (PIDs ${r.survivors.join(", ")}) — ` +
+          `these are wedged in the OS (macOS window-server exit-hang) and need a manual ` +
+          `force-quit (Activity Monitor) or a logout to clear.`,
+      );
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
   },
 );
 

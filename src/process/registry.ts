@@ -68,7 +68,21 @@ export class InstanceRegistry {
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
     await io.waitForPort(host, config.port);
-    return this.attach({ id: config.id, host, port: config.port });
+    const client = await this.attach({ id: config.id, host, port: config.port });
+
+    // PID handshake: confirm we attached to the engine we just spawned and not a
+    // stale bridge that still held the port. Only enforced when both sides report a
+    // pid — older bridges omit it, so this stays backward compatible.
+    const enginePid = client.enginePid;
+    if (child.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
+      this.kill(config.id);
+      throw new Error(
+        `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
+          `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
+          `Run the "reset" tool, then relaunch.`,
+      );
+    }
+    return client;
   }
 
   get(id: number): BridgeClient {

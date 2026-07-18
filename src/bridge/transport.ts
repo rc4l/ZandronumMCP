@@ -36,12 +36,20 @@ export class BridgeClient extends EventEmitter {
   private readonly host: string;
   private readonly port: number;
   private readonly commandTimeoutMs: number;
+  private enginePidValue?: number;
 
   constructor(opts: BridgeClientOptions) {
     super();
     this.host = opts.host ?? "127.0.0.1";
     this.port = opts.port;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 5000;
+  }
+
+  /** PID the engine advertised in its hello, or undefined on an older bridge.
+   *  Lets the launcher verify it attached to the process it spawned, not a stale
+   *  engine that happened to still hold the port. */
+  get enginePid(): number | undefined {
+    return this.enginePidValue;
   }
 
   connect(): Promise<HelloMessage> {
@@ -77,6 +85,9 @@ export class BridgeClient extends EventEmitter {
             }
             if (Array.isArray(hello.caps)) {
               this.capsSet = new Set(hello.caps);
+            }
+            if (typeof hello.pid === "number") {
+              this.enginePidValue = hello.pid;
             }
             resolve(hello);
           }
@@ -119,16 +130,17 @@ export class BridgeClient extends EventEmitter {
     }
   }
 
-  runCommand(text: string): Promise<string[]> {
+  runCommand(text: string, timeoutMs?: number): Promise<string[]> {
     const socket = this.socket;
     if (!socket) return Promise.reject(new Error("Not connected"));
     const id = (++this.seq).toString(36);
     const sentinel = makeSentinel(id);
+    const effectiveTimeout = timeoutMs ?? this.commandTimeoutMs;
     return new Promise<string[]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending = this.pending.filter((c) => c.sentinel !== sentinel);
-        reject(new Error(`Command timed out after ${this.commandTimeoutMs}ms: ${text}`));
-      }, this.commandTimeoutMs);
+        reject(new Error(`Command timed out after ${effectiveTimeout}ms: ${text}`));
+      }, effectiveTimeout);
       this.pending.push({ sentinel, lines: [], resolve, reject, timer });
       socket.write(
         encodeMessage({ v: PROTOCOL_VERSION, t: "cmd", text: withSentinel(text, sentinel) }),

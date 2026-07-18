@@ -11,6 +11,9 @@ export interface CaptureOptions {
   attempts?: number;
   /** Delay between poll attempts, in ms. */
   intervalMs?: number;
+  /** Timeout for the `screenshot` console command itself. Screenshots can be
+   *  slower than the 5s default command timeout on a busy frame, so allow more. */
+  commandTimeoutMs?: number;
 }
 
 export interface CaptureIo {
@@ -54,7 +57,7 @@ export async function captureScreenshot(
   const attempts = options.attempts ?? 40;
   const intervalMs = options.intervalMs ?? 100;
 
-  await client.runCommand(`screenshot ${name}`);
+  await client.runCommand(`screenshot ${name}`, options.commandTimeoutMs ?? 15000);
 
   for (let i = 0; i < attempts; i++) {
     let buf: Buffer;

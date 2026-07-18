@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, resolveScreenshotDir, waitForPort, tryConnect } from "../src/process/launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, resolveScreenshotDir, waitForPort, tryConnect, findFreePort } from "../src/process/launch.js";
 
 describe("resolveEngineExe", () => {
   it("resolves a macOS .app bundle to its inner executable", () => {
@@ -52,6 +52,11 @@ describe("buildLaunchEnv", () => {
     expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
   });
 
+  it("passes the MCP's PID as the watchdog parent so the engine can't outlive it", () => {
+    const env = buildLaunchEnv("/games/zandronum.exe", 7778, {}, "win32", 4242);
+    expect(env.ZANDRONUM_BRIDGE_PARENT_PID).toBe("4242");
+  });
+
   it("preserves the base env", () => {
     const env = buildLaunchEnv("/games/zandronum", 7777, { PATH: "/usr/bin" }, "linux");
     expect(env.PATH).toBe("/usr/bin");
@@ -81,6 +86,23 @@ describe("buildLaunchEnv", () => {
   it("never sets DISPLAY off Linux", () => {
     expect(buildLaunchEnv("/g/z.exe", 7777, {}, "win32").DISPLAY).toBeUndefined();
     expect(buildLaunchEnv("/g/z", 7777, {}, "darwin").DISPLAY).toBeUndefined();
+  });
+});
+
+describe("findFreePort", () => {
+  it("returns the start port when nothing is listening", async () => {
+    const free = await findFreePort(7777, "127.0.0.1", 20, async () => false);
+    expect(free).toBe(7777);
+  });
+
+  it("skips occupied ports and returns the first free one", async () => {
+    const busy = new Set([7777, 7778]);
+    const free = await findFreePort(7777, "127.0.0.1", 20, async (_h, p) => busy.has(p));
+    expect(free).toBe(7779);
+  });
+
+  it("throws when the whole span is occupied", async () => {
+    await expect(findFreePort(7777, "127.0.0.1", 3, async () => true)).rejects.toThrow(/no free bridge port/);
   });
 });
 
