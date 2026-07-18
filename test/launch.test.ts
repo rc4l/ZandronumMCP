@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, waitForPort, tryConnect } from "../src/process/launch.js";
+import { buildLaunchArgs, buildLaunchEnv, clearQuarantine, resolveEngineExe, resolveScreenshotDir, waitForPort, tryConnect } from "../src/process/launch.js";
 
 describe("resolveEngineExe", () => {
   it("resolves a macOS .app bundle to its inner executable", () => {
@@ -70,8 +70,8 @@ describe("buildLaunchEnv", () => {
 });
 
 describe("buildLaunchArgs", () => {
-  it("returns nothing for empty options", () => {
-    expect(buildLaunchArgs({})).toEqual([]);
+  it("defaults to windowed with no other options", () => {
+    expect(buildLaunchArgs({})).toEqual(["+set", "fullscreen", "0"]);
   });
 
   it("maps every option to its flag", () => {
@@ -98,11 +98,27 @@ describe("buildLaunchArgs", () => {
   });
 
   it("treats empty arrays as absent", () => {
-    expect(buildLaunchArgs({ files: [], extraArgs: [] })).toEqual([]);
+    expect(buildLaunchArgs({ files: [], extraArgs: [] })).toEqual(["+set", "fullscreen", "0"]);
   });
 
   it("emits fullscreen 1 when true", () => {
     expect(buildLaunchArgs({ fullscreen: true })).toEqual(["+set", "fullscreen", "1"]);
+  });
+});
+
+describe("resolveScreenshotDir", () => {
+  it("prefers an explicit env override", () => {
+    expect(resolveScreenshotDir("/app/Contents/MacOS/engine", "/shots")).toBe("/shots");
+  });
+
+  it("falls back to the engine's own folder", () => {
+    expect(resolveScreenshotDir("/app/Contents/MacOS/engine", undefined)).toBe(
+      "/app/Contents/MacOS",
+    );
+  });
+
+  it("defaults to the process cwd when no engine is configured", () => {
+    expect(resolveScreenshotDir(undefined, undefined)).toBe(".");
   });
 });
 

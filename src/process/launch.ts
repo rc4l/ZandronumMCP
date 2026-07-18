@@ -16,6 +16,21 @@ export function resolveEngineExe(exe: string): string {
 }
 
 /**
+ * Where the engine writes named screenshots: its own working directory, which
+ * is `dirname(exe)` (the engine cwd we launch it in). The engine ignores
+ * `screenshot_dir` for named screenshots, so the server must look here. An
+ * explicit `ZANDRONUM_SCREENSHOT_DIR` overrides; with no engine configured we
+ * fall back to the process cwd.
+ */
+export function resolveScreenshotDir(
+  exe: string | undefined,
+  envDir: string | undefined,
+): string {
+  if (envDir) return envDir;
+  return exe ? dirname(exe) : ".";
+}
+
+/**
  * Best-effort strip of `com.apple.quarantine` from the engine folder on macOS.
  *
  * Engines downloaded from the GitHub Release are ad-hoc signed but not notarized,
@@ -85,7 +100,10 @@ export function buildLaunchArgs(o: LaunchOptions): string[] {
   if (o.files?.length) args.push("-file", ...o.files);
   if (o.skill !== undefined) args.push("-skill", String(o.skill));
   if (o.map) args.push("+map", o.map);
-  if (o.fullscreen !== undefined) args.push("+set", "fullscreen", o.fullscreen ? "1" : "0");
+  // Always pin the video mode so an agent-driven instance never inherits the
+  // saved `fullscreen` cvar (it's CVAR_ARCHIVE) and takes over the user's
+  // screen. Windowed unless fullscreen is explicitly requested.
+  args.push("+set", "fullscreen", o.fullscreen ? "1" : "0");
   if (o.width !== undefined) args.push("+set", "vid_defwidth", String(o.width));
   if (o.height !== undefined) args.push("+set", "vid_defheight", String(o.height));
   if (o.extraArgs?.length) args.push(...o.extraArgs);
