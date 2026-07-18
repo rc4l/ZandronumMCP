@@ -17,6 +17,12 @@ of a pristine `hg` checkout at build time — see the project README.
 | 5 | `src/CMakeLists.txt` | end of file (append) | `target_sources( zdoom PRIVATE mcp_bridge.cpp )` | compile the overlay into the `zdoom` target |
 
 Notes:
+- **No new anchors for the crash handler.** `overlay/mcp_crash.cpp` (the fatal-signal
+  backtrace writer, read back by the `get_crash` tool) is armed from within
+  `mcp_bridge.cpp` (`MCP_Crash_Init()` called from `MCP_Bridge_TeeOutput`/`Poll`), so
+  it rides the existing anchors #2 and #4 — only the `target_sources` list in #5 gains
+  `mcp_crash.cpp`. It is generic (applies to stock Zandronum or any fork) and opt-in
+  (arms only when `ZANDRONUM_BRIDGE_PORT` is set).
 - The CMake executable target is named **`zdoom`** (output is renamed to
   `zandronum.exe`), confirmed at `CMakeLists.txt: add_executable( zdoom WIN32 ...`.
 - The bridge is **cross-platform**: `mcp_bridge.cpp` builds on Windows (Winsock)

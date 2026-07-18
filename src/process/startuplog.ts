@@ -24,3 +24,13 @@ export function tailLines(log: string, n = 40): string[] {
   const lines = log.split(/\r?\n/).filter((l) => l.trim().length > 0);
   return lines.slice(-n);
 }
+
+/**
+ * Where the bridge's crash handler writes its backtrace: the engine console-log
+ * path (ZANDRONUM_BRIDGE_LOG) with a `.crash` suffix. Mirrors the default in
+ * engine-bridge/overlay/mcp_crash.cpp (ResolveCrashPath), so the server reads
+ * back exactly what the engine wrote on a fatal signal.
+ */
+export function crashLogPath(logPath: string): string {
+  return `${logPath}.crash`;
+}

@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
 import { resolveEngineExe, resolveScreenshotDir } from "./process/launch.js";
 import { hasBridge } from "./process/verify.js";
-import { parseStartupErrors, tailLines } from "./process/startuplog.js";
+import { parseStartupErrors, tailLines, crashLogPath } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
@@ -1146,6 +1146,24 @@ server.registerTool(
       ? `Detected ${errors.length} error line(s) in the engine log:\n\n${errors.join("\n")}`
       : `No compile/fatal errors detected. Last lines of the engine log for context:\n\n${tailLines(log).join("\n")}`;
     return { content: [{ type: "text", text: body }] };
+  },
+);
+
+server.registerTool(
+  "get_crash",
+  {
+    title: "Get the last engine crash backtrace",
+    description:
+      "Return the signal, faulting address, and symbolized backtrace the bridge's crash handler captured the last time the engine crashed (segfault/abort/bus error/etc.). Use this when an instance dies unexpectedly — e.g. run_command reports the bridge closed. Empty if the instance has not crashed.",
+    inputSchema: { instance: instanceArg },
+  },
+  async ({ instance }) => {
+    const logFile = logPathFor(instance);
+    const crashFile = logFile ? crashLogPath(logFile) : undefined;
+    if (!crashFile || !existsSync(crashFile)) {
+      return { content: [{ type: "text", text: `No crash recorded for instance ${instance}. (The engine writes a backtrace here only when it dies on a fatal signal.)` }] };
+    }
+    return { content: [{ type: "text", text: readFileSync(crashFile, "utf8") }] };
   },
 );
 
