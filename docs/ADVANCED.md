@@ -70,6 +70,22 @@ by hand, run the inner binary directly so the bridge env is in scope:
 ZANDRONUM_BRIDGE_PORT=7777 zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks -iwad freedoom2.wad
 ```
 
+### Linux / X11: `DISPLAY`
+
+On Linux the game needs `DISPLAY` to reach your X server, but IDEs often spawn the
+MCP server (over stdio) without it — so the launched game can't open a window and
+never starts (see [issue #6](https://github.com/rc4l/ZandronumMCP/issues/6)). The
+server now defaults `DISPLAY` to `:0` for the game it launches, which covers the
+common single-display case. If your X server is elsewhere (e.g. `:1`, or a remote
+display), set it explicitly in the MCP env:
+
+```json
+"env": { "ZANDRONUM_BRIDGE_PORT": "7777", "ZANDRONUM_EXE": "...", "DISPLAY": ":1" }
+```
+
+(An explicit `DISPLAY` is always respected; the `:0` default only fills it in when
+it's missing.)
+
 ### Gatekeeper / "Apple could not verify…"
 
 The app is ad-hoc signed but **not notarized** (a paid Apple Developer ID would be

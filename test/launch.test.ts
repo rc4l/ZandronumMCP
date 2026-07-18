@@ -67,6 +67,21 @@ describe("buildLaunchEnv", () => {
     const env = buildLaunchEnv("/Apps/zandronum/zandronum", 7777, { DYLD_LIBRARY_PATH: "/opt/lib" }, "darwin");
     expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/zandronum:/opt/lib");
   });
+
+  it("on Linux defaults DISPLAY to :0 when the IDE didn't pass one (issue #6)", () => {
+    const env = buildLaunchEnv("/games/zandronum", 7777, {}, "linux");
+    expect(env.DISPLAY).toBe(":0");
+  });
+
+  it("on Linux respects an existing DISPLAY", () => {
+    const env = buildLaunchEnv("/games/zandronum", 7777, { DISPLAY: ":1" }, "linux");
+    expect(env.DISPLAY).toBe(":1");
+  });
+
+  it("never sets DISPLAY off Linux", () => {
+    expect(buildLaunchEnv("/g/z.exe", 7777, {}, "win32").DISPLAY).toBeUndefined();
+    expect(buildLaunchEnv("/g/z", 7777, {}, "darwin").DISPLAY).toBeUndefined();
+  });
 });
 
 describe("buildLaunchArgs", () => {
