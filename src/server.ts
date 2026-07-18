@@ -5,7 +5,7 @@ import { z } from "zod";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
-import { resolveEngineExe } from "./process/launch.js";
+import { resolveEngineExe, resolveScreenshotDir } from "./process/launch.js";
 import { hasBridge } from "./process/verify.js";
 import { parseStartupErrors, tailLines } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
@@ -31,14 +31,15 @@ import { menuKeyEvent, charEvent, type MenuKey } from "./input/keys.js";
 // --- configuration (via env so MCP clients can pass it in their config) ------
 const DEFAULT_HOST = process.env.ZANDRONUM_BRIDGE_HOST ?? "127.0.0.1";
 const BASE_PORT = Number.parseInt(process.env.ZANDRONUM_BRIDGE_PORT ?? "7777", 10);
-// Where the engine writes screenshots — its working directory.
-const SCREENSHOT_DIR = process.env.ZANDRONUM_SCREENSHOT_DIR ?? ".";
 // Path to the zandronum binary (zandronum.exe on Windows; the `zandronum`
 // executable on Linux/macOS), used by launch_instance.
 // Accept either the macOS .app bundle or the binary directly.
 const ZANDRONUM_EXE = process.env.ZANDRONUM_EXE
   ? resolveEngineExe(process.env.ZANDRONUM_EXE)
   : undefined;
+// Where the engine writes named screenshots: its own working directory
+// (dirname of the exe), unless ZANDRONUM_SCREENSHOT_DIR overrides.
+const SCREENSHOT_DIR = resolveScreenshotDir(ZANDRONUM_EXE, process.env.ZANDRONUM_SCREENSHOT_DIR);
 
 const portFor = (instance: number) => BASE_PORT + (instance - 1);
 // Default WAD to read maps from (usually the IWAD).

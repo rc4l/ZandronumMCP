@@ -71,7 +71,7 @@ describe("InstanceRegistry", () => {
       io,
     );
     expect(spawned[0].exe).toBe("zandronum.exe");
-    expect(spawned[0].args).toEqual(["-iwad", "freedoom2.wad"]);
+    expect(spawned[0].args).toEqual(["-iwad", "freedoom2.wad", "+set", "fullscreen", "0"]);
     expect(spawned[0].env.ZANDRONUM_BRIDGE_PORT).toBe(String(bridge.port));
     expect(spawned[0].env.ZANDRONUM_BRIDGE_LOG).toBe("C:/tmp/inst1.log");
     expect(dequarantined).toEqual(["zandronum.exe"]);
