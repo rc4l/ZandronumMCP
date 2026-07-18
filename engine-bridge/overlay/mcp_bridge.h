@@ -24,4 +24,8 @@ void MCP_Bridge_TeeOutput(const char *text);
 // Optional explicit shutdown (process exit also closes the socket).
 void MCP_Bridge_Shutdown();
 
+// Arm the crash-backtrace handler (implemented in mcp_crash.cpp). Idempotent and
+// opt-in (only arms when ZANDRONUM_BRIDGE_PORT is set). Called early by the bridge.
+void MCP_Crash_Init();
+
 #endif // __MCP_BRIDGE_H__

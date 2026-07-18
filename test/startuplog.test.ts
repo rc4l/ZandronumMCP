@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseStartupErrors, tailLines } from "../src/process/startuplog.js";
+import { parseStartupErrors, tailLines, crashLogPath } from "../src/process/startuplog.js";
 
 const SAMPLE = [
   "Resolving GL extensions",
@@ -42,5 +42,12 @@ describe("tailLines", () => {
     const out = tailLines(log);
     expect(out).toHaveLength(40);
     expect(out[out.length - 1]).toBe("line 99");
+  });
+});
+
+describe("crashLogPath", () => {
+  it("derives <log>.crash from the console-log path (matches mcp_crash.cpp)", () => {
+    expect(crashLogPath("/x/mcp-bridge-7777.log")).toBe("/x/mcp-bridge-7777.log.crash");
+    expect(crashLogPath("C:/tmp/inst1.log")).toBe("C:/tmp/inst1.log.crash");
   });
 });

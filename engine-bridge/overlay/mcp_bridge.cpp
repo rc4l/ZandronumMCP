@@ -317,6 +317,7 @@ namespace
 
 void MCP_Bridge_Poll()
 {
+	MCP_Crash_Init(); // belt-and-suspenders: also arm from the frame loop (idempotent)
 	if ( !g_initialized ) Init();
 	if ( !g_enabled ) return;
 
@@ -343,6 +344,7 @@ void MCP_Bridge_Poll()
 void MCP_Bridge_TeeOutput( const char *text )
 {
 	if ( text == NULL ) return;
+	MCP_Crash_Init(); // arm the crash handler as early as the first console line (idempotent)
 	LogWrite( text ); // capture to the startup logfile even before the bridge is up
 	if ( !g_enabled || g_client == MCP_INVALID_SOCKET ) return;
 	std::string esc;

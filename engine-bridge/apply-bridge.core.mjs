@@ -15,6 +15,7 @@ import { join, basename } from "node:path";
 export const OVERLAY_FILES = [
   "mcp_bridge.h",
   "mcp_bridge.cpp",
+  "mcp_crash.cpp",
   "mcp_event.cpp",
   "mcp_renderinfo.cpp",
   "mcp_actorstate.cpp",
@@ -208,7 +209,7 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
   const cmakeEol = detectEol(readFileSync(cmake, "utf8"));
   const cmakeBody =
     "# MCP dev bridge (overlay -- not committed upstream)" + cmakeEol +
-    "target_sources( zdoom PRIVATE mcp_bridge.cpp mcp_event.cpp mcp_renderinfo.cpp mcp_actorstate.cpp mcp_hud.cpp )" + cmakeEol;
+    "target_sources( zdoom PRIVATE mcp_bridge.cpp mcp_crash.cpp mcp_event.cpp mcp_renderinfo.cpp mcp_actorstate.cpp mcp_hud.cpp )" + cmakeEol;
   appendOnce(cmake, "mcp_bridge.cpp", cmakeBody, "target_sources zdoom", log);
 
   log("Done. Rebuild the engine, then launch with ZANDRONUM_BRIDGE_PORT set to enable the bridge.");
