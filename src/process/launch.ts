@@ -65,7 +65,14 @@ export function clearQuarantine(
  * binary; sdl12-compat dlopen()s libSDL2 by leaf name at runtime, which dyld
  * only resolves via DYLD_LIBRARY_PATH, so we point it at the binary's folder.
  * (`@loader_path` covers the directly-linked dylibs; this covers the dlopen.)
- * Pure and parameterised so both branches are unit-testable off-platform.
+ *
+ * On Linux/X11 it also defaults `DISPLAY` to `:0` when unset: IDEs frequently
+ * spawn the MCP server (over stdio) in an environment without `DISPLAY`, and the
+ * game — which we launch with our own env — then can't reach the X server and
+ * never opens a window (see issue #6). We only fill it in when missing, so a real
+ * `DISPLAY` (e.g. `:1`, or a remote one) is always respected.
+ *
+ * Pure and parameterised so every branch is unit-testable off-platform.
  */
 export function buildLaunchEnv(
   exe: string,
@@ -77,6 +84,9 @@ export function buildLaunchEnv(
   if (platform === "darwin") {
     const dir = dirname(exe);
     env.DYLD_LIBRARY_PATH = env.DYLD_LIBRARY_PATH ? `${dir}:${env.DYLD_LIBRARY_PATH}` : dir;
+  }
+  if (platform === "linux" && !env.DISPLAY) {
+    env.DISPLAY = ":0";
   }
   return env;
 }
