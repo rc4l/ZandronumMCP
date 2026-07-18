@@ -25,6 +25,15 @@ export const defaultLaunchIo: LaunchIo = {
   spawn: (exe, args, cwd, env) => {
     const cp = nodeSpawn(exe, args, { cwd, env, detached: true, stdio: "ignore" });
     cp.unref();
+    // A detached child is still an EventEmitter on our side. If the OS fails to
+    // spawn/exec it (ENOENT/EACCES, a Gatekeeper kill, an aborted startup) it
+    // emits 'error' — and Node THROWS an unhandled 'error' event as an uncaught
+    // exception, which would take the whole MCP server down. Swallow it to
+    // stderr; the launch's waitForPort will still time out and surface a proper
+    // tool error, and the server stays alive for the next call.
+    cp.on("error", (err) => {
+      process.stderr.write(`engine process (pid ${cp.pid ?? "?"}) error: ${err.message}\n`);
+    });
     // SIGKILL, not the default SIGTERM: the engine doesn't reliably stop on a
     // graceful terminate, so force-kill to avoid leaving a stray process behind.
     // (Note: this still can't reap a process already wedged in the kernel during
@@ -67,22 +76,29 @@ export class InstanceRegistry {
     io.clearQuarantine(config.exe);
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
-    await io.waitForPort(host, config.port);
-    const client = await this.attach({ id: config.id, host, port: config.port });
+    try {
+      await io.waitForPort(host, config.port);
+      const client = await this.attach({ id: config.id, host, port: config.port });
 
-    // PID handshake: confirm we attached to the engine we just spawned and not a
-    // stale bridge that still held the port. Only enforced when both sides report a
-    // pid — older bridges omit it, so this stays backward compatible.
-    const enginePid = client.enginePid;
-    if (child.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
+      // PID handshake: confirm we attached to the engine we just spawned and not a
+      // stale bridge that still held the port. Only enforced when both sides report a
+      // pid — older bridges omit it, so this stays backward compatible.
+      const enginePid = client.enginePid;
+      if (child.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
+        throw new Error(
+          `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
+            `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
+            `Run the "reset" tool, then relaunch.`,
+        );
+      }
+      return client;
+    } catch (err) {
+      // The launch failed (engine hung and the bridge never opened, or a stale
+      // process squatted the port). Reap the child we just spawned so a failed
+      // launch can't leave a hung engine orphaned on its port.
       this.kill(config.id);
-      throw new Error(
-        `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
-          `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
-          `Run the "reset" tool, then relaunch.`,
-      );
+      throw err;
     }
-    return client;
   }
 
   get(id: number): BridgeClient {

@@ -1222,6 +1222,22 @@ function cleanupAndExit(code: number): void {
 }
 
 async function main(): Promise<void> {
+  // Last line of defence: a hung/failed engine launch, a socket that faults
+  // after teardown, or any stray async error must never take the whole server
+  // down — an MCP server has to survive a single bad tool call. Log to stderr
+  // and keep running. (Per-handler paths already return proper error results;
+  // this only catches anything that escaped a handler's promise chain.)
+  process.on("uncaughtException", (err) => {
+    process.stderr.write(
+      `uncaughtException (kept alive): ${err instanceof Error ? err.stack : String(err)}\n`,
+    );
+  });
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(
+      `unhandledRejection (kept alive): ${reason instanceof Error ? reason.stack : String(reason)}\n`,
+    );
+  });
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stdout is the MCP channel; logs go to stderr.

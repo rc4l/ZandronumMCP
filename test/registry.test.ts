@@ -169,4 +169,31 @@ describe("defaultLaunchIo", () => {
       child.kill();
     }
   });
+
+  it("swallows a child 'error' event (bad exe) instead of crashing the server", async () => {
+    const writes: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    // Capture stderr so we can assert the error was logged, not thrown. An
+    // unhandled ChildProcess 'error' would otherwise be an uncaught exception.
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const child = defaultLaunchIo.spawn(
+        "/nonexistent/zandronum-mcp-does-not-exist",
+        [],
+        process.cwd(),
+        process.env,
+      );
+      // The ENOENT 'error' fires asynchronously; poll until it's been swallowed.
+      for (let i = 0; i < 100 && writes.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      child.kill(); // no-op on a process that never spawned; must not throw
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(writes.join("")).toMatch(/engine process .* error:/);
+  });
 });
