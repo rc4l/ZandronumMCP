@@ -32,6 +32,8 @@ export class FakeBridge {
   private readonly sockets: net.Socket[] = [];
   private readonly handlers: Array<{ match: string; lines: string[] }> = [];
   private readonly rawHandlers: Array<{ match: string; messages: Record<string, unknown>[] }> = [];
+  /** Every message the client sent — lets tests assert fire-and-forget sends. */
+  readonly received: Array<{ t?: string; text?: string }> = [];
   private readonly swallowCommands: boolean;
   private readonly hello?: Record<string, unknown>;
   private readonly eventWaiters: Array<(e: RecordedEvent) => void> = [];
@@ -95,6 +97,7 @@ export class FakeBridge {
     const decoder = new NdjsonDecoder();
     socket.on("data", (chunk: string) => {
       for (const msg of decoder.push(chunk)) {
+        this.received.push(msg as { t?: string; text?: string });
         if (msg.t === "cmd" && typeof msg.text === "string") {
           this.handleCommand(socket, msg.text);
         } else if (msg.t === "event") {

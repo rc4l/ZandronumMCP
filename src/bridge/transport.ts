@@ -172,6 +172,17 @@ export class BridgeClient extends EventEmitter {
     socket.write(encodeMessage({ v: PROTOCOL_VERSION, t: "setpause", paused: paused ? 1 : 0 }));
   }
 
+  /**
+   * Send a console command without waiting for a reply. `runCommand` correlates
+   * output with an echoed sentinel, which can never come back for a command that
+   * ends the process — so shutdown commands (`quit`) must go out fire-and-forget.
+   */
+  sendCommand(text: string): void {
+    const socket = this.socket;
+    if (!socket) throw new Error("Not connected");
+    socket.write(encodeMessage({ v: PROTOCOL_VERSION, t: "cmd", text }));
+  }
+
   private failAllPending(err: Error): void {
     for (const cmd of this.pending) {
       clearTimeout(cmd.timer);

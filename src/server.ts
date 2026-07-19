@@ -1128,14 +1128,24 @@ server.registerTool(
   "kill_instance",
   {
     title: "Kill a Zandronum instance",
-    description: "Stop a launched instance's process and detach from it.",
+    description:
+      "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit.",
     inputSchema: { instance: instanceArg },
   },
   async ({ instance }) => {
-    registry.kill(instance);
+    const clean = await registry.quit(instance);
     launchedPorts.delete(instance);
     logFiles.delete(instance);
-    return { content: [{ type: "text", text: `killed instance ${instance}` }] };
+    return {
+      content: [
+        {
+          type: "text",
+          text: clean
+            ? `instance ${instance} quit cleanly`
+            : `instance ${instance} did not quit on request — force-killed`,
+        },
+      ],
+    };
   },
 );
 
@@ -1214,11 +1224,15 @@ server.registerTool(
 // keeps the game off our event loop, but it also means nothing else reaps it.
 let cleanedUp = false;
 function cleanupAndExit(code: number): void {
-  if (!cleanedUp) {
-    cleanedUp = true;
-    try { registry.closeAll(); } catch { /* best-effort */ }
-  }
-  process.exit(code);
+  if (cleanedUp) return;
+  cleanedUp = true;
+  // Ask each engine to quit itself before we go: hard-killing mid-render can
+  // wedge macOS GPU teardown into an unkillable process. Short budget so shutdown
+  // stays snappy; quitAll force-kills whatever ignores the request.
+  registry
+    .quitAll(2500)
+    .catch(() => { /* best-effort */ })
+    .finally(() => process.exit(code));
 }
 
 async function main(): Promise<void> {

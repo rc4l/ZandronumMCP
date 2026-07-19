@@ -170,4 +170,9 @@ describe("BridgeClient <-> FakeBridge", () => {
     const c = new BridgeClient({ port: 1 });
     expect(() => c.setPause(false)).toThrow(/Not connected/);
   });
+
+  it("throws when sending a fire-and-forget command before connecting", () => {
+    const c = new BridgeClient({ port: 1 });
+    expect(() => c.sendCommand("quit")).toThrow(/Not connected/);
+  });
 });
