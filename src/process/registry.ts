@@ -44,6 +44,27 @@ export const defaultLaunchIo: LaunchIo = {
   clearQuarantine: (exe) => clearQuarantine(exe),
 };
 
+/** How often we re-check whether a quitting engine has actually exited. */
+const QUIT_POLL_MS = 150;
+
+/** I/O seam for the graceful-quit wait — injected so timing is testable. */
+export interface QuitIo {
+  alive: (pid: number) => boolean;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export const defaultQuitIo: QuitIo = {
+  alive: (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
 export interface LaunchConfig extends LaunchOptions {
   id: number;
   exe: string;
@@ -123,6 +144,60 @@ export class InstanceRegistry {
       client.close();
       this.clients.delete(id);
     }
+  }
+
+  /**
+   * Ask the engine to shut itself down, and only force-kill if it doesn't go.
+   *
+   * A hard SIGKILL while the engine is mid-render can strand macOS GPU/Metal
+   * teardown in an uninterruptible kernel wait — producing a process that
+   * NOTHING can reap (not `kill -9`, not the reaper, not the startup sweep)
+   * until the machine reboots. Letting the engine run its own shutdown lets the
+   * GPU/XPC teardown finish normally. The force-kill remains as the backstop for
+   * an engine that is already hung, so this never leaves an instance running.
+   *
+   * Resolves true if the engine exited on its own, false if it had to be forced.
+   */
+  async quit(id: number, timeoutMs = 5000, io: QuitIo = defaultQuitIo): Promise<boolean> {
+    const client = this.clients.get(id);
+    const pid = this.children.get(id)?.pid;
+    if (client) {
+      // Fire-and-forget: a quitting engine can never echo runCommand's sentinel.
+      try {
+        client.sendCommand("quit");
+      } catch {
+        /* not connected — fall through to the force-kill */
+      }
+    }
+    let exited = false;
+    if (pid !== undefined) {
+      for (let waited = 0; waited < timeoutMs; waited += QUIT_POLL_MS) {
+        if (!io.alive(pid)) {
+          exited = true;
+          break;
+        }
+        await io.sleep(QUIT_POLL_MS);
+      }
+    }
+    if (exited) {
+      // Gone of its own accord — just drop our handles. Deliberately no signal:
+      // the OS may already have recycled that pid.
+      this.children.delete(id);
+      const done = this.clients.get(id);
+      if (done) {
+        done.close();
+        this.clients.delete(id);
+      }
+    } else {
+      this.kill(id); // ignored us, or was already hung — force it
+    }
+    return exited;
+  }
+
+  /** Graceful-quit every launched instance (in parallel), then drop the rest. */
+  async quitAll(timeoutMs = 3000, io: QuitIo = defaultQuitIo): Promise<void> {
+    await Promise.all([...this.children.keys()].map((id) => this.quit(id, timeoutMs, io)));
+    this.closeAll();
   }
 
   /** Kill every launched child and detach every client. Called on MCP shutdown

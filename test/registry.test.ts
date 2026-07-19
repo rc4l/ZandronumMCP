@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import { FakeBridge } from "./fakes/fake-bridge.js";
-import { InstanceRegistry, defaultLaunchIo, type LaunchIo } from "../src/process/registry.js";
+import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "../src/process/registry.js";
 
 let bridge: FakeBridge | undefined;
 let registry: InstanceRegistry | undefined;
@@ -142,6 +142,88 @@ describe("InstanceRegistry", () => {
     registry = new InstanceRegistry();
     expect(() => registry!.kill(99)).not.toThrow();
   });
+
+  it("quit asks the engine to shut itself down and doesn't force-kill when it obeys", async () => {
+    bridge = await FakeBridge.start();
+    let forced = false;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 4242, kill: () => (forced = true) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+
+    // Engine exits on its own after the first poll.
+    let polls = 0;
+    const clean = await registry.quit(1, 5000, {
+      alive: () => ++polls < 2,
+      sleep: async () => {},
+    });
+    expect(clean).toBe(true);
+    // The send is fire-and-forget, so let the socket actually deliver it.
+    const sawQuit = async () => {
+      for (let i = 0; i < 100; i++) {
+        if (bridge!.received.some((m) => m.t === "cmd" && m.text === "quit")) return true;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return false;
+    };
+    expect(await sawQuit()).toBe(true);
+    expect(forced).toBe(false); // it went quietly — no SIGKILL needed
+    expect(registry.has(1)).toBe(false);
+  });
+
+  it("quit force-kills an engine that ignores the request", async () => {
+    bridge = await FakeBridge.start();
+    let forced = false;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 4242, kill: () => (forced = true) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+
+    const clean = await registry.quit(1, 450, { alive: () => true, sleep: async () => {} });
+    expect(clean).toBe(false);
+    expect(forced).toBe(true); // never leaves it running
+    expect(registry.has(1)).toBe(false);
+  });
+
+  it("quit on an unknown id is a harmless no-op", async () => {
+    registry = new InstanceRegistry();
+    await expect(
+      registry.quit(99, 100, { alive: () => false, sleep: async () => {} }),
+    ).resolves.toBe(false);
+  });
+
+  it("quit still force-kills when the engine can't be reached to ask", async () => {
+    bridge = await FakeBridge.start();
+    registry = new InstanceRegistry();
+    const client = await registry.attach({ id: 1, port: bridge.port });
+    // Simulate a dead/disconnected bridge: asking it to quit throws.
+    (client as unknown as { sendCommand: () => void }).sendCommand = () => {
+      throw new Error("Not connected");
+    };
+    const clean = await registry.quit(1, 100, { alive: () => true, sleep: async () => {} });
+    expect(clean).toBe(false);
+    expect(registry.has(1)).toBe(false); // still cleaned up
+  });
+
+  it("quitAll graceful-quits every launched instance", async () => {
+    bridge = await FakeBridge.start();
+    const killed: number[] = [];
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 1, kill: () => killed.push(1) }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await registry.quitAll(300, { alive: () => false, sleep: async () => {} });
+    expect(registry.has(1)).toBe(false);
+  });
 });
 
 describe("defaultLaunchIo", () => {
@@ -195,5 +277,16 @@ describe("defaultLaunchIo", () => {
       process.stderr.write = orig;
     }
     expect(writes.join("")).toMatch(/engine process .* error:/);
+  });
+});
+
+describe("defaultQuitIo (real process glue)", () => {
+  it("alive() reports live and dead pids", () => {
+    expect(defaultQuitIo.alive(process.pid)).toBe(true);
+    expect(defaultQuitIo.alive(2 ** 30)).toBe(false);
+  });
+
+  it("sleep resolves", async () => {
+    await expect(defaultQuitIo.sleep(1)).resolves.toBeUndefined();
   });
 });
