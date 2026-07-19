@@ -6,7 +6,7 @@ import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo } from "./process/registry.js";
 import { resolveEngineExe, resolveScreenshotDir, findFreePort } from "./process/launch.js";
-import { reapOrphanEngines } from "./process/reap.js";
+import { reapOrphanEngines, defaultIo as defaultReapIo } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
 import { parseStartupErrors, tailLines, crashLogPath } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
@@ -1250,6 +1250,22 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => cleanupAndExit(0));
   process.on("SIGTERM", () => cleanupAndExit(0));
   process.on("exit", () => { try { registry.closeAll(); } catch { /* best-effort */ } });
+
+  // Sweep engines orphaned by earlier sessions (launcher dead => PPID 1) so they
+  // can't pile up across sessions and squat bridge ports. Strictly orphans-only:
+  // instances owned by another live MCP server are never touched. Best-effort and
+  // non-blocking — the server is already serving by this point.
+  if (ZANDRONUM_EXE) {
+    void reapOrphanEngines(ZANDRONUM_EXE, defaultReapIo, { onlyOrphans: true })
+      .then((r) => {
+        if (!r.found.length) return;
+        const wedged = r.survivors.length
+          ? `; ${r.survivors.length} wedged and unkillable (PIDs ${r.survivors.join(", ")}) — log out to clear`
+          : "";
+        process.stderr.write(`startup sweep: reaped ${r.killed.length} orphaned engine(s)${wedged}\n`);
+      })
+      .catch(() => { /* best-effort */ });
+  }
 }
 
 main().catch((err: unknown) => {

@@ -5,6 +5,8 @@ import {
   psCommand,
   listEnginePids,
   defaultIo,
+  parsePpid,
+  readPpid,
   type ReapIo,
 } from "../src/process/reap.js";
 
@@ -71,10 +73,22 @@ describe("defaultIo (real process glue)", () => {
   it("sleep resolves", async () => {
     await expect(defaultIo.sleep(1)).resolves.toBeUndefined();
   });
+
+  it("ppidOf reads a real parent pid (or undefined) without throwing", () => {
+    expect(() => defaultIo.ppidOf(process.pid)).not.toThrow();
+    const ppid = defaultIo.ppidOf(process.pid);
+    expect(ppid === undefined || Number.isInteger(ppid)).toBe(true);
+  });
 });
 
 describe("reapOrphanEngines", () => {
-  const makeIo = (found: number[], stubborn: number[] = []): { io: ReapIo; killed: number[] } => {
+  const makeIo = (
+    found: number[],
+    stubborn: number[] = [],
+    // pid -> parent pid. 1 = orphan (launcher gone); anything else = owned by a
+    // live session; undefined = unreadable.
+    ppids: Record<number, number | undefined> = {},
+  ): { io: ReapIo; killed: number[] } => {
     const alive = new Set(found);
     const killed: number[] = [];
     const io: ReapIo = {
@@ -85,6 +99,7 @@ describe("reapOrphanEngines", () => {
       },
       alive: (pid) => alive.has(pid),
       sleep: async () => {},
+      ppidOf: (pid) => (pid in ppids ? ppids[pid] : 1),
     };
     return { io, killed };
   };
@@ -109,5 +124,58 @@ describe("reapOrphanEngines", () => {
     const r = await reapOrphanEngines("/Apps/zandronum-mcp-hooks", io);
     expect(killed).toEqual([]);
     expect(r).toEqual({ found: [], killed: [], survivors: [] });
+  });
+
+  it("onlyOrphans reaps just the orphans and spares another session's engines", async () => {
+    // 11 orphaned (PPID 1), 22 owned by a live MCP server (PPID 4242).
+    const { io, killed } = makeIo([11, 22], [], { 11: 1, 22: 4242 });
+    const r = await reapOrphanEngines("/Apps/zandronum-mcp-hooks", io, { onlyOrphans: true });
+    expect(killed).toEqual([11]);
+    expect(r.found).toEqual([11]);
+    expect(r.killed).toEqual([11]);
+  });
+
+  it("onlyOrphans never kills an engine whose PPID can't be read", async () => {
+    const { io, killed } = makeIo([11], [], { 11: undefined });
+    const r = await reapOrphanEngines("/Apps/zandronum-mcp-hooks", io, { onlyOrphans: true });
+    expect(killed).toEqual([]);
+    expect(r).toEqual({ found: [], killed: [], survivors: [] });
+  });
+
+  it("onlyOrphans still reports a wedged orphan as a survivor", async () => {
+    const { io } = makeIo([11], [11], { 11: 1 }); // orphan, but unkillable
+    const r = await reapOrphanEngines("/Apps/zandronum-mcp-hooks", io, { onlyOrphans: true });
+    expect(r.killed).toEqual([]);
+    expect(r.survivors).toEqual([11]);
+  });
+});
+
+describe("parsePpid", () => {
+  it("parses ps output", () => {
+    expect(parsePpid("    1\n")).toBe(1);
+    expect(parsePpid(" 4242 ")).toBe(4242);
+  });
+  it("returns undefined for junk or empty output", () => {
+    expect(parsePpid("")).toBeUndefined();
+    expect(parsePpid("nope")).toBeUndefined();
+  });
+});
+
+describe("readPpid", () => {
+  it("returns undefined on Windows (no reparent-to-1 signal)", () => {
+    expect(readPpid(123, "win32", () => "1")).toBeUndefined();
+  });
+  it("reads the parent pid via ps on POSIX", () => {
+    expect(readPpid(123, "darwin", () => "  1\n")).toBe(1);
+  });
+  it("returns undefined when ps fails", () => {
+    expect(
+      readPpid(123, "darwin", () => {
+        throw new Error("no such process");
+      }),
+    ).toBeUndefined();
+  });
+  it("exercises the real default runner without throwing", () => {
+    expect(() => readPpid(process.pid)).not.toThrow();
   });
 });
