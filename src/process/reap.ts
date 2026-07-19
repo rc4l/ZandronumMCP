@@ -28,6 +28,39 @@ export interface ReapIo {
   /** Whether a PID is still alive. */
   alive: (pid: number) => boolean;
   sleep: (ms: number) => Promise<void>;
+  /** Parent PID of `pid`, or undefined if it can't be read. On POSIX a value of
+   *  1 means the process was reparented to launchd/init — i.e. whatever launched
+   *  it is gone, which is exactly our "orphan" marker. */
+  ppidOf: (pid: number) => number | undefined;
+}
+
+export interface ReapOptions {
+  /** Only reap engines whose launcher is gone (PPID 1). Instances still owned by
+   *  another live MCP session (PPID = that server) are left strictly alone —
+   *  essential for the automatic startup sweep, which must never kill someone
+   *  else's running game. Windows can't report this, so nothing is swept there. */
+  onlyOrphans?: boolean;
+}
+
+/** Parse `ps -o ppid= -p <pid>` output into a PID. */
+export function parsePpid(out: string): number | undefined {
+  const n = Number.parseInt(out.trim(), 10);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/** Read a process's parent PID. Returns undefined when it can't be determined. */
+export function readPpid(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  run: (cmd: string, args: string[]) => string = (cmd, args) =>
+    execFileSync(cmd, args, { encoding: "utf8" }),
+): number | undefined {
+  if (platform === "win32") return undefined; // no POSIX reparent-to-1 signal
+  try {
+    return parsePpid(run("ps", ["-o", "ppid=", "-p", String(pid)]));
+  } catch {
+    return undefined;
+  }
 }
 
 /** Parse `ps -A -o pid=,command=` output into PIDs whose command contains needle. */
@@ -82,13 +115,19 @@ export const defaultIo: ReapIo = {
     }
   },
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  ppidOf: (pid) => readPpid(pid),
 };
 
 export async function reapOrphanEngines(
   exePath: string,
   io: ReapIo = defaultIo,
+  opts: ReapOptions = {},
 ): Promise<ReapResult> {
-  const found = io.list(exePath);
+  const all = io.list(exePath);
+  // In orphan-only mode keep just the ones whose launcher died (PPID 1). Anything
+  // we can't read a PPID for is left alone — better to miss an orphan than to
+  // kill a live session's game.
+  const found = opts.onlyOrphans ? all.filter((pid) => io.ppidOf(pid) === 1) : all;
   for (const pid of found) io.kill(pid);
   if (found.length) await io.sleep(300);
   const survivors = found.filter((pid) => io.alive(pid));
