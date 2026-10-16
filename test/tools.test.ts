@@ -1509,12 +1509,60 @@ describe("diagnostic tools", () => {
     expect(await h.text("get_crash")).toMatch(/No crash recorded/);
   });
 
-  it("returns the captured backtrace", async () => {
-    const h = await offline(
+  const written = new Date("2026-09-22T06:10:00Z");
+  const crashFile = path.join("/engine", "mcp-bridge-7777.log.crash");
+  const crashReport = (pid: number) =>
+    `=== MCP ENGINE CRASH ===\nsignal: 11 SIGSEGV\npid: ${pid}\n\nbacktrace:\n#0 R_DrawColumn`;
+  const mtimeOnly = (file: string) => (p: string) => {
+    if (p !== file) throw new Error(`unexpected mtimeOf ${p} in test`);
+    return written;
+  };
+  const crashed = (pid: number) =>
+    offline(
       { exe: "/engine/zandronum" },
-      { existsSync: () => true, readTextSync: () => "SIGSEGV at 0x0\n#0 R_DrawColumn" },
+      { existsSync: () => true, readTextSync: () => crashReport(pid), mtimeOf: mtimeOnly(crashFile) },
     );
-    expect(await h.text("get_crash")).toMatch(/SIGSEGV at 0x0/);
+
+  it("returns the report verbatim when its pid matches this instance's engine", async () => {
+    const h = await crashed(4242);
+    h.ctx.rememberEngine(1, 4242);
+    expect(await h.text("get_crash")).toBe(crashReport(4242));
+  });
+
+  it("names another engine's report instead of returning it", async () => {
+    const h = await crashed(99);
+    h.ctx.rememberEngine(1, 4242);
+    expect(await h.text("get_crash")).toBe(
+      `No crash recorded for instance 1 (PID 4242). ${crashFile} holds ` +
+        "another engine's crash (PID 99, written 2026-09-22T06:10:00.000Z), not this one's.",
+    );
+  });
+
+  it("stops matching the previous engine's PID once a relaunch fails", async () => {
+    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 4242 } });
+    let bridgeOpens = true;
+    harness = await startHarness({
+      config: { exe: "/engine/zandronum", basePort: bridge.port },
+      io: {
+        existsSync: () => true,
+        readTextSync: () => crashReport(4242),
+        mtimeOf: mtimeOnly(path.join("/engine", `mcp-bridge-${bridge.port}.log.crash`)),
+        launchIo: {
+          spawn: () => ({ pid: undefined, kill: () => {} }),
+          waitForPort: () =>
+            bridgeOpens ? Promise.resolve() : Promise.reject(new Error("timeout")),
+          clearQuarantine: () => {},
+        },
+      },
+    });
+    await harness.call("launch_instance");
+    expect(await harness.text("get_crash")).toBe(crashReport(4242));
+
+    bridgeOpens = false;
+    expect((await harness.call("launch_instance")).isError).toBe(true);
+    expect(await harness.text("get_crash")).toMatch(
+      /^Unverified: this instance's engine PID is unknown/,
+    );
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import path from "node:path";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { ServerContext, defaultContextIo, type ServerConfig } from "../src/context.js";
@@ -73,6 +74,21 @@ describe("ServerContext ports and log paths", () => {
     ctx.rememberLaunch(2, 7802, "/gone.log");
     expect(ctx.readLog(1)).toBe("line\n");
     expect(ctx.readLog(2)).toBeUndefined();
+  });
+
+  it("reads an instance's crash report with its mtime, or nothing when it has no path or no file", () => {
+    expect(makeCtx().readCrash(1)).toBeUndefined();
+    const written = new Date("2026-09-22T06:10:00Z");
+    const io = {
+      existsSync: (p: string) => p === "/a.log.crash",
+      readTextSync: () => "pid: 7\n",
+      mtimeOf: () => written,
+    };
+    const ctx = makeCtx({}, io);
+    ctx.rememberLaunch(1, 7801, "/a.log");
+    ctx.rememberLaunch(2, 7802, "/gone.log");
+    expect(ctx.readCrash(1)).toEqual({ file: "/a.log.crash", report: "pid: 7\n", written });
+    expect(ctx.readCrash(2)).toBeUndefined();
   });
 });
 
@@ -276,6 +292,7 @@ describe("defaultContextIo", () => {
     expect(defaultContextIo.readTextSync(here)).toContain("defaultContextIo");
     expect(defaultContextIo.readdirSync(path.dirname(here))).toContain("context.test.ts");
     expect(defaultContextIo.stampOf(here)).toMatch(/^\d+(\.\d+)?:\d+$/);
+    expect(defaultContextIo.mtimeOf(here)).toEqual(statSync(here).mtime);
     await expect(defaultContextIo.sleep(0)).resolves.toBeUndefined();
     const ticks = await new Promise<number>((resolve) => {
       let n = 0;
