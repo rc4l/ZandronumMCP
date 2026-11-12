@@ -1,6 +1,6 @@
 import path from "node:path";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { InstanceRegistry, defaultLaunchIo, type LaunchIo } from "./process/registry.js";
+import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "./process/registry.js";
 import { findFreePort } from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
@@ -8,6 +8,7 @@ import { buildIndex, type AcsIndex } from "./acs/symbols.js";
 import { compileAcs, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
 import { readMapFromContainer, type MapData } from "./map/index.js";
 import { captureScreenshot } from "./screenshot/capture.js";
+import { crashLogPath } from "./process/startuplog.js";
 import type { BridgeClient } from "./bridge/transport.js";
 
 /** Everything the tools need from the environment, resolved once at startup. */
@@ -36,7 +37,10 @@ export interface ContextIo {
   readdirSync: (p: string) => string[];
   /** Change-detection stamp for a file; used to invalidate parse caches. */
   stampOf: (p: string) => string;
+  mtimeOf: (p: string) => Date;
   sleep: (ms: number) => Promise<void>;
+  /** Whether a process is still running. */
+  alive: (pid: number) => boolean;
   /** Run `fn` every `ms` until the returned cancel is called. */
   every: (ms: number, fn: () => void) => () => void;
   capture: (
@@ -61,7 +65,9 @@ export const defaultContextIo: ContextIo = {
     const s = statSync(p);
     return `${s.mtimeMs}:${s.size}`;
   },
+  mtimeOf: (p) => statSync(p).mtime,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  alive: defaultQuitIo.alive,
   every: (ms, fn) => {
     const timer = setInterval(fn, ms);
     // Never let a progress ticker hold the process open.
@@ -101,8 +107,7 @@ export class ServerContext {
   private readonly logFiles = new Map<number, string>();
   /** In-flight attaches, keyed by instance — see `clientFor`. */
   private readonly attaching = new Map<number, Promise<BridgeClient>>();
-  /** PID of the engine each instance was launched as, when the bridge reported
-   *  one. Used to catch a re-attach landing on a different process. */
+  /** Engine PID per instance (the launched child's, or an attached bridge's): checked on re-attach and matched against a get_crash report. */
   private readonly enginePids = new Map<number, number>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
@@ -136,11 +141,18 @@ export class ServerContext {
   rememberLaunch(instance: number, port: number, logFile: string): void {
     this.boundPorts.set(instance, port);
     this.logFiles.set(instance, logFile);
+    // A new engine is starting, so the last one's PID no longer names this instance.
+    this.enginePids.delete(instance);
   }
 
-  /** Record which process an instance's bridge belongs to, once it says so. */
+  /** Record which process is this instance's engine. */
   rememberEngine(instance: number, pid: number | undefined): void {
     if (pid !== undefined) this.enginePids.set(instance, pid);
+  }
+
+  /** The engine PID recorded for the instance, if any. */
+  enginePidFor(instance: number): number | undefined {
+    return this.enginePids.get(instance);
   }
 
   forgetInstance(instance: number): void {
@@ -168,6 +180,15 @@ export class ServerContext {
   readLog(instance: number): string | undefined {
     const logFile = this.logPathFor(instance);
     return logFile && this.io.existsSync(logFile) ? this.io.readTextSync(logFile) : undefined;
+  }
+
+  /** An instance's crash report and its file's mtime, or undefined when there is none. */
+  readCrash(instance: number): { file: string; report: string; written: Date } | undefined {
+    const logFile = this.logPathFor(instance);
+    const file = logFile && crashLogPath(logFile);
+    return file && this.io.existsSync(file)
+      ? { file, report: this.io.readTextSync(file), written: this.io.mtimeOf(file) }
+      : undefined;
   }
 
   /**

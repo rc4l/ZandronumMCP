@@ -2,7 +2,19 @@ import { join } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import { FakeBridge } from "./fakes/fake-bridge.js";
-import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "../src/process/registry.js";
+import {
+  InstanceRegistry,
+  defaultLaunchIo,
+  defaultQuitIo,
+  type LaunchConfig,
+  type LaunchIo,
+} from "../src/process/registry.js";
+
+/** launch_instance's sequence: spawn, then attach (reaping the child on failure). */
+function launch(registry: InstanceRegistry, config: LaunchConfig, io: LaunchIo) {
+  registry.spawn(config, io);
+  return registry.attachOrKill(config, io);
+}
 
 let bridge: FakeBridge | undefined;
 let registry: InstanceRegistry | undefined;
@@ -48,7 +60,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     registry.closeAll();
     expect(killed).toBe(true);
     expect(registry.has(1)).toBe(false);
@@ -67,7 +79,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: (exe) => void dequarantined.push(exe),
     };
     registry = new InstanceRegistry();
-    const client = await registry.launch(
+    const client = await launch(registry,
       { id: 1, exe: "zandronum.exe", cwd: ".", port: bridge.port, iwad: "freedoom2.wad", logFile: "C:/tmp/inst1.log" },
       io,
     );
@@ -100,7 +112,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     expect(registry.has(1)).toBe(true);
   });
 
@@ -116,7 +128,7 @@ describe("InstanceRegistry", () => {
     };
     registry = new InstanceRegistry();
     await expect(
-      registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io),
+      launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io),
     ).rejects.toThrow(/stale instance is squatting/);
     expect(killed).toBe(true);
     expect(registry.has(1)).toBe(false);
@@ -130,8 +142,24 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     expect(registry.has(1)).toBe(true);
+  });
+
+  it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
+    let killed = 0;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => void killed++ }),
+      waitForPort: () => Promise.reject(new Error("never opened")),
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    expect(registry.childPid(1)).toBeUndefined();
+    registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+    expect(registry.childPid(1)).toBe(123);
+    await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
+    expect(killed).toBe(1);
+    expect(registry.childPid(1)).toBeUndefined();
   });
 
   it("kill stops the process and detaches", async () => {
@@ -143,7 +171,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     registry.kill(1);
     expect(killed).toBe(true);
     expect(registry.has(1)).toBe(false);
@@ -163,7 +191,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
 
     // Engine exits on its own after the first poll.
     let polls = 0;
@@ -194,7 +222,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
 
     const clean = await registry.quit(1, 450, { alive: () => true, sleep: async () => {} });
     expect(clean).toBe(false);
@@ -231,7 +259,7 @@ describe("InstanceRegistry", () => {
       clearQuarantine: () => {},
     };
     registry = new InstanceRegistry();
-    await registry.launch({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+    await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     await registry.quitAll(300, { alive: () => false, sleep: async () => {} });
     expect(registry.has(1)).toBe(false);
   });
