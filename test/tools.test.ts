@@ -15,10 +15,19 @@ import { readFileSync } from "node:fs";
 
 let bridge: FakeBridge | undefined;
 let harness: Harness | undefined;
+const extraBridges: FakeBridge[] = [];
+
+/** A second fake engine, closed after the harness (which may still hold a socket to it). */
+async function startExtraBridge(hello?: Record<string, unknown>): Promise<FakeBridge> {
+  const b = await FakeBridge.start(hello ? { hello } : {});
+  extraBridges.push(b);
+  return b;
+}
 
 afterEach(async () => {
   await harness?.close();
   harness = undefined;
+  for (const b of extraBridges.splice(0)) await b.close();
   await bridge?.close();
   bridge = undefined;
 });
@@ -1653,9 +1662,11 @@ describe("launch_instance's child PID and attach_instance", () => {
   // Not a running process; `alive` is stubbed per test anyway.
   const CHILD = 0x7ffffff0;
   const logOf = (port: number) => path.join("/engine", `mcp-bridge-${port}.log`);
-  const rig = async (opts: { opens?: boolean; hello?: Record<string, unknown>; io?: Partial<ContextIo> } = {}) => {
+  type RigOptions = { pid?: number; opens?: boolean; hello?: Record<string, unknown>; io?: Partial<ContextIo> };
+  const rig = async (opts: RigOptions = {}) => {
     bridge = await FakeBridge.start(opts.hello ? { hello: opts.hello } : {});
     const killed: number[] = [];
+    const pid = "pid" in opts ? opts.pid : CHILD;
     harness = await startHarness({
       config: { exe: "/engine/zandronum", basePort: bridge.port },
       io: {
@@ -1663,7 +1674,7 @@ describe("launch_instance's child PID and attach_instance", () => {
         hasBridge: () => true,
         ...opts.io,
         launchIo: {
-          spawn: () => ({ pid: CHILD, kill: () => void killed.push(CHILD) }),
+          spawn: () => ({ pid, kill: () => void killed.push(CHILD) }),
           waitForPort: () => (opts.opens === false ? Promise.reject(new Error("timeout")) : Promise.resolve()),
           clearQuarantine: () => {},
         },
@@ -1687,21 +1698,21 @@ describe("launch_instance's child PID and attach_instance", () => {
   });
 
   it("attach_instance replaces a launched engine that died, dropping its client and child", async () => {
-    const { h } = await rig();
+    const { h } = await rig({ io: { alive: () => false } });
     await h.call("launch_instance");
-    h.ctx.io.alive = () => false;
     const close = vi.spyOn(h.ctx.registry.get(1), "close");
-    const other = await FakeBridge.start();
-    try {
-      expect(await h.text("attach_instance", { port: other.port })).toBe(`attached instance 1 to port ${other.port}`);
-      expect(close).toHaveBeenCalled();
-      expect(h.ctx.registry.childPid(1)).toBeUndefined();
-    } finally {
-      // The harness still holds a socket to `other`, which its close would wait on.
-      await harness?.close();
-      harness = undefined;
-      await other.close();
-    }
+    const other = await startExtraBridge();
+    expect(await h.text("attach_instance", { port: other.port })).toBe(`attached instance 1 to port ${other.port}`);
+    expect(close).toHaveBeenCalled();
+    expect(h.ctx.registry.childPid(1)).toBeUndefined();
+    expect(h.ctx.enginePidFor(1)).toBeUndefined();
+    expect(h.ctx.logPathFor(1)).toBe(logOf(other.port));
+  });
+
+  it("falls back to the bridge's PID when the spawn reported none", async () => {
+    const { h } = await rig({ pid: undefined, hello: { v: 1, t: "hello", engine: "fake", pid: 4242 } });
+    await h.call("launch_instance");
+    expect(h.ctx.enginePidFor(1)).toBe(4242);
   });
 
   describe("after a launch whose bridge never opened", () => {
@@ -1759,31 +1770,24 @@ describe("session-scoped instances", () => {
 
   it("a re-attach drops the earlier engine's client and PID", async () => {
     bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 999 } });
-    const second = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 1000 } });
-    try {
-      harness = await startHarness({
-        config: { exe: "/engine/zandronum", basePort: bridge.port },
-        io: {
-          existsSync: (p: string) => p.endsWith(".crash"),
-          readTextSync: () => "signal: 11\npid: 999\n",
-          mtimeOf: () => new Date("2026-09-22T06:10:00Z"),
-        },
-      });
-      await harness.call("attach_instance");
-      const close = vi.spyOn(harness.ctx.registry.get(1), "close");
-      expect(await harness.text("get_crash")).toBe("signal: 11\npid: 999\n");
-      expect(await harness.text("attach_instance", { port: second.port })).toBe(
-        `attached instance 1 to port ${second.port} (engine PID 1000)`,
-      );
-      expect(close).toHaveBeenCalled();
-      expect(harness.ctx.enginePidFor(1)).toBe(1000);
-      expect(await harness.text("get_crash")).toMatch(/^No crash recorded for instance 1 \(PID 1000\)\..*another engine's crash \(PID 999,/);
-    } finally {
-      // The harness still holds a socket to `second`, which its close would wait on.
-      await harness?.close();
-      harness = undefined;
-      await second.close();
-    }
+    const second = await startExtraBridge({ v: 1, t: "hello", engine: "fake", pid: 1000 });
+    harness = await startHarness({
+      config: { exe: "/engine/zandronum", basePort: bridge.port },
+      io: {
+        existsSync: (p: string) => p.endsWith(".crash"),
+        readTextSync: () => "signal: 11\npid: 999\n",
+        mtimeOf: () => new Date("2026-09-22T06:10:00Z"),
+      },
+    });
+    await harness.call("attach_instance");
+    const close = vi.spyOn(harness.ctx.registry.get(1), "close");
+    expect(await harness.text("get_crash")).toBe("signal: 11\npid: 999\n");
+    expect(await harness.text("attach_instance", { port: second.port })).toBe(
+      `attached instance 1 to port ${second.port} (engine PID 1000)`,
+    );
+    expect(close).toHaveBeenCalled();
+    expect(harness.ctx.enginePidFor(1)).toBe(1000);
+    expect(await harness.text("get_crash")).toMatch(/^No crash recorded for instance 1 \(PID 1000\)\..*another engine's crash \(PID 999,/);
   });
 
   it("attaches to an explicitly given port", async () => {

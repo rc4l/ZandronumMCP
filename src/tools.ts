@@ -1989,9 +1989,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         ctx.rememberEngine(instance, child.pid);
         // The engine can take tens of seconds to boot a big mod and open its
         // bridge — well past a default client timeout, so report progress.
-        await withProgress(extra, 42000, "waiting for the engine", () =>
+        const client = await withProgress(extra, 42000, "waiting for the engine", () =>
           ctx.registry.attachOrKill(launch, ctx.io.launchIo),
         );
+        // A spawn that reported no PID skipped the handshake, so the bridge's own PID is all there is.
+        if (child.pid === undefined) ctx.rememberEngine(instance, client.enginePid);
       } catch (e) {
         // The bridge never opened. Most often that's a DECORATE/ACS compile error
         // that aborted startup — surface it from the captured log instead of just
@@ -2029,8 +2031,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           `Instance ${instance} runs an engine this session launched (PID ${launched}); kill_instance it first, or attach another instance number.`,
         );
       }
-      // Start clean: a crashed child's handle and closed client, or an earlier attach's client, PID and log path.
-      // ChildProcess.kill after the exit event sends no signal, so a recycled PID is never signalled.
+      // Drop a dead child's handle and any earlier attach's client, PID and log path; kill on an exited child sends no signal.
       ctx.registry.kill(instance);
       ctx.forgetInstance(instance);
       const target = port ?? ctx.portFor(instance);

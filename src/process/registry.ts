@@ -95,12 +95,6 @@ export class InstanceRegistry {
     return client;
   }
 
-  /** Spawn a bridge-enabled instance, wait for its port, then attach. */
-  async launch(config: LaunchConfig, io: LaunchIo): Promise<BridgeClient> {
-    this.spawn(config, io);
-    return this.attachOrKill(config, io);
-  }
-
   /** `attachSpawned` for a child `spawn` just started, reaping the child if the attach fails. */
   async attachOrKill(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
     try {
@@ -127,7 +121,7 @@ export class InstanceRegistry {
     return child;
   }
 
-  /** Wait for a spawned instance's bridge port, then attach. A failure leaves the child running. */
+  /** Wait for a spawned instance's bridge port and attach, leaving the child running on failure. */
   async attachSpawned(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
     const host = config.host ?? "127.0.0.1";
     const child = this.children.get(config.id);

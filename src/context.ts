@@ -107,7 +107,7 @@ export class ServerContext {
   private readonly logFiles = new Map<number, string>();
   /** In-flight attaches, keyed by instance — see `clientFor`. */
   private readonly attaching = new Map<number, Promise<BridgeClient>>();
-  /** Engine PID each instance's bridge reported: checked on re-attach and matched against a get_crash report. */
+  /** Engine PID per instance (the launched child's, or an attached bridge's): checked on re-attach and matched against a get_crash report. */
   private readonly enginePids = new Map<number, number>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
@@ -145,12 +145,12 @@ export class ServerContext {
     this.enginePids.delete(instance);
   }
 
-  /** Record which process an instance's bridge belongs to, once it says so. */
+  /** Record which process is this instance's engine. */
   rememberEngine(instance: number, pid: number | undefined): void {
     if (pid !== undefined) this.enginePids.set(instance, pid);
   }
 
-  /** The engine PID the instance's bridge reported, if it has. */
+  /** The engine PID recorded for the instance, if any. */
   enginePidFor(instance: number): number | undefined {
     return this.enginePids.get(instance);
   }
