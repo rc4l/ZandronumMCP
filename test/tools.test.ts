@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import path from "node:path";
 import { startHarness, collectTools, type Harness } from "./fakes/tool-harness.js";
 import { FakeBridge } from "./fakes/fake-bridge.js";
@@ -1541,6 +1541,8 @@ describe("diagnostic tools", () => {
   it("stops matching the previous engine's PID once a relaunch fails", async () => {
     bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 4242 } });
     let bridgeOpens = true;
+    // The relaunch's spawn reports no PID (a failed spawn), so only the launch's PID drop clears 4242.
+    const pids = [4242, undefined];
     harness = await startHarness({
       config: { exe: "/engine/zandronum", basePort: bridge.port },
       io: {
@@ -1548,7 +1550,7 @@ describe("diagnostic tools", () => {
         readTextSync: () => crashReport(4242),
         mtimeOf: mtimeOnly(path.join("/engine", `mcp-bridge-${bridge.port}.log.crash`)),
         launchIo: {
-          spawn: () => ({ pid: undefined, kill: () => {} }),
+          spawn: () => ({ pid: pids.shift(), kill: () => {} }),
           waitForPort: () =>
             bridgeOpens ? Promise.resolve() : Promise.reject(new Error("timeout")),
           clearQuarantine: () => {},
@@ -1647,6 +1649,90 @@ describe("progress reporting on slow tools", () => {
   });
 });
 
+describe("launch_instance's child PID and attach_instance", () => {
+  // Not a running process; `alive` is stubbed per test anyway.
+  const CHILD = 0x7ffffff0;
+  const logOf = (port: number) => path.join("/engine", `mcp-bridge-${port}.log`);
+  const rig = async (opts: { opens?: boolean; hello?: Record<string, unknown>; io?: Partial<ContextIo> } = {}) => {
+    bridge = await FakeBridge.start(opts.hello ? { hello: opts.hello } : {});
+    const killed: number[] = [];
+    harness = await startHarness({
+      config: { exe: "/engine/zandronum", basePort: bridge.port },
+      io: {
+        existsSync: () => true,
+        hasBridge: () => true,
+        ...opts.io,
+        launchIo: {
+          spawn: () => ({ pid: CHILD, kill: () => void killed.push(CHILD) }),
+          waitForPort: () => (opts.opens === false ? Promise.reject(new Error("timeout")) : Promise.resolve()),
+          clearQuarantine: () => {},
+        },
+      },
+    });
+    return { h: harness, killed };
+  };
+
+  it("attach_instance refuses an instance whose launched engine still runs, changing nothing", async () => {
+    const { h, killed } = await rig();
+    await h.call("launch_instance");
+    const client = h.ctx.registry.get(1);
+    const result = await h.call("attach_instance", { port: 1 });
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toBe(
+      `Instance 1 runs an engine this session launched (PID ${CHILD}); kill_instance it first, or attach another instance number.`,
+    );
+    expect(h.ctx.registry.get(1)).toBe(client);
+    expect(h.ctx.logPathFor(1)).toBe(logOf(bridge!.port));
+    expect(killed).toEqual([]);
+  });
+
+  it("attach_instance replaces a launched engine that died, dropping its client and child", async () => {
+    const { h } = await rig();
+    await h.call("launch_instance");
+    h.ctx.io.alive = () => false;
+    const close = vi.spyOn(h.ctx.registry.get(1), "close");
+    const other = await FakeBridge.start();
+    try {
+      expect(await h.text("attach_instance", { port: other.port })).toBe(`attached instance 1 to port ${other.port}`);
+      expect(close).toHaveBeenCalled();
+      expect(h.ctx.registry.childPid(1)).toBeUndefined();
+    } finally {
+      // The harness still holds a socket to `other`, which its close would wait on.
+      await harness?.close();
+      harness = undefined;
+      await other.close();
+    }
+  });
+
+  describe("after a launch whose bridge never opened", () => {
+    const report = `signal: 11\npid: ${CHILD}\n`;
+
+    it("get_crash matches the report against the spawned child's PID", async () => {
+      const { h, killed } = await rig({
+        opens: false,
+        io: {
+          existsSync: (p) => p === "/engine/zandronum" || p === `${logOf(bridge!.port)}.crash`,
+          readTextSync: () => report,
+          mtimeOf: () => new Date("2026-09-22T06:10:00Z"),
+        },
+      });
+      expect((await h.call("launch_instance")).isError).toBe(true);
+      expect(killed).toEqual([CHILD]);
+      expect(await h.text("get_crash")).toBe(report);
+    });
+
+    it("a live tool call checks the bridge's identity against the child", async () => {
+      const { h } = await rig({ opens: false, hello: { v: 1, t: "hello", engine: "fake", pid: CHILD + 1 } });
+      expect((await h.call("launch_instance")).isError).toBe(true);
+      const result = await h.call("run_command", { text: "version" });
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toMatch(
+        new RegExp(`is PID ${CHILD + 1}, not the engine launched for instance 1 \\(PID ${CHILD}\\)`),
+      );
+    });
+  });
+});
+
 describe("session-scoped instances", () => {
   it("refuses to drive an instance this session never started", async () => {
     // The collision that motivated this: four editor windows, four MCP servers,
@@ -1669,6 +1755,35 @@ describe("session-scoped instances", () => {
     );
     // Now the rest of the tools work against it.
     expect(await harness.text("run_command", { text: "version" })).toBe("Zandronum 3.2.1");
+  });
+
+  it("a re-attach drops the earlier engine's client and PID", async () => {
+    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 999 } });
+    const second = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 1000 } });
+    try {
+      harness = await startHarness({
+        config: { exe: "/engine/zandronum", basePort: bridge.port },
+        io: {
+          existsSync: (p: string) => p.endsWith(".crash"),
+          readTextSync: () => "signal: 11\npid: 999\n",
+          mtimeOf: () => new Date("2026-09-22T06:10:00Z"),
+        },
+      });
+      await harness.call("attach_instance");
+      const close = vi.spyOn(harness.ctx.registry.get(1), "close");
+      expect(await harness.text("get_crash")).toBe("signal: 11\npid: 999\n");
+      expect(await harness.text("attach_instance", { port: second.port })).toBe(
+        `attached instance 1 to port ${second.port} (engine PID 1000)`,
+      );
+      expect(close).toHaveBeenCalled();
+      expect(harness.ctx.enginePidFor(1)).toBe(1000);
+      expect(await harness.text("get_crash")).toMatch(/^No crash recorded for instance 1 \(PID 1000\)\..*another engine's crash \(PID 999,/);
+    } finally {
+      // The harness still holds a socket to `second`, which its close would wait on.
+      await harness?.close();
+      harness = undefined;
+      await second.close();
+    }
   });
 
   it("attaches to an explicitly given port", async () => {

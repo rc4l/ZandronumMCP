@@ -134,6 +134,22 @@ describe("InstanceRegistry", () => {
     expect(registry.has(1)).toBe(true);
   });
 
+  it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
+    let killed = 0;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => void killed++ }),
+      waitForPort: () => Promise.reject(new Error("never opened")),
+      clearQuarantine: () => {},
+    };
+    registry = new InstanceRegistry();
+    expect(registry.childPid(1)).toBeUndefined();
+    registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+    expect(registry.childPid(1)).toBe(123);
+    await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
+    expect(killed).toBe(1);
+    expect(registry.childPid(1)).toBeUndefined();
+  });
+
   it("kill stops the process and detaches", async () => {
     bridge = await FakeBridge.start();
     let killed = false;

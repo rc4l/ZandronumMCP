@@ -1968,32 +1968,30 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const port = await ctx.io.findFreePort(ctx.portFor(instance));
       const logFile = path.join(path.dirname(exe), `mcp-bridge-${port}.log`);
       ctx.rememberLaunch(instance, port, logFile);
+      const launch = {
+        id: instance,
+        exe,
+        cwd: path.dirname(exe),
+        port,
+        logFile,
+        iwad,
+        files,
+        map,
+        skill,
+        fullscreen,
+        width,
+        height,
+        extraArgs,
+      };
       try {
+        const child = ctx.registry.spawn(launch, ctx.io.launchIo);
+        // The child is the engine: a failed launch still matches its crash report, and an attach checks identity.
+        ctx.rememberEngine(instance, child.pid);
         // The engine can take tens of seconds to boot a big mod and open its
         // bridge — well past a default client timeout, so report progress.
-        const client = await withProgress(extra, 42000, "waiting for the engine", () =>
-          ctx.registry.launch(
-            {
-              id: instance,
-              exe,
-              cwd: path.dirname(exe),
-              port,
-              logFile,
-              iwad,
-              files,
-              map,
-              skill,
-              fullscreen,
-              width,
-              height,
-              extraArgs,
-            },
-            ctx.io.launchIo,
-          ),
+        await withProgress(extra, 42000, "waiting for the engine", () =>
+          ctx.registry.attachOrKill(launch, ctx.io.launchIo),
         );
-        // Remember which process this is, so a later re-attach can tell if the
-        // engine died and something else took its port.
-        ctx.rememberEngine(instance, client.enginePid);
       } catch (e) {
         // The bridge never opened. Most often that's a DECORATE/ACS compile error
         // that aborted startup — surface it from the captured log instead of just
@@ -2021,10 +2019,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Attach to an engine you started yourself",
       description:
-        "Connect to a bridge-patched Zandronum that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port.",
+        "Connect to a bridge-patched Zandronum that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port. Refuses an instance whose launched engine is still running.",
       inputSchema: { instance: instanceArg, port: z.number().int().positive().optional() },
     },
     async ({ instance, port }) => {
+      const launched = ctx.registry.childPid(instance);
+      if (launched !== undefined && ctx.io.alive(launched)) {
+        return fail(
+          `Instance ${instance} runs an engine this session launched (PID ${launched}); kill_instance it first, or attach another instance number.`,
+        );
+      }
+      // Start clean: a crashed child's handle and closed client, or an earlier attach's client, PID and log path.
+      // ChildProcess.kill after the exit event sends no signal, so a recycled PID is never signalled.
+      ctx.registry.kill(instance);
+      ctx.forgetInstance(instance);
       const target = port ?? ctx.portFor(instance);
       ctx.bind(instance, target);
       try {

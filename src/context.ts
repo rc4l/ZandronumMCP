@@ -1,6 +1,6 @@
 import path from "node:path";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { InstanceRegistry, defaultLaunchIo, type LaunchIo } from "./process/registry.js";
+import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "./process/registry.js";
 import { findFreePort } from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
@@ -39,6 +39,8 @@ export interface ContextIo {
   stampOf: (p: string) => string;
   mtimeOf: (p: string) => Date;
   sleep: (ms: number) => Promise<void>;
+  /** Whether a process is still running. */
+  alive: (pid: number) => boolean;
   /** Run `fn` every `ms` until the returned cancel is called. */
   every: (ms: number, fn: () => void) => () => void;
   capture: (
@@ -65,6 +67,7 @@ export const defaultContextIo: ContextIo = {
   },
   mtimeOf: (p) => statSync(p).mtime,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  alive: defaultQuitIo.alive,
   every: (ms, fn) => {
     const timer = setInterval(fn, ms);
     // Never let a progress ticker hold the process open.

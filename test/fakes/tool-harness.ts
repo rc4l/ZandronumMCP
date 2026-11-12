@@ -24,6 +24,7 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
     stampOf: () => "stamp",
     mtimeOf: nope("mtimeOf"),
     sleep: () => Promise.resolve(), // tests never wait on real time
+    alive: () => true,
     // One deterministic tick instead of a real interval, so progress reporting
     // is exercised without the clock.
     every: (_ms, fn) => {
