@@ -1,18 +1,29 @@
 import path from "node:path";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "./process/registry.js";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import {
+  EngineExitedError,
+  InstanceRegistry,
+  PortWaitError,
+  defaultLaunchIo,
+  defaultQuitIo,
+  type LaunchIo,
+  type QuitResult,
+} from "./process/registry.js";
 import {
   deriveBasePort,
   findFreePort,
   gamelogPrefix,
   resolveEngineExe,
   resolveScreenshotDir,
+  tryConnect,
 } from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
 import { crashLogPath } from "./process/startuplog.js";
 import { buildIndex, type AcsIndex } from "./acs/symbols.js";
-import { compileAcs, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
+import { compileAcs, defaultCompileDeps, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
+import { resolveMapSlot, type MapSlotRequest, type MapSlotResult } from "./acs/probe.js";
+import { collectAcsModulesAt, type AcsModule } from "./acs/collect.js";
 import { importsOf, parseProfile, profilesFor, type RunAcsProfile } from "./acs/profiles.js";
 import { readMapFromContainer, type MapData } from "./map/index.js";
 import { captureScreenshot } from "./screenshot/capture.js";
@@ -73,6 +84,8 @@ export interface LaunchArgs {
   height?: number;
   extraArgs?: string[];
   config?: "shared" | "isolated";
+  /** false: return once spawned; the instance attaches on first use. */
+  wait?: boolean;
 }
 
 /** What `relaunch_instance` reuses: the last launch's options and where it ran. */
@@ -91,8 +104,11 @@ export interface ContextIo {
   existsSync: (p: string) => boolean;
   readFileSync: (p: string) => Buffer;
   readTextSync: (p: string) => string;
+  /** Up to the first `bytes` bytes of a file, so a type check needn't read it whole. */
+  readHeadSync: (p: string, bytes: number) => Buffer;
   readdirSync: (p: string) => string[];
   isDirSync: (p: string) => boolean;
+  realpathSync: (p: string) => string;
   /** Change-detection stamp for a file; used to invalidate parse caches. */
   stampOf: (p: string) => string;
   mtimeOf: (p: string) => Date;
@@ -107,19 +123,33 @@ export interface ContextIo {
     opts?: { name?: string; keep?: boolean },
   ) => Promise<{ base64: string; path: string }>;
   findFreePort: (start: number) => Promise<number>;
+  /** Whether host:port accepts a connection right now (one try). */
+  portOpen: (host: string, port: number) => Promise<boolean>;
   hasBridge: (exe: string, marker: string) => boolean;
   reap: (exe: string, opts?: ReapOptions) => Promise<ReapResult>;
   launchIo: LaunchIo;
   compileAcs: (req: CompileRequest) => CompileResult;
   removeDir: (dir: string) => void;
+  /** The map-var tools' `sourceFile` lookup: two compiles in a temp dir it removes itself. */
+  resolveMapSlot: (req: MapSlotRequest) => MapSlotResult;
 }
 
 export const defaultContextIo: ContextIo = {
   existsSync: (p) => existsSync(p),
   readFileSync: (p) => readFileSync(p),
   readTextSync: (p) => readFileSync(p, "utf8"),
+  readHeadSync: (p, bytes) => {
+    const fd = openSync(p, "r");
+    try {
+      const buf = Buffer.alloc(bytes);
+      return buf.subarray(0, readSync(fd, buf, 0, bytes, 0));
+    } finally {
+      closeSync(fd);
+    }
+  },
   readdirSync: (p) => readdirSync(p),
   isDirSync: (p) => statSync(p).isDirectory(),
+  realpathSync: (p) => realpathSync(p),
   stampOf: (p) => {
     const s = statSync(p);
     return `${s.mtimeMs}:${s.size}`;
@@ -135,11 +165,13 @@ export const defaultContextIo: ContextIo = {
   },
   capture: (client, dir, opts) => captureScreenshot(client, { dir, ...opts }),
   findFreePort: (start) => findFreePort(start),
+  portOpen: (host, port) => tryConnect(host, port),
   hasBridge: (exe, marker) => hasBridge(exe, marker),
   reap: (exe, opts) => reapOrphanEngines(exe, defaultReapIo, opts),
   launchIo: defaultLaunchIo,
   compileAcs: (req) => compileAcs(req),
   removeDir: (dir) => removeDir(dir),
+  resolveMapSlot: (req) => resolveMapSlot(req, { readFile: (p) => readFileSync(p), compile: defaultCompileDeps, removeDir }),
 };
 
 /**
@@ -172,6 +204,7 @@ export class ServerContext {
   private readonly lastLaunch = new Map<number, LastLaunch>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
+  private readonly acsModules = new Map<string, { stamp: string; modules: AcsModule[] }>();
 
   constructor(
     readonly engine: EngineAdapter,
@@ -294,6 +327,8 @@ export class ServerContext {
    * port, the next tool call would silently drive the wrong process. So when we
    * know which PID an instance is supposed to be, a mismatch fails loudly
    * instead.
+   *
+   * An instance launched with `wait: false` attaches here, waiting for its bridge (`attachPending`).
    */
   async clientFor(instance: number): Promise<BridgeClient> {
     if (this.registry.has(instance)) return this.registry.get(instance);
@@ -309,8 +344,10 @@ export class ServerContext {
     const inflight = this.attaching.get(instance);
     if (inflight) return inflight;
     const port = this.effectivePort(instance);
-    const attach = this.registry
-      .attach({ id: instance, host: this.config.host, port })
+    const connect = this.registry.pending(instance)
+      ? this.attachPending(instance, port)
+      : this.registry.attach({ id: instance, host: this.config.host, port });
+    const attach = connect
       .then((client) => {
         const expected = this.enginePids.get(instance);
         const actual = client.enginePid;
@@ -328,6 +365,39 @@ export class ServerContext {
       .finally(() => this.attaching.delete(instance));
     this.attaching.set(instance, attach);
     return attach;
+  }
+
+  /** Wait for a spawned instance's bridge and attach, failing on any exit, since a wrapper that
+   *  backgrounds the engine would fail the PID handshake anyway. */
+  private attachPending(instance: number, port: number): Promise<BridgeClient> {
+    const target = { id: instance, host: this.config.host, port };
+    return this.registry.attachSpawned(target, this.io.launchIo, true).catch((e: unknown) => {
+      if (e instanceof EngineExitedError) {
+        throw new Error(`Instance ${instance}'s ${e.message}; get_startup_errors shows why.`);
+      }
+      if (e instanceof PortWaitError) {
+        throw new Error(
+          `Instance ${instance} (launched with wait: false) has no bridge on port ${port} yet: ${e.message}. ` +
+            `If it is still starting (a netgame host opens its bridge only once its lobby fills), call again later; kill_instance stops it.`,
+        );
+      }
+      throw e;
+    });
+  }
+
+  /** Quit an instance, attaching a pending one whose bridge is up first, since a SIGKILLed netgame
+   *  host can freeze its guests; one with no bridge yet is force-killed at once. */
+  async quit(instance: number): Promise<QuitResult> {
+    if (this.registry.pending(instance)) {
+      if (await this.io.portOpen(this.config.host, this.effectivePort(instance))) {
+        await this.clientFor(instance).catch(() => undefined);
+      }
+      if (!this.registry.find(instance)) {
+        this.registry.kill(instance);
+        return "unbridged";
+      }
+    }
+    return this.registry.quit(instance);
   }
 
   /** Peek at an instance's client without attaching, connecting, or throwing —
@@ -357,6 +427,19 @@ export class ServerContext {
     const data = readMapFromContainer(this.io.readFileSync(wad), map);
     this.maps.set(key, { stamp, data });
     return data;
+  }
+
+  /** The ACS modules a launch file holds, memoised on a regular file's stamp but not a directory's,
+   *  which doesn't move when a file inside it is rewritten. */
+  deployedModules(file: string): AcsModule[] {
+    const skips = (name: string, isDir: boolean) => this.engine.dirWalkSkips(name, isDir, process.platform);
+    if (this.io.isDirSync(file)) return collectAcsModulesAt(file, this.io, skips);
+    const stamp = this.io.stampOf(file);
+    const hit = this.acsModules.get(file);
+    if (hit && hit.stamp === stamp) return hit.modules;
+    const modules = collectAcsModulesAt(file, this.io, skips);
+    this.acsModules.set(file, { stamp, modules });
+    return modules;
   }
 
   /**

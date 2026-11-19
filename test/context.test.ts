@@ -1,16 +1,17 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { ServerContext, configFromEnv, defaultContextIo, type ServerConfig } from "../src/context.js";
-import { InstanceRegistry } from "../src/process/registry.js";
+import { InstanceRegistry, type ChildExit, type LaunchIo } from "../src/process/registry.js";
 import { envName } from "../src/adapter.js";
 import { engine } from "../src/engine.js";
 import { FakeBridge } from "./fakes/fake-bridge.js";
 import { stubIo } from "./fakes/tool-harness.js";
 import { buildWad, sectorsLump, doomLinedefsLump, sidedefsLump, vertexesLump } from "./fakes/wad-builder.js";
+import { buildBehaviorAcse } from "./fakes/acs-builder.js";
 
 const baseConfig: ServerConfig = { host: "127.0.0.1", basePort: 7777, screenshotDir: "/shots" };
 
@@ -207,6 +208,94 @@ describe("ServerContext.clientFor", () => {
     other.registry.closeAll();
   });
 
+  describe("a pending (wait: false) launch", () => {
+    // A PID that is not (and cannot be) running, so a graceful quit sees the engine gone at once.
+    const DEAD_PID = 0x7ffffff0;
+
+    /** A context whose instance 1 was spawned on `port` without waiting, as launchWith does. */
+    function pendingCtx(
+      port: number,
+      opts: { pid?: number; wait?: () => Promise<void>; exited?: Promise<ChildExit>; portOpen?: boolean } = {},
+    ) {
+      const seen = { waits: 0, killed: 0 };
+      const launchIo: LaunchIo = {
+        spawn: () => ({ pid: "pid" in opts ? opts.pid : 123, kill: () => void seen.killed++, exited: opts.exited }),
+        waitForPort: () => {
+          seen.waits++;
+          return opts.wait ? opts.wait() : Promise.resolve();
+        },
+        clearQuarantine: () => {},
+        ensureDir: () => {},
+        seedConfig: () => {},
+      };
+      const ctx = makeCtx({ basePort: port }, { launchIo, portOpen: () => Promise.resolve(opts.portOpen === true) });
+      const child = ctx.registry.spawn({ id: 1, exe: "z", cwd: ".", port }, launchIo);
+      ctx.rememberLaunch(1, port, "/engine/mcp-bridge.log");
+      ctx.rememberEngine(1, child.pid);
+      return { ctx, seen };
+    }
+
+    it("attaches on first use, with concurrent callers sharing one attach", async () => {
+      bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 123 } });
+      const { ctx, seen } = pendingCtx(bridge.port);
+      const [a, b] = await Promise.all([ctx.clientFor(1), ctx.clientFor(1)]);
+      expect(b).toBe(a);
+      expect(seen.waits).toBe(1);
+      expect(ctx.registry.pending(1)).toBe(false);
+      ctx.registry.closeAll();
+    });
+
+    it("refuses a bridge that isn't the spawned child, leaving the child pending", async () => {
+      bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 999 } });
+      const { ctx, seen } = pendingCtx(bridge.port);
+      await expect(ctx.clientFor(1)).rejects.toThrow(/is PID 999, not the engine we launched \(PID 123\)/);
+      expect(seen.killed).toBe(0);
+      expect(ctx.registry.pending(1)).toBe(true);
+      ctx.registry.closeAll();
+    });
+
+    // A host whose lobby is closed exits 0, so a clean exit counts as gone too.
+    it.each([255, 0])("points at get_startup_errors at once when the engine already exited (code %i)", async (code) => {
+      const { ctx } = pendingCtx(1, { wait: () => new Promise<void>(() => {}), exited: Promise.resolve({ code, signal: null }) });
+      await expect(ctx.clientFor(1)).rejects.toThrow(
+        `Instance 1's engine exited during startup (exit code ${code}); get_startup_errors shows why.`,
+      );
+      ctx.registry.closeAll();
+    });
+
+    it("says the bridge isn't up yet when the port wait gives up, and keeps the engine", async () => {
+      const { ctx, seen } = pendingCtx(1, { wait: () => Promise.reject(new Error("bridge port 127.0.0.1:1 never opened")) });
+      await expect(ctx.clientFor(1)).rejects.toThrow(/no bridge on port 1 yet: bridge port 127\.0\.0\.1:1 never opened\..*kill_instance stops it/);
+      expect(seen.killed).toBe(0);
+      expect(ctx.registry.pending(1)).toBe(true);
+      ctx.registry.closeAll();
+    });
+
+    it("quit attaches first when the bridge is up, so the engine is asked to quit", async () => {
+      bridge = await FakeBridge.start();
+      const { ctx, seen } = pendingCtx(bridge.port, { pid: DEAD_PID, portOpen: true });
+      expect(await ctx.quit(1)).toBe("clean");
+      expect(seen.waits).toBe(1);
+      // The quit is fire-and-forget, so let the socket deliver it.
+      await vi.waitFor(() => expect(bridge!.received.some((m) => m.t === "cmd" && m.text === "quit")).toBe(true));
+    });
+
+    it("quit force-kills at once, without attaching or a quit wait, when the bridge isn't up", async () => {
+      // A live pid: a graceful quit would sit out its full wait for an exit that never comes.
+      const { ctx, seen } = pendingCtx(1, { pid: process.pid });
+      expect(await ctx.quit(1)).toBe("unbridged");
+      expect(seen.waits).toBe(0);
+      expect(seen.killed).toBe(1);
+    });
+
+    it("quit still force-kills when the attach on the way fails", async () => {
+      const { ctx, seen } = pendingCtx(1, { pid: undefined, portOpen: true, wait: () => Promise.reject(new Error("gone")) });
+      expect(await ctx.quit(1)).toBe("unbridged");
+      expect(seen.waits).toBe(1);
+      expect(seen.killed).toBe(1);
+    });
+  });
+
   it("clears the in-flight attach when it fails, so a later call can retry", async () => {
     bridge = await FakeBridge.start();
     const deadPort = bridge.port;
@@ -255,6 +344,41 @@ describe("ServerContext.loadMap", () => {
     stamp = "2:120";
     ctx.loadMap("/mods/x.wad", "MAP01");
     expect(reads).toBe(2);
+  });
+});
+
+describe("ServerContext.deployedModules", () => {
+  const lib = buildBehaviorAcse(["f"], []);
+
+  it("caches a regular file's modules on its stamp", () => {
+    let reads = 0;
+    let stamp = "1:100";
+    const ctx = makeCtx({}, { readFileSync: () => (reads++, lib), stampOf: () => stamp });
+    expect(ctx.deployedModules("/mods/lib.o")).toEqual([{ name: "lib.o", data: lib }]);
+    ctx.deployedModules("/mods/lib.o");
+    expect(reads).toBe(1);
+    stamp = "2:100";
+    ctx.deployedModules("/mods/lib.o");
+    expect(reads).toBe(2);
+  });
+
+  it("walks a directory on every call", () => {
+    let reads = 0;
+    const dir = path.join("/mods/res");
+    const ctx = makeCtx({}, { isDirSync: (p: string) => p === dir, readdirSync: () => ["lib.o"], readFileSync: () => (reads++, lib), readHeadSync: () => lib.subarray(0, 4) });
+    expect(ctx.deployedModules(dir)).toEqual([{ name: "lib.o", data: lib }]);
+    ctx.deployedModules(dir);
+    expect(reads).toBe(2);
+  });
+
+  it("walks a directory with the engine's skip policy for this platform", () => {
+    const dir = path.join("/mods/res");
+    const asked: string[] = [];
+    const dirWalkSkips = (name: string, _isDir: boolean, platform: NodeJS.Platform) => (asked.push(platform), name === "old.o");
+    const io = stubIo({ isDirSync: (p: string) => p === dir, readdirSync: () => ["old.o", "lib.o"], readFileSync: () => lib });
+    const ctx = new ServerContext({ ...engine, dirWalkSkips }, baseConfig, io, new InstanceRegistry(engine));
+    expect(ctx.deployedModules(dir)).toEqual([{ name: "lib.o", data: lib }]);
+    expect(asked).toEqual([process.platform, process.platform]);
   });
 });
 
@@ -413,9 +537,13 @@ describe("defaultContextIo", () => {
     expect(defaultContextIo.existsSync(here)).toBe(true);
     expect(defaultContextIo.readFileSync(here).length).toBeGreaterThan(0);
     expect(defaultContextIo.readTextSync(here)).toContain("defaultContextIo");
+    const whole = readFileSync(here);
+    expect(defaultContextIo.readHeadSync(here, 4)).toEqual(whole.subarray(0, 4));
+    expect(defaultContextIo.readHeadSync(here, whole.length + 10)).toEqual(whole);
     expect(defaultContextIo.readdirSync(path.dirname(here))).toContain("context.test.ts");
     expect(defaultContextIo.isDirSync(path.dirname(here))).toBe(true);
     expect(defaultContextIo.isDirSync(here)).toBe(false);
+    expect(defaultContextIo.realpathSync(`${path.dirname(here)}/../test/context.test.ts`)).toBe(realpathSync(here));
     expect(defaultContextIo.stampOf(here)).toMatch(/^\d+(\.\d+)?:\d+$/);
     expect(defaultContextIo.mtimeOf(here)).toEqual(statSync(here).mtime);
     await expect(defaultContextIo.sleep(0)).resolves.toBeUndefined();
@@ -438,12 +566,18 @@ describe("defaultContextIo", () => {
     defaultContextIo.removeDir(built.dir);
     expect(defaultContextIo.existsSync(built.dir)).toBe(false);
     expect(typeof defaultContextIo.launchIo.spawn).toBe("function");
+    // Reads the real source and builds in a real temp dir, refused here at its compiler.
+    expect(defaultContextIo.resolveMapSlot({ sourceFile: here, expr: "x", exe: "/no/such/bcc", deployed: [], engine })).toEqual({
+      guard: "compile",
+      refused: expect.stringContaining(`build A of ${here} failed:\n${notFound}`),
+    });
   });
 
   it("finds a free port and captures a screenshot through the real helpers", async () => {
     bridge = await FakeBridge.start();
     // The fake is listening, so the first free port is past it (not always +1: another listener may hold that).
     expect(await defaultContextIo.findFreePort(bridge.port)).toBeGreaterThan(bridge.port);
+    expect(await defaultContextIo.portOpen("127.0.0.1", bridge.port)).toBe(true);
     await expect(defaultContextIo.reap("/no/such/engine")).resolves.toMatchObject({ found: [] });
   });
 

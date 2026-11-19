@@ -9,4 +9,4 @@ text 750 483 200
 image 787 496 CLIPA0
 text 341 122 conformance hud
 image 331 4 M_PAUSE
-msg 0 0.500 0.250 14 conformance hud
+msg 0 0.500 0.250 2 conformance hud

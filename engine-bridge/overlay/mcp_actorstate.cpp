@@ -33,6 +33,8 @@
 #include "p_spec.h"
 #include "d_event.h"
 #include "doomdef.h"
+#include "gi.h"
+#include "g_shared/a_sharedglobal.h"
 #include "m_bbox.h"
 #include "p_local.h"
 #include "p_setup.h"
@@ -755,17 +757,23 @@ static FString MCP_BlockReason( AActor *a )
 	return s;
 }
 
-// The spawn test: P_TestMobjLocation with PASSMOBJ, so an actor above or below doesn't block,
-// and NOTRIGGER, so a wall it touches has its push or impact special left alone.
-static bool MCP_SpawnFits( AActor *actor )
+// A fit test (fn) run with PASSMOBJ, so an actor above or below doesn't block, and NOTRIGGER,
+// so a wall it touches has its push or impact special left alone.
+template <class F> static bool MCP_WithFitFlags( AActor *actor, F fn )
 {
 	DWORD oldFlags2 = actor->flags2, oldFlags6 = actor->flags6;
 	actor->flags2 |= MF2_PASSMOBJ;
 	actor->flags6 |= MF6_NOTRIGGER;
-	bool ok = MCP_GameCall( [actor]() { return P_TestMobjLocation( actor ); } );
+	bool ok = MCP_GameCall( fn );
 	actor->flags2 = oldFlags2;
 	actor->flags6 = oldFlags6;
 	return ok;
+}
+
+// The spawn test, shared with mcp_place's move.
+static bool MCP_SpawnFits( AActor *actor )
+{
+	return MCP_WithFitFlags( actor, [actor]() { return P_TestMobjLocation( actor ); } );
 }
 
 // Destroys a spawn that is not kept, taking it back out of the kill, item and secret totals.
@@ -1435,6 +1443,292 @@ CCMD( mcp_setprop )
 	line += ' ';
 	MCP_AppendActorKv( line, a, tid0 );
 	MCP_AppendTail( line, a, note );
+	Printf( "%s\n", line.GetChars() );
+}
+
+// --- acting on other actors: mcp_place / mcp_remove / mcp_damage / mcp_inv, direct writes as mcp_setprop's.
+
+// "key=N" parsed strictly: false when absent; bad is set when it is there but not a number.
+static bool MCP_StrictNumArg( FCommandLine &argv, const char *key, double &out, bool &bad )
+{
+	const char *v = MCP_StrArg( argv, key );
+	if ( v == NULL ) return false;
+	if ( !MCP_ParseNum( v, out ) ) bad = true;
+	return true;
+}
+
+// P_MoveThing without its fit test: the same fog, interpolation reset and replication.
+static void MCP_ForceMove( AActor *a, fixed_t x, fixed_t y, fixed_t z, bool fog )
+{
+	MCPBridgeReplySuspendGuard gameOutput;
+	const fixed_t oldX = a->x, oldY = a->y, oldZ = a->z;
+	a->SetOrigin( x, y, z );
+	if ( fog )
+	{
+		const fixed_t spots[2][3] = { { x, y, z }, { oldX, oldY, oldZ } };
+		for ( int i = 0; i < 2; i++ )
+		{
+			AActor *f = Spawn<ATeleportFog>( spots[i][0], spots[i][1], spots[i][2] + TELEFOGHEIGHT, ALLOW_REPLACE );
+			if ( MCP_IsServer() ) SERVERCOMMANDS_SpawnThing( f );
+		}
+	}
+	a->PrevX = x;
+	a->PrevY = y;
+	a->PrevZ = z;
+	if ( a == players[consoleplayer].camera ) R_ResetViewInterpolation();
+	if ( MCP_IsServer() )
+		SERVERCOMMANDS_MoveThing( a, ( oldX != x ? CM_X : 0 ) | ( oldY != y ? CM_Y : 0 ) | ( oldZ != z ? CM_Z : 0 ) );
+}
+
+// mcp_place <tid> <index> [x=] [y=] [z=] [angle=] [pitch=] [vx=] [vy=] [vz=] [addvel=1] [fog=1] [force=1]
+// Position (P_MoveThing with the spawn test's flags), then angle/pitch in degrees, then velocity in
+// units per tic, where a refused move applies nothing at all.
+CCMD( mcp_place )
+{
+	static const char *const USAGE = "error usage: mcp_place <tid> <index> [x=] [y=] [z=] [angle=] [pitch=] "
+		"[vx=] [vy=] [vz=] [addvel=1] [fog=1] [force=1]\n";
+	static const char *const POS_KEYS[3] = { "x", "y", "z" };
+	static const char *const VEL_KEYS[3] = { "vx", "vy", "vz" };
+	int tid, index, addvel = 0, fog = 0, force = 0;
+	double pos[3], vel[3], angle = 0, pitch = 0;
+	bool hasPos[3], hasVel[3], bad = false;
+	for ( int i = 0; i < 3; i++ )
+	{
+		hasPos[i] = MCP_StrictNumArg( argv, POS_KEYS[i], pos[i], bad );
+		hasVel[i] = MCP_StrictNumArg( argv, VEL_KEYS[i], vel[i], bad );
+	}
+	const bool hasAngle = MCP_StrictNumArg( argv, "angle", angle, bad );
+	const bool hasPitch = MCP_StrictNumArg( argv, "pitch", pitch, bad );
+	MCP_IntArg( argv, "addvel", addvel );
+	MCP_IntArg( argv, "fog", fog );
+	MCP_IntArg( argv, "force", force );
+	const bool moving = hasPos[0] || hasPos[1] || hasPos[2], launching = hasVel[0] || hasVel[1] || hasVel[2];
+	if ( !MCP_TargetArgs( argv, tid, index ) || bad || !( moving || launching || hasAngle || hasPitch ) )
+	{
+		Printf( "%s", USAGE );
+		return;
+	}
+	for ( int i = 0; i < 3; i++ )
+	{
+		if ( hasPos[i] && !MCP_MapCoord( pos[i] ) ) { Printf( "error %s\n", MCP_COORD_RANGE ); return; }
+		if ( hasVel[i] && !MCP_MapCoord( vel[i] ) ) { Printf( "error velocity must be within -32767..32767\n" ); return; }
+	}
+	if ( hasPitch && fabs( pitch ) > 90 ) { Printf( "error pitch must be within -90..90\n" ); return; }
+	if ( !MCP_TargetGuards( "place", tid ) ) return;
+	AActor *a = MCP_ResolveTarget( tid, index );
+	if ( a == NULL ) return;
+
+	const fixed_t fromX = a->x, fromY = a->y, fromZ = a->z;
+	if ( moving )
+	{
+		const fixed_t x = hasPos[0] ? FLOAT2FIXED( pos[0] ) : fromX, y = hasPos[1] ? FLOAT2FIXED( pos[1] ) : fromY;
+		// summon_at's floor default, given literally: P_MoveThing's fit test fails ONFLOORZ.
+		const fixed_t z = hasPos[2] ? FLOAT2FIXED( pos[2] )
+			: ( hasPos[0] || hasPos[1] ) ? P_PointInSector( x, y )->floorplane.ZatPoint( x, y ) : fromZ;
+		FString zErr;
+		if ( !MCP_ZFits( FIXED2DBL( z ), a->height, zErr ) ) { Printf( "error %s\n", zErr.GetChars() ); return; }
+		if ( force ) MCP_ForceMove( a, x, y, z, fog != 0 );
+		else if ( !MCP_WithFitFlags( a, [&]() { return P_MoveThing( a, x, y, z, fog != 0 ); } ) )
+		{
+			// P_MoveThing put the actor back, so a floor/ceiling reason is read at the refused spot.
+			a->SetOrigin( x, y, z );
+			FString why = MCP_BlockReason( a );
+			a->SetOrigin( fromX, fromY, fromZ );
+			Printf( "error %s\n", why.GetChars() );
+			return;
+		}
+	}
+	if ( hasAngle ) MCP_SetYaw( a, angle );
+	if ( hasPitch ) MCP_SetPitchDeg( a, pitch );
+	if ( launching )
+	{
+		// Set mode zeroes all three axes, so a missing one is set to its own value (added: 0).
+		const fixed_t cur[3] = { a->velx, a->vely, a->velz };
+		fixed_t v[3];
+		for ( int i = 0; i < 3; i++ ) v[i] = hasVel[i] ? FLOAT2FIXED( vel[i] ) : addvel ? 0 : cur[i];
+		P_Thing_SetVelocity( a, v[0], v[1], v[2], addvel != 0, false );
+	}
+
+	FString line = "placed ", extra;
+	MCP_AppendActorKv( line, a, a->tid );
+	line.AppendFormat( " fromx=%.1f fromy=%.1f fromz=%.1f vx=%.2f vy=%.2f vz=%.2f", FIXED2FLOAT( fromX ),
+		FIXED2FLOAT( fromY ), FIXED2FLOAT( fromZ ), FIXED2FLOAT( a->velx ), FIXED2FLOAT( a->vely ), FIXED2FLOAT( a->velz ) );
+	if ( moving && fog ) extra += " fog=1";
+	if ( moving && force ) extra += " forced=1";
+	MCP_AppendTail( line, a, extra );
+	Printf( "%s\n", line.GetChars() );
+}
+
+// mcp_remove <tid> <index> [all=1]: Thing_Remove on the index-th actor with the tid, or on every one,
+// reporting a live player body as skipped since P_RemoveThing leaves it.
+CCMD( mcp_remove )
+{
+	static const char *const USAGE = "error usage: mcp_remove <tid> <index> [all=1]\n";
+	int tid, index, all = 0;
+	MCP_IntArg( argv, "all", all );
+	if ( !MCP_TargetArgs( argv, tid, index ) || tid == 0 || ( all && index > 0 ) ) { Printf( "%s", USAGE ); return; }
+	if ( !MCP_TargetGuards( "remove", tid ) ) return;
+
+	// Collected first: a removal can take a later one with it (an owner its inventory), skipped below.
+	TArray<AActor *> targets;
+	if ( all )
+	{
+		FActorIterator it( tid );
+		for ( AActor *a = it.Next(); a != NULL; a = it.Next() )
+			if ( !MCP_IsHidden( a ) ) targets.Push( a );
+		if ( targets.Size() == 0 ) { Printf( "error no actor with tid %d\n", tid ); return; }
+	}
+	else
+	{
+		AActor *a = MCP_ResolveTarget( tid, index );
+		if ( a == NULL ) return;
+		targets.Push( a );
+	}
+
+	int count = 0;
+	FString skipped;
+	for ( unsigned i = 0; i < targets.Size(); i++ )
+	{
+		AActor *a = targets[i];
+		if ( ( a->ObjectFlags & OF_EuthanizeMe ) || MCP_IsHidden( a ) ) continue;
+		if ( a->player != NULL && a == a->player->mo )
+		{
+			skipped.AppendFormat( "%s%s", skipped.IsEmpty() ? "" : ",", MCP_ActorRef( a ).GetChars() );
+			continue;
+		}
+		// The head first: a destroyed actor's tid reads 0.
+		FString line = "removed ";
+		MCP_AppendActorKv( line, a, a->tid );
+		MCP_GameCall( [&]() { P_RemoveThing( a ); } );
+		// A map-reset game mode hides a map-placed actor instead (HideOrDestroyIfSafe); it keeps its tid.
+		if ( MCP_IsHidden( a ) ) line += " hidden=1";
+		Printf( "%s\n", line.GetChars() );
+		count++;
+	}
+	FString total;
+	total.Format( "removed_total count=%d", count );
+	if ( !skipped.IsEmpty() ) total.AppendFormat( " skipped=%s", skipped.GetChars() );
+	Printf( "%s\n", total.GetChars() );
+}
+
+// mcp_damage <tid> <index> <amount> [type=Name] [source=<tid>]
+// P_DamageMobj with no inflictor, as Thing_Damage, replying health before and after since its return differs per engine.
+CCMD( mcp_damage )
+{
+	static const char *const USAGE = "error usage: mcp_damage <tid> <index> <amount> [type=Name] [source=<tid>]\n";
+	int tid, index, amount, srcTid = 0;
+	const char *srcArg = MCP_StrArg( argv, "source" );
+	if ( argv.argc() < 4 || !MCP_TargetArgs( argv, tid, index ) || !MCP_ParseInt( argv[3], amount ) || amount < 1 ||
+		amount > TELEFRAG_DAMAGE || ( srcArg != NULL && ( !MCP_ParseInt( srcArg, srcTid ) || srcTid < 0 ) ) )
+	{
+		Printf( "%s", USAGE );
+		return;
+	}
+	if ( !MCP_TargetGuards( "damage", tid ) ) return;
+	if ( srcArg != NULL && srcTid == 0 && MCP_IsServer() ) { Printf( "error server: pass a source tid\n" ); return; }
+	AActor *a = MCP_ResolveTarget( tid, index );
+	if ( a == NULL ) return;
+	AActor *source = ( srcArg != NULL ) ? MCP_ResolveActor( srcTid, 0, true ) : NULL;
+	if ( srcArg != NULL && source == NULL ) { Printf( "error no source actor with tid %d\n", srcTid ); return; }
+	if ( MCP_IsDead( a ) ) { Printf( "error already dead\n" ); return; }
+
+	const char *typeArg = MCP_StrArg( argv, "type" );
+	const FName type = ( typeArg != NULL ) ? FName( typeArg ) : FName( NAME_None );
+	const int oldhp = a->health, tid0 = a->tid;
+	// No DMG_FORCED: it skips the player-health mirror.
+	MCP_GameCall( [&]() { P_DamageMobj( a, NULL, source, amount, type ); } );
+	const int dealt = oldhp - a->health;
+
+	FString line = "damaged ";
+	MCP_AppendActorKv( line, a, tid0 );
+	line.AppendFormat( " oldhp=%d dealt=%d type=%s", oldhp, dealt, type.GetChars() );
+	if ( source != NULL ) line.AppendFormat( " source=%s", MCP_ActorRef( source ).GetChars() );
+	if ( dealt <= 0 ) line += " nodamage=1";
+	if ( a->health <= 0 ) line += " died=1";
+	if ( a->ObjectFlags & OF_EuthanizeMe ) line += " removed=1";
+	MCP_AppendTail( line, a, "" );
+	Printf( "%s\n", line.GetChars() );
+}
+
+// p_acs.cpp's DoTakeInv, which is static there.
+static void MCP_TakeInv( AActor *actor, const PClass *info, int amount )
+{
+	AInventory *item = actor->FindInventory( info );
+	if ( item == NULL ) return;
+	const int oldAmount = item->Amount;
+	item->Amount -= amount;
+	if ( MCP_IsServer() && actor->player != NULL && ( oldAmount > 0 || amount < 0 ) )
+		SERVERCOMMANDS_TakeInventory( actor->player - players, item->GetClass(), MAX( 0, item->Amount ) );
+	if ( item->Amount <= 0 )
+	{
+		// Ammo and internal armor stay at 0, as ACS keeps them.
+		if ( item->ItemFlags & IF_KEEPDEPLETED ) item->Amount = 0;
+		else item->Destroy();
+	}
+}
+
+// The class a given item's amount is kept under: armor in BasicArmor, an ammo pickup in its parent ammo,
+// a Health item in health itself (NULL), anything else in its own class.
+static const PClass *MCP_HeldClass( const PClass *type )
+{
+	if ( type->IsDescendantOf( RUNTIME_CLASS( ABasicArmorPickup ) ) || type->IsDescendantOf( RUNTIME_CLASS( ABasicArmorBonus ) ) )
+		return RUNTIME_CLASS( ABasicArmor );
+	if ( type->IsDescendantOf( RUNTIME_CLASS( AHealth ) ) ) return NULL;
+	// AAmmo::GetParentAmmo's walk, on the class.
+	if ( type != RUNTIME_CLASS( AAmmo ) && type->IsDescendantOf( RUNTIME_CLASS( AAmmo ) ) )
+		while ( type->ParentClass != RUNTIME_CLASS( AAmmo ) ) type = type->ParentClass;
+	return type;
+}
+
+static int MCP_HeldAmount( AActor *a, const PClass *held )
+{
+	if ( held == NULL ) return a->health;
+	AInventory *item = a->FindInventory( held );
+	return ( item != NULL ) ? item->Amount : 0;
+}
+
+// mcp_inv <tid> <index> <give|take> <class> [amount]
+// ACS GiveInventory/TakeInventory on one actor (amount default 1), with what it holds before and after.
+CCMD( mcp_inv )
+{
+	static const char *const USAGE = "error usage: mcp_inv <tid> <index> <give|take> <class> [amount]\n";
+	int tid, index, amount = 1;
+	if ( argv.argc() < 5 || argv.argc() > 6 || !MCP_TargetArgs( argv, tid, index ) ||
+		( stricmp( argv[3], "give" ) != 0 && stricmp( argv[3], "take" ) != 0 ) ||
+		( argv.argc() == 6 && ( !MCP_ParseInt( argv[5], amount ) || amount < 1 ) ) )
+	{
+		Printf( "%s", USAGE );
+		return;
+	}
+	const bool give = stricmp( argv[3], "give" ) == 0;
+	if ( !MCP_TargetGuards( give ? "give" : "take", tid ) ) return;
+	// ACS's own rename.
+	const char *name = ( stricmp( argv[4], "Armor" ) == 0 ) ? ( give ? "BasicArmorPickup" : "BasicArmor" ) : argv[4];
+	const PClass *type = PClass::FindClass( name );
+	if ( type == NULL || type->ActorInfo == NULL || !type->IsDescendantOf( RUNTIME_CLASS( AInventory ) ) )
+	{
+		Printf( "error not an inventory class %s\n", argv[4] );
+		return;
+	}
+	AActor *a = MCP_ResolveTarget( tid, index );
+	if ( a == NULL ) return;
+	// DoGiveInv and DoTakeInv send clients a player's inventory only.
+	if ( MCP_IsServer() && a->player == NULL ) { Printf( "error not replicated: %s on a non-player\n", argv[3] ); return; }
+
+	// A take looks up the exact class (FindInventory), so ClipBox there takes nothing from Clip.
+	const PClass *held = give ? MCP_HeldClass( type ) : type;
+	const int before = MCP_HeldAmount( a, held ), tid0 = a->tid;
+	bool ok = true;
+	if ( give ) ok = MCP_GameCall( [&]() { return DoGiveInv( a, type, amount ); } );
+	else MCP_GameCall( [&]() { MCP_TakeInv( a, type, amount ); } );
+
+	FString line;
+	line.Format( "inv op=%s item=%s held=%s before=%d after=%d", give ? "give" : "take", type->TypeName.GetChars(),
+		( held != NULL ) ? held->TypeName.GetChars() : "health", before, MCP_HeldAmount( a, held ) );
+	if ( !ok ) line += " ok=0";
+	line += ' ';
+	MCP_AppendActorKv( line, a, tid0 );
+	MCP_AppendTail( line, a, "" );
 	Printf( "%s\n", line.GetChars() );
 }
 

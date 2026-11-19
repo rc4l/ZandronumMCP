@@ -11,6 +11,7 @@ import { engine } from "../dist/engine.js";
 import { writeSync, mkdtempSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const config = configFromEnv(engine, process.env);
@@ -81,6 +82,7 @@ try {
   const launched = await call("launch_instance", {
     map: "MAP01",
     skill: 2,
+    files: [fileURLToPath(new URL("../test/fixtures/gameplay", import.meta.url))],
     extraArgs: ["-nosound", "-nomusic", ...(saveInto === "path" ? [] : [saveInto.flag, saveDir])],
   });
   check("launch_instance", !launched.isError, textOf(launched));
@@ -361,6 +363,36 @@ try {
   const bogusFlag = await prop({ prop: "flag:BOGUS", value: true });
   check("set_actor_prop reports an unknown flag", bogusFlag.isError && /unknown flag/.test(textOf(bogusFlag)), textOf(bogusFlag));
 
+  // place_actor, give by tid and damage_actor on the same imp; remove_actor after watch_actors below.
+  const spot2 = items.structuredContent?.actors?.find((a) => a.dist > 256 && Math.hypot(a.x - spot.x, a.y - spot.y) > 64);
+  check("find_actors finds a second pickup away from the player", !!spot2, textOf(items));
+  const moved = await call("place_actor", { tid: p.tid, x: spot2.x, y: spot2.y });
+  const m = moved.structuredContent ?? {};
+  check(
+    "place_actor moves the imp onto the second pickup's floor, reporting where it was",
+    !moved.isError && m.x === spot2.x && m.y === spot2.y && m.z === spot2.z && m.fromx === spot.x && m.fromy === spot.y,
+    `${textOf(moved)} / spot2 ${JSON.stringify(spot2)}`,
+  );
+  const there = (await call("find_actors", { tid: p.tid })).structuredContent?.actors?.[0];
+  check("find_actors shows the imp at the second pickup", there?.x === spot2.x && there?.y === spot2.y, JSON.stringify(there));
+  const ontoPlayer = await call("place_actor", { tid: p.tid, x: p0.x, y: p0.y, angle: 180 });
+  const still = (await call("find_actors", { tid: p.tid })).structuredContent?.actors?.[0];
+  check(
+    "place_actor onto the player is refused, leaving the imp unmoved and unturned",
+    ontoPlayer.isError && /blocked by/.test(textOf(ontoPlayer)) && still?.x === spot2.x && still?.y === spot2.y && still?.angle === there?.angle,
+    `${textOf(ontoPlayer)} / ${JSON.stringify(still)}`,
+  );
+  if (engine.e2e.summonAtVoid) {
+    const voidPlace = await call("place_actor", { tid: p.tid, x: 30000, y: 30000 });
+    check("place_actor into the void reports outside map", voidPlace.isError && /outside map/.test(textOf(voidPlace)), textOf(voidPlace));
+  }
+  const clip = await call("give", { tid: 0, item: "Clip" });
+  const c = clip.structuredContent ?? {};
+  check("give Clip to tid 0 reports the held Clip count before and after", !clip.isError && c.held === "Clip" && c.after === c.before + 1, textOf(clip));
+  const hurt = await call("damage_actor", { tid: p.tid, amount: 10 });
+  const d = hurt.structuredContent ?? {};
+  check("damage_actor 10 lowers the imp's hp by 10", !hurt.isError && d.dealt === 10 && d.hp === d.oldhp - 10, textOf(hurt));
+
   await call("run_command", { text: "menu_main" });
   const blocked = await call("ensure_live");
   check(
@@ -387,6 +419,13 @@ try {
     "watch_actors samples the placed imp by tid with rising maptime",
     !watched.isError && watchRows.length > 0 && watchRows.every((r, i) => i === 0 || r[0] > watchRows[i - 1][0]),
     textOf(watched),
+  );
+  const gone = await call("remove_actor", { tid: p.tid });
+  const afterRemove = await call("find_actors", { tid: p.tid });
+  check(
+    "remove_actor removes the imp, and find_actors no longer finds it",
+    gone.structuredContent?.count === 1 && afterRemove.structuredContent?.actors?.length === 0,
+    `${textOf(gone)} / ${textOf(afterRemove)}`,
   );
 
   const shotFile = await call("screenshot_file", { name: "e2e_shot" });
@@ -507,6 +546,7 @@ try {
     } finally {
       await call("run_script", { name: "E2eBlockPlayers", args: [0], always: true });
       await call("set_actor_prop", { prop: "maxstepheight", value: oldStep });
+      await call("remove_actor", { tid: probeTid });
     }
   }
   const stepped = await call("run_acs", { compiler: "bcc", source: 'script 7 (void) { Delay(1); Log(s:"e2e later"); }', script: 7, stepTics: 3 });
@@ -550,6 +590,22 @@ try {
   await call("step", { tics: 2 });
   const allowed = await call("save_game", { name: saveName("e2eclean") });
   check("save_game works again after load_map", !allowed.isError, textOf(allowed));
+
+  const notifyPos = (await call("player_state")).structuredContent;
+  const notifyActor = await call("summon_at", { className: "E2eNotifyControl", x: notifyPos.x, y: notifyPos.y, force: true });
+  const notifyTid = notifyActor.structuredContent?.tid;
+  check("synchronous game-output fixture spawns", !notifyActor.isError && !!notifyTid, textOf(notifyActor));
+  if (notifyTid) {
+    const death = await call("damage_actor", { tid: notifyTid, amount: 1 });
+    check("damage_actor kills the game-output control", !death.isError && death.structuredContent?.died === 1, textOf(death));
+    const deathLog = await call("read_log", { pattern: "e2e synchronous death" });
+    check("damage_actor preserves the synchronous game print in the log", /e2e synchronous death/.test(textOf(deathLog)), textOf(deathLog));
+    await call("step", { tics: 1 });
+    const notify = await call("read_hud", { pattern: "e2e synchronous death|damaged class=" });
+    check("synchronous death output reaches notify, not the bridge damage reply",
+      notify.structuredContent?.text?.some((t) => /e2e synchronous death/.test(t.text)) === true &&
+      !notify.structuredContent?.text?.some((t) => /damaged class=/.test(t.text)), textOf(notify));
+  }
 
   const timedStart = (await call("player_state")).structuredContent;
   const timed = await call("input_timeline", { segments: [{ tics: 5, forward: 1 }] });

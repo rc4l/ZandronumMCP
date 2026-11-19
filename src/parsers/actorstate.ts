@@ -1,4 +1,4 @@
-import { firstError, hasHeader, matchLines, parseKv, parseKvLines, type KvRecord } from "./lines.js";
+import { firstError, hasHeader, markerText, matchLines, parseKv, parseKvLines, type KvRecord } from "./lines.js";
 
 export interface DecorateState {
   sprite: string;
@@ -296,4 +296,17 @@ export function filterFound(
   const kept = found.actors.filter((a) => keys.every(([name, on]) => hasFlag(a, name) === on));
   if (kept.length <= limit) return { actors: kept };
   return { actors: kept.slice(0, limit), truncated: { shown: limit, total: kept.length } };
+}
+
+/** remove_actor's reply text from its `removed_total` and `removed` rows, and the refs it skipped. */
+export function describeRemoved(total: KvRecord, removed: KvRecord[]): { text: string; skipped?: string[] } {
+  const names = removed.map((r) => `${r.class}#${r.tid}${markerText(r, ["hidden"])}`);
+  const text = `removed ${total.count}${names.length > 0 ? `: ${names.join(", ")}` : ""}`;
+  if (total.skipped === undefined) return { text };
+  const skipped = String(total.skipped).split(",");
+  const bodies = skipped.filter((s) => /^player\d+$/.test(s));
+  const items = skipped.filter((s) => !bodies.includes(s));
+  const groups = [[bodies, "a live player's body"], [items, "owned inventory, which the engine keeps"]] as const;
+  const why = groups.filter(([refs]) => refs.length > 0).map(([refs, reason]) => `${refs.join(", ")} (${reason})`).join("; ");
+  return { text: `${text}; skipped ${why}`, skipped };
 }

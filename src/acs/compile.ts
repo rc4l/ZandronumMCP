@@ -1,7 +1,7 @@
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { accessSync, constants, existsSync, mkdtempSync, realpathSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { envName, type EngineAdapter } from "../adapter.js";
 import type { Prelude } from "./profiles.js";
 
@@ -25,12 +25,29 @@ export type CompileResult =
   | { ok: true; dir: string; object: string; token: string }
   | { ok: false; dir: string; diagnostics: string; exe?: string };
 
+/** A compile of a file already on disk, run in `cwd`. */
+export interface FileCompileRequest {
+  compiler: AcsCompiler;
+  exe?: string;
+  /** The main source file as the compiler is given it, relative to `cwd`. */
+  main: string;
+  cwd: string;
+  includeDirs?: string[];
+  object: string;
+  /** What needs the compiler, for the not-found message (`run_acs needs zt-bcc ...`). */
+  purpose: string;
+  engine: Pick<EngineAdapter, "envPrefix">;
+}
+
+/** `output` is what the compiler printed on success: zt-bcc's warnings exit 0. */
+export type FileCompileResult = { ok: true; output: string } | { ok: false; diagnostics: string; exe?: string };
+
 /** Filesystem and process access, injectable so every branch is testable. */
 export interface CompileDeps {
   mkdtemp: (prefix: string) => string;
-  writeFile: (p: string, text: string) => void;
-  /** Runs the compiler; throws (like execFileSync) on a nonzero exit. */
-  exec: (exe: string, args: string[], cwd: string) => void;
+  writeFile: (p: string, data: string | Buffer) => void;
+  /** Runs the compiler and returns what it printed (stdout, then stderr); throws (like execFileSync) on a nonzero exit. */
+  exec: (exe: string, args: string[], cwd: string) => string;
   pathEnv: () => string | undefined;
   /** Suffixes tried on a name that has none (see pathExts). */
   exeExts: string[];
@@ -76,9 +93,12 @@ function isExecutable(p: string): boolean {
 
 export const defaultCompileDeps: CompileDeps = {
   mkdtemp: (prefix) => mkdtempSync(prefix),
-  writeFile: (p, text) => writeFileSync(p, text),
+  writeFile: (p, data) => writeFileSync(p, data),
+  // execFileSync drops stderr on a zero exit; its error carries the same fields as this one.
   exec: (exe, args, cwd) => {
-    execFileSync(exe, args, { cwd, stdio: "pipe", timeout: 30_000 });
+    const r = spawnSync(exe, args, { cwd, timeout: 30_000 });
+    if (r.error || r.status !== 0) throw Object.assign(r.error ?? new Error(`${exe} exited with ${r.status ?? r.signal}`), r);
+    return `${r.stdout}${r.stderr}`;
   },
   pathEnv: () => process.env.PATH,
   exeExts: pathExts(process.platform),
@@ -109,8 +129,14 @@ const HOME: Record<AcsCompiler, string> = {
   acc: "acc (https://github.com/ZDoom/acc)",
 };
 
+type Located = { exe: string; real: string };
+
 /** The executable to run and its resolved file, or why there is none. */
-function locate(req: CompileRequest, deps: CompileDeps): { exe: string; real: string } | { missing: string } {
+function locate(
+  req: { compiler: AcsCompiler; exe?: string; engine: Pick<EngineAdapter, "envPrefix"> },
+  deps: CompileDeps,
+  purpose: string,
+): Located | { missing: string } {
   const env = envName(req.engine, req.compiler.toUpperCase());
   const exeOnly = deps.exeExts.includes(".exe") ? " Only .exe files run, not .cmd/.bat wrappers." : "";
   if (req.exe !== undefined) {
@@ -131,7 +157,7 @@ function locate(req: CompileRequest, deps: CompileDeps): { exe: string; real: st
   return {
     missing:
       `no ACS compiler found: tried ${DEFAULT_NAMES[req.compiler].join(", ")} on PATH. ` +
-      `run_acs needs ${HOME[req.compiler]}: put it on PATH or set ${env} to its path in the MCP server's env.${exeOnly}`,
+      `${purpose} needs ${HOME[req.compiler]}: put it on PATH or set ${env} to its path in the MCP server's env.${exeOnly}`,
   };
 }
 
@@ -188,6 +214,34 @@ export function consolePath(
   return { token: `"${s}"` };
 }
 
+/** Run a located compiler on `main` in `cwd`: a `-i` per include dir, then zt-bcc's lib/ when they don't reach it. */
+function runCompiler(
+  compiler: AcsCompiler,
+  found: Located,
+  includeDirs: string[] | undefined,
+  files: { main: string; object: string; cwd: string },
+  deps: CompileDeps,
+  prelude?: Prelude,
+): { ok: true; output: string } | { ok: false; diagnostics: string } {
+  // Resolved against the server's cwd, not the temp dir the compiler runs in.
+  const dirs = (includeDirs ?? []).map((d) => path.resolve(d));
+  const lib = compiler === "bcc" ? bccLibDir(found.real, dirs, deps) : undefined;
+  if (lib !== undefined) dirs.push(lib);
+  try {
+    return { ok: true, output: deps.exec(found.exe, [...dirs.flatMap((d) => ["-i", d]), files.main, files.object], files.cwd) };
+  } catch (err) {
+    return { ok: false, diagnostics: diagnosticsOf(err, compiler, found.exe, prelude) };
+  }
+}
+
+/** Compile a source file already on disk, keeping what the compiler printed on success too. */
+export function compileFile(req: FileCompileRequest, deps: CompileDeps = defaultCompileDeps): FileCompileResult {
+  const found = locate(req, deps, req.purpose);
+  if ("missing" in found) return { ok: false, diagnostics: found.missing };
+  const ran = runCompiler(req.compiler, found, req.includeDirs, req, deps);
+  return ran.ok ? ran : { ...ran, exe: found.exe };
+}
+
 /** Compile `req.source`; the caller removes `dir` once the engine has read the object. */
 export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompileDeps): CompileResult {
   const dir = deps.mkdtemp(path.join(tmpdir(), "mcp-runacs-"));
@@ -202,7 +256,7 @@ export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompi
         "Set TMPDIR (TEMP on Windows) in the MCP server's env to an existing folder without that; plain ASCII is safest.",
     };
   }
-  const found = locate(req, deps);
+  const found = locate(req, deps, "run_acs");
   if ("missing" in found) return { ok: false, dir, diagnostics: found.missing };
   let main = "snippet.acs";
   if (req.prelude) {
@@ -221,15 +275,8 @@ export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompi
       deps.writeFile(path.join(dir, main), '#library "mcpsnip"\n#include "snippet.acs"\n');
     }
   }
-  // Resolved against the server's cwd, not the temp dir the compiler runs in.
-  const dirs = (req.includeDirs ?? []).map((d) => path.resolve(d));
-  const lib = req.compiler === "bcc" ? bccLibDir(found.real, dirs, deps) : undefined;
-  if (lib !== undefined) dirs.push(lib);
-  try {
-    deps.exec(found.exe, [...dirs.flatMap((d) => ["-i", d]), main, object], dir);
-  } catch (err) {
-    return { ok: false, dir, diagnostics: diagnosticsOf(err, req.compiler, found.exe, req.prelude), exe: found.exe };
-  }
+  const ran = runCompiler(req.compiler, found, req.includeDirs, { main, object, cwd: dir }, deps, req.prelude);
+  if (!ran.ok) return { ok: false, dir, diagnostics: ran.diagnostics, exe: found.exe };
   return { ok: true, dir, object, token: tok.token };
 }
 

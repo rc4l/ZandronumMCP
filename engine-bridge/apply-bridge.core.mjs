@@ -29,6 +29,7 @@ export const OVERLAY_FILES = [
 export const ACS_BLOCKS = [
   ["MCP_ACSVARS", "mcp_acsvars.inc", "ACS var CCMDs"],
   ["MCP_MAPVARS", "mcp_mapvars.inc", "map var CCMDs"],
+  ["MCP_MAPSLOT", "mcp_mapslot.inc", "map var slot CCMD"],
   ["MCP_SCRIPTS", "mcp_scripts.inc", "script/function CCMDs"],
   ["MCP_RUNACS", "mcp_runacs.inc", "run_acs and run_script CCMDs"],
 ];

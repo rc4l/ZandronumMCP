@@ -18,7 +18,7 @@ The single source of truth for the wire contract between the **engine bridge**
 `hello` — sent once, immediately on connect. `caps` lists what the bridge
 supports so the client can degrade gracefully:
 ```json
-{"v":1,"t":"hello","engine":"<id>","bridge":"<version>","pid":12345,"caps":["cmd","event","time","status","input","runscript","spawnfind","runacsname"]}
+{"v":1,"t":"hello","engine":"<id>","bridge":"<version>","pid":12345,"caps":["cmd","event","time","status","input","runscript","spawnfind","runacsname","mapslot"]}
 ```
 
 `engine` is the engine adapter's `id` (`zandronum`); `bridge` is that
@@ -35,7 +35,8 @@ under Scripted input, which `input_timeline` needs), `runscript` (the
 takes `find=`; a bridge without it ignores the key, so `summon_at` refuses
 `findSpot` there instead of sending it), `runacsname` (`mcp_runacs` takes
 `name=1`; without it `run_acs` sends a string script bare and refuses a name
-made of digits, which an older overlay would run as a number).
+made of digits, which an older overlay would run as a number), `mapslot` (the
+`mcp_mapslot` CCMD under ACS; without it the map-var tools refuse `sourceFile`).
 
 `out` — one line of console output, streamed asynchronously:
 ```json
@@ -172,6 +173,10 @@ General rules:
 | `findactors` | `[class=<name>] [tid=<n>] [radius=<n>] [limit=<n>] [detail=1]`; `limit` defaults to 200, `0` means none | `MCP_FOUND`, then one `found class= tid= hp= spawnhp= x= y= z= angle= pitch= [dist=] [index=] sprite= frame= flags= [target=]` line per actor; `dist=` and nearest-first order only with a console player actor (never on a `-host` server, whose slot 0 is a client's); `index=` (the actor's place among the TID's matches) on a `tid=` search; `detail=1` adds `[master=] [tracer=] special= args= vel= radius= height= floorz= [player=]`; then `truncated shown=<n> total=<n>` past `limit` |
 | `mcp_spawnat` | `<class> <x> <y> [z=] [angle=] [tid=<n>\|auto] [kind=friend\|foe] [force=1] [find=<radius>] [health=] [special=] [args=a,b,c,d,e] [ambush=1] [dormant=1]` | `spawned class= tid= hp= spawnhp= x= y= z= angle= pitch= flags= [requested=] [special= args=] [forced=1] [moved=<dist>]`, or `error ...` (e.g. `blocked by line <n>`). `find=` (above 0, up to 256, else `error find wants a radius above 0, up to 256`; ignored with `force=1`) only matters when the spot is blocked: the blocked actor is then removed (it only probes the candidates, though anything its own `BeginPlay` created stays at the requested spot) and a fresh one of its class is spawned at the nearest spot in that radius that passes the same fit test and has no wall on the straight path from the requested point (a one-sided or blocking line, or an opening lower than the actor, measured with the actor at the requested point), and the reply adds `moved=`. Candidates lie on rings one step apart (the actor's radius, at least 8), nearest ring first, each walked counter-clockwise from east; without `z=` the actor is put on the new spot's floor. `error no free spot within <radius>: <the requested spot's reason>` when none is free. Dynamic lights, missiles and MBF bouncers are never moved: they get the plain `error <reason>`. Every fit test runs with `NOTRIGGER` set, so it presses no push or impact line; a `TOUCHY` actor it overlaps still dies, a `BUMPSPECIAL` one's special can still fire, and a missile still damages what it overlaps at the requested spot. `find=` needs the `spawnfind` cap |
 | `mcp_setprop` | `<tid> <index> <prop> [value...] [force=1]`, `force=1` last (tid 0: the console player); `<prop>` is a property name or `flag:<NAME>` | `setprop prop=<as given> [old=] [new=] class= tid= hp= spawnhp= x= y= z= angle= pitch= flags= [died=1] [removed=1] [noop=1] name=<tag>` (`GetTag()`: the class name for a stock actor); the read form (no value) has no `new=`, and `nametag` has neither `old=` nor `new=` (`name=` shows it) |
+| `mcp_place` | `<tid> <index> [x=] [y=] [z=] [angle=] [pitch=] [vx=] [vy=] [vz=] [addvel=1] [fog=1] [force=1]`, at least one of the eight fields; numbers parse strictly, coordinates and velocities within -32767..32767 (`error coordinates must be within -32767..32767`, `error velocity must be ...`), pitch within -90..90 | `placed class= tid= hp= spawnhp= x= y= z= angle= pitch= fromx= fromy= fromz= vx= vy= vz= flags= [fog=1] [forced=1] name=<tag>`. Position first: a missing `x`/`y` keeps the current one; without `z`, a given `x` or `y` puts the actor on the sector floor there, else `z` stays. The move is `P_MoveThing` under `mcp_spawnat`'s fit flags (`PASSMOBJ`, `NOTRIGGER`); refused, it prints `mcp_spawnat`'s `error <reason>` and nothing at all is applied. `force=1` skips the test; `fog=1` spawns teleport fog at both spots. Then angle and pitch (degrees, no view interpolation), then velocity (units per tic: set, a missing axis keeping its current value, or added with `addvel=1`). `fog=`/`forced=` only with a position |
+| `mcp_remove` | `<tid> <index> [all=1]`, tid 1 or more; `all=1` with index 0 | one `removed class= tid= hp= spawnhp= x= y= z= angle= pitch= [hidden=1]` per removed actor, read before the removal, then `removed_total count=<n> [skipped=<ref>,...]`. `P_RemoveThing`: out of the kill/item totals, no death. A live player body stays and is listed in `skipped=` as `player<n>`; an owned inventory item carrying the tid is removed like any actor (`P_RemoveThing` has no owner check). `error no actor with tid <n>` when `all=1` finds none |
+| `mcp_damage` | `<tid> <index> <amount> [type=<name>] [source=<tid>]`, amount 1..1000000; `source=0` is the console player's body | `damaged class= tid= hp= spawnhp= x= y= z= angle= pitch= oldhp= dealt= type=<name> [source=<ref>] [nodamage=1] [died=1] [removed=1] flags= name=<tag>`: `P_DamageMobj` with no inflictor, `hp=` after it, `dealt=` `oldhp` minus `hp`, `nodamage=1` when that is 0 or less. `error already dead`, `error no source actor with tid <n>`, `error server: pass a source tid` |
+| `mcp_inv` | `<tid> <index> <give\|take> <class> [<amount>]`, amount 1 or more (default 1); `Armor` names `BasicArmorPickup` to give and `BasicArmor` to take, as ACS does | `inv op=<give\|take> item=<class> held=<class\|health> before= after= [ok=0] class= tid= hp= spawnhp= x= y= z= angle= pitch= flags= name=<tag>`. ACS `GiveInventory`/`TakeInventory` on one actor; `held=` is, for a give, where the amount is kept (armor: `BasicArmor`; an ammo pickup: its parent ammo; a `Health` item: `health`, the actor's own; else the item), and for a take the item class itself, the only class `TakeInventory` looks up (so taking `ClipBox` takes nothing from `Clip`), read before and after. `ok=0` when a give's pickup was refused. `error not an inventory class <name>`; on a server `error not replicated: ...` for a non-player |
 | `mcp_setview` | `<deg> [<pitch>]`, `tid=<n>` or `class=<name>` | `view angle= pitch= [tid= class=]` |
 | `dumpplayers` | none | `MCP_PLAYERS`, then one `player slot= bot= host= state= hp= armor= [weapon=] x= y= z= angle= pitch= tid= cheats= frags= kills= items= secrets= [team=] ... name=` per in-game player; `team=` when the player is on a team; `host=1` marks the console player, offline only (a server owns no player slot); `...` is Zandronum's multiplayer fields `spec=`, `deadspec=`, `deaths=`, `points=`, `wins=` and `ping=`, each where the reply puts it; `state=` is `live`, `dead`, `reborn` or `enter` |
 | `currentpos` (stock) | none | `Current player position: (<x>,<y>,<z>), angle: <deg>, floorheight: <h>, sector:<n>, lightlevel: <n>` |
@@ -181,27 +186,33 @@ General rules:
 `flags=` is a letter set: `m` monster, `f` friendly, `c` corpse, `d` dormant, `s`
 shootable, `o` solid, `i` invulnerable, `a` ambush; `-` for none.
 
-`mcp_setprop` takes its target as `<tid> <index>` (the index-th actor sharing the TID; tid 0,
-with index 0 only, is the console player's body), writes directly, so it works while paused, and
-refuses with `error client: set on the server instance`, `error not in a level`,
-`error server: pass a tid` (tid 0 on a server), `error no actor with tid <n> index <n>` or
-`error spectator`.
+`mcp_setprop`, `mcp_place`, `mcp_remove`, `mcp_damage` and `mcp_inv` take their target as
+`<tid> <index>` (the index-th actor sharing the TID; tid 0, with index 0 only, is the console
+player's body), write directly, so they work while paused, and share their refusals:
+`error client: <verb> on the server instance`, `error not in a level`, `error server: pass a tid`
+(tid 0 on a server), `error no actor with tid <n> index <n>` and `error spectator`.
 
 Notes:
 
 - `dumpactor`: `psprite` layers are only `1`, `1000` and the targeter's (fixed slots), and
   `weaponinfo flags=` go up to `WF_REFIRESWITCHOK`.
-- `mcp_spawnat` has no void check: a requested point in the void is judged by the fit test like
-  any other, and a `find=` candidate by the path and fit tests alone. `<x>` and `<y>` must lie
-  within -32767..32767, else `error coordinates must be within -32767..32767`, `force=1` or not:
-  fixed point would wrap the spot to another part of the map. A given `z=` must lie within -32767 up to 32767 minus its height, else
+- `mcp_spawnat` and `mcp_place` have no void check: a requested point in the void is judged by
+  the fit test like any other, and a `find=` candidate by the path and fit tests alone.
+  `mcp_spawnat`'s `<x>` and `<y>` must lie within -32767..32767, else
+  `error coordinates must be within -32767..32767` (`mcp_place`'s refusal), `force=1` or not:
+  fixed point would wrap the spot to another part of the map. For both, the actor's z (a given
+  `z=`, or `mcp_place`'s floor default) must lie within -32767 up to 32767 minus its height, else
   `error z must be within -32767..<top> for height <h>`, `force=1` or not: fixed point would wrap
   its top, and the fit test would pass.
 - `mcp_setprop` refuses `friction`, `damagemultiply`, `friendlyseeblocks` (`unsupported prop`)
   and a player pawn's `height`.
 - In a map-reset game mode (`GMF_MAPRESETS`) a removed map-placed actor is hidden and keeps its
-  tid. `dumpactor`, `findactors`, `actorsnear`, `mcp_setprop` and `mcp_setview` skip it, as
-  Zandronum's ACS does (a `<tid> <index>` target, a `tid:`/`class:` ref), so it reads as gone.
+  tid, and `mcp_remove`'s row for it carries `hidden=1`. Every lookup then skips it, as
+  Zandronum's ACS does (a `<tid> <index>` target, `all=1`, `findactors`, `dumpactor`,
+  `actorsnear`, `mcp_setview` and a `tid:`/`class:` ref), so it reads as gone.
+- `mcp_place`, `mcp_remove`, `mcp_damage` and `mcp_inv` run on a server (a client refuses with
+  `client:`), where a client's body takes back its own angle and pitch from its next move;
+  there `mcp_inv` refuses a non-player (`not replicated`).
 
 ### ACS
 
@@ -212,12 +223,26 @@ Notes:
 | `dumpfunctions` | none | `MCP_FUNCTIONS`, then `function <module> <index> <name>` |
 | `getmapvar` / `setmapvar` | `<name>` / `<name> <value>` | `mapvar <name> = <n>`, or `mapvar <name> not found` (exported names only), or `usage: ...` |
 | `getmaparray` / `setmaparray` | `<name> <index>` / `<name> <index> <value>` | `maparray <name>[<index>] = <n>`, or `maparray <name> not found`, or `usage: ...` |
+| `mcp_mapslot` | `<slot> v=1 code=<len> first=<fourcc> md5=<32 hex> [index=<k>] [set=<value>]`. The module is the one loaded module whose image digest is `code`/`first`/`md5`: its chunks start at offset `len` with a `first` chunk (`STRL` for a file's `STRE`, which the loader renames), and `md5` is the MD5 of its first `len` bytes (header and code), then every `ARAY`, `AIMP`, `MIMP`, `MEXP`, `MINI`, `AINI` and `LOAD` chunk, id by id in that order, each id's chunks in file order, 8-byte header included. Without `index=` the slot is a scalar; with it, element `k` of the array whose number the slot holds, as `PCD_PUSHMAPARRAY` reads it. `set=` writes, then reads back. `v=` is the digest scheme: a change to it or to the arguments bumps it | `MCP_MAPSLOT module=<i> slot=<s> [index=<k>] value=<n> name=<module name>` (`module` numbered as `dumpmodules` numbers them); or `error not in a level`, `error usage: ...`, `error unsupported v=<n>`, `error slot out of range` (outside 0-127), `error no module matches map=<map> modules=<count>`, `error ambiguous modules=<i>,<j>` |
 | `getacsvar` / `setacsvar` | `<world\|global> <index>` / `... <value>` | `acsvar <scope> <index> = <n>`, or `index out of range (0-<max>)`, `unknown scope '<s>' (use world\|global)` or `usage: ...` |
 | `dumpacsvars` | none | `MCP_ACSVARS`, then an `acsvar` line per nonzero variable |
 | `mcp_runacs` | `<path> [<script>] [<args>...] [name=1] [open=1]` (up to 4 args; the flags may sit anywhere after `<path>`). `name=1` marks `<script>` a name, so a name made of digits stays a name; without it a token that parses as a number is a script number and anything else a name. The host sends `name=1` for every string when the bridge has the `runacsname` cap | anything the script printed before its first delay, then `MCP_RUNACS module=<n> scripts=<n> started=<script\|none> deferred=<0\|1>`; or `error ...` with no `MCP_RUNACS` line. A refused snippet stays loaded (`acstemp=` counts it) until the map changes: Zandronum can't unload a module |
 | `mcp_runscript` | `<script> [always=1] [name=1] [<args>...]` (the two flags directly after `<script>`, in either order; up to 4 args). `<script>` is a script number written as plain digits, above 0, unless `name=1` marks it a name, so a name made of digits stays a name; the host sends `name=1` for every string | anything the script printed before its first delay, then `MCP_RUNSCRIPT script=<script> started=<0\|1> result=<n> finished=<0\|1> module=<n>`; or `error ...` (`netgame`, `not in a level`, `script wants a number above 0, or name=1 with a name`, `no script <script>`, `at most 4 script args`) with no `MCP_RUNSCRIPT` line. `module` is the first loaded module that has the script (the one that runs), numbered as `dumpmodules` and `MCP_RUNACS module=` are. The script runs inside the command, as `ACS_ExecuteWithResult` runs one. `started=0`: a copy is already running and `always=1` was not given (`result=0 finished=0`). A suspended copy is resumed instead, keeping its own args, and reports `started=1`, as `ACS_Execute` resumes one. `result` is the `SetResultValue` so far, 1 when unset; `finished=0` means the script paused at a delay. Offline only |
 | `scriptstat` (stock) | none | `script <number>: <state>` or `script "<name>": <state>` per running script, or `No scripts are running.` |
-| `acsprofile` (stock) | `[<sort> [<limit>]]`, or `clear` | a scripts section and a functions section, each a `Top <n> ...:` line, a column header and fixed-width rows ending in five numbers (total, runs, avg, min, max); a named script prints quoted |
+| `acsprofile` (stock) | `[<sort> [<limit>]]`, or `clear`. The host always sends `total 0` and sorts and limits the rows itself | a scripts section and a functions section, each a `Top <n> ...:` line (`All ...:` when the limit is `<= 0`, which lists every row that ran), a column header and fixed-width rows ending in five numbers (total, runs, avg, min, max). The module column is 12 characters wide (module names are at most 8, so never cut) and the name column is cut at 20, so a named script (printed quoted) over 18 characters loses its closing quote and tail; never-run rows are skipped but still count against a limit above 0 |
+
+**Map vars by source.** A map var the module doesn't export (a library's `internal` vars, or any var of a map's own
+BEHAVIOR) is found by a probe compile. Build A is the mod's main source as is; build B is the
+same source with `function raw __mcp_p_0(void) { return <expr>; }` appended. Both compile a
+copy of the main file under its own name in one temp dir, with the source's folder as the first
+include dir. Checks, in order: A must byte-match a deployed module; B must add no compiler
+diagnostic; B must leave A's layout alone (every chunk but FUNC/FNAM byte-identical and in the
+same order, the code identical up to the first probe bar at most 3 padding bytes, the directory
+offset excepted); then each probe body is decoded and import- and bounds-checked.
+
+It fails closed because a wrong slot never fails on its own: `GetArrayVal` reads 0, and a wrong
+scalar is just another var. The chunks pin initialised and array slots, but only the code pins
+a hidden zero scalar's slot.
 
 ### Screen and session
 

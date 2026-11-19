@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { parseBehaviorNames, parseMapExports, isAcsObject, hasAcsMagic, parseLoadNames, missingImports } from "../src/acs/bytecode.js";
+import { parseBehaviorNames, parseMapExports, isAcsObject, hasAcsMagic, parseLoadNames, missingImports, chunkTable, functionEntries, arraySizes, importedSlots } from "../src/acs/bytecode.js";
 import {
   buildBehaviorAcse,
   buildBehaviorAcs0Enhanced,
   buildBehaviorAcs0Plain,
   buildBehaviorExports,
+  buildObject,
+  chunk,
+  funcChunk,
+  nameChunk,
+  u32,
 } from "./fakes/acs-builder.js";
 
 describe("parseBehaviorNames", () => {
@@ -71,6 +76,65 @@ describe("parseMapExports", () => {
   it("returns empty without an MEXP chunk or chunked bytecode", () => {
     expect(parseMapExports(buildBehaviorAcse(["f"], []))).toEqual([]);
     expect(parseMapExports(buildBehaviorAcs0Plain())).toEqual([]);
+  });
+});
+
+describe("chunkTable / functionEntries / arraySizes / importedSlots", () => {
+  const aimp = (count: number, ...entries: Array<[number, number, string]>) =>
+    chunk("AIMP", Buffer.concat([u32(count), ...entries.map(([slot, size, name]) => Buffer.concat([u32(slot, size), Buffer.from(`${name}\0`)]))]));
+  const mimp = (...entries: Array<[number, string]>) =>
+    chunk("MIMP", Buffer.concat(entries.map(([slot, name]) => Buffer.concat([u32(slot), Buffer.from(`${name}\0`)]))));
+
+  it("lists every chunk in file order with the format, chunk start and walk end", () => {
+    const obj = buildObject({ format: "ACSE", code: u32(1), chunks: [chunk("MINI", u32(3, 1)), chunk("ALIB", Buffer.alloc(0))] });
+    expect(chunkTable(obj)).toEqual({
+      format: "ACSE",
+      start: 12,
+      end: 12 + 16 + 8,
+      chunks: [
+        { id: "MINI", offset: 12, size: 8 },
+        { id: "ALIB", offset: 28, size: 0 },
+      ],
+    });
+    expect(chunkTable(buildBehaviorAcs0Plain())).toBeNull();
+  });
+
+  it("names the FUNC entries FNAM covers, by index", () => {
+    const obj = buildObject({ chunks: [funcChunk([40, 52]), nameChunk("FNAM", ["pub"])] });
+    expect(functionEntries(obj)).toEqual([
+      { address: 40, importNum: 0, name: "pub" },
+      { address: 52, importNum: 0 },
+    ]);
+    expect(functionEntries(buildObject({ chunks: [funcChunk([40])] }))).toEqual([{ address: 40, importNum: 0 }]);
+    expect(functionEntries(buildBehaviorAcs0Plain())).toEqual([]);
+  });
+
+  it("sizes the module's own arrays (ARAY), not the ones it imports (AIMP)", () => {
+    const obj = buildObject({ chunks: [chunk("ARAY", u32(0, 4)), aimp(2, [5, 10, "lib_a"], [7, 3, "b"])] });
+    expect(arraySizes(obj)).toEqual(new Map([[0, 4]]));
+    expect(arraySizes(buildBehaviorAcs0Plain())).toEqual(new Map());
+  });
+
+  it("names each imported slot, scalars (MIMP) and arrays (AIMP), from the first chunk of each", () => {
+    const obj = buildObject({ chunks: [mimp([1, "lv"], [4, "w"]), chunk("ARAY", u32(0, 4)), aimp(2, [5, 10, "lib_a"], [7, 3, "b"]), mimp([9, "late"])] });
+    expect(importedSlots(obj)).toEqual(new Map([[1, "lv"], [4, "w"], [5, "lib_a"], [7, "b"]]));
+    expect(importedSlots(buildObject({ chunks: [chunk("ARAY", u32(0, 4))] }))).toEqual(new Map());
+    expect(importedSlots(buildBehaviorAcs0Plain())).toEqual(new Map());
+  });
+
+  it("stops at AIMP's count or a chunk's end, whichever comes first", () => {
+    expect(importedSlots(buildObject({ chunks: [aimp(1, [5, 10, "a"], [7, 3, "b"])] }))).toEqual(new Map([[5, "a"]]));
+    expect(importedSlots(buildObject({ chunks: [aimp(9, [5, 10, "a"])] }))).toEqual(new Map([[5, "a"]]));
+    const empty = [chunk("AIMP", Buffer.alloc(0)), chunk("MIMP", Buffer.alloc(0)), chunk("MINI", u32(3, 1))];
+    expect(importedSlots(buildObject({ chunks: empty }))).toEqual(new Map());
+    // A name without its NUL runs to the end of the chunk; a slot with no name byte after it isn't an entry.
+    const cut = buildObject({ indirect: false, chunks: [chunk("AIMP", Buffer.concat([u32(2, 5, 10), Buffer.from("ab")]))] });
+    expect(importedSlots(cut)).toEqual(new Map([[5, "ab"]]));
+    expect(importedSlots(buildObject({ chunks: [chunk("MIMP", Buffer.concat([u32(1), Buffer.from("x\0"), u32(2)]))] }))).toEqual(new Map([[1, "x"]]));
+    // A size past the lump reads only what the lump holds.
+    const over = buildObject({ indirect: false, chunks: [chunk("MIMP", Buffer.concat([u32(1), Buffer.from("x")]))] });
+    over.writeUInt32LE(99, 12);
+    expect(importedSlots(over)).toEqual(new Map([[1, "x"]]));
   });
 });
 

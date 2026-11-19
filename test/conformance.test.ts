@@ -5,7 +5,7 @@ import { parseActorState, parseActorsNear, parseFindActors } from "../src/parser
 import { firstError, hasHeader, parseKvLines } from "../src/parsers/lines.js";
 import { isCorrelatorLine } from "../src/correlation/sentinel.js";
 import { parseRenderInfo } from "../src/parsers/renderinfo.js";
-import { parseMapArray, parseMapVar, parseModules } from "../src/parsers/mapvars.js";
+import { parseMapArray, parseMapSlot, parseMapSlotNoMatch, parseMapVar, parseModules } from "../src/parsers/mapvars.js";
 import { parseFunctions, parseScripts } from "../src/parsers/scripts.js";
 import { parseAcsVars } from "../src/parsers/acsvars.js";
 import { parseScriptStat } from "../src/parsers/scriptstat.js";
@@ -193,6 +193,58 @@ const CONTRACT: Contract<unknown>[] = [
     expect: (e) => expect(e).toBe("no actor with tid 9999 index 0"),
   }),
   contract({
+    capture: "place",
+    parse: (l) => parseKvLines(l, "placed"),
+    expect: ([p]) => {
+      expect(p).toMatchObject({ class: "DoomImp", vx: 0, vy: 0, vz: 0 });
+      expect([p.x, p.y]).not.toEqual([p.fromx, p.fromy]);
+    },
+  }),
+  contract({
+    capture: "place_error",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("no actor with tid 9999 index 0"),
+  }),
+  contract({
+    capture: "damage",
+    parse: (l) => parseKvLines(l, "damaged"),
+    expect: ([d]) => expect(d).toMatchObject({ class: "DoomImp", dealt: 10, hp: Number(d.oldhp) - 10, type: "None" }),
+  }),
+  contract({
+    capture: "damage_error",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("no source actor with tid 9999"),
+  }),
+  contract({
+    capture: "inv_give",
+    parse: (l) => parseKvLines(l, "inv"),
+    expect: ([i]) => expect(i).toMatchObject({ op: "give", item: "Clip", held: "Clip", after: Number(i.before) + 5, tid: 0 }),
+  }),
+  contract({
+    capture: "inv_take",
+    parse: (l) => parseKvLines(l, "inv"),
+    expect: ([i]) => expect(i).toMatchObject({ op: "take", item: "Clip", held: "Clip", after: Number(i.before) - 5, tid: 0 }),
+  }),
+  contract({
+    capture: "inv_error",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("not an inventory class NoSuchItem"),
+  }),
+  contract({
+    capture: "remove",
+    parse: (l) => ({ removed: parseKvLines(l, "removed"), total: parseKvLines(l, "removed_total") }),
+    expect: ({ removed, total }) => {
+      expect(removed).toHaveLength(1);
+      expect(removed[0]).toMatchObject({ class: "DoomImp" });
+      expect(total).toEqual([{ count: 1 }]);
+    },
+  }),
+  contract({
+    capture: "remove_error",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("no actor with tid 9999"),
+  }),
+  contract({
     capture: "dumpplayers",
     header: "MCP_PLAYERS",
     parse: (l) => parseKvLines(l, "player"),
@@ -245,6 +297,27 @@ const CONTRACT: Contract<unknown>[] = [
     parse: (l) => ({ lines: l, value: parseMapArray(l) }),
     expect: (v) => expect(v).toEqual({ lines: ["maparray NoSuchArr not found"], value: null }),
   }),
+  // test/fixtures/mapslot/res: hidden ms_hid (slot 4) and mn_hid_pts[1].y (slot 6, element 11).
+  contract({
+    capture: "mapslot_get",
+    parse: parseMapSlot,
+    expect: (m) => expect(m).toMatchObject({ slot: 4, value: 103, name: "MAPSLOT" }),
+  }),
+  contract({
+    capture: "mapslot_set",
+    parse: parseMapSlot,
+    expect: (m) => expect(m).toMatchObject({ slot: 4, value: 107, name: "MAPSLOT" }),
+  }),
+  contract({
+    capture: "mapslot_array",
+    parse: parseMapSlot,
+    expect: (m) => expect(m).toMatchObject({ slot: 6, index: 11, value: 205, name: "MAPSLOTN" }),
+  }),
+  contract({
+    capture: "mapslot_nomatch",
+    parse: parseMapSlotNoMatch,
+    expect: (e) => expect(e).toMatchObject({ map: "MAP01", modules: expect.any(Number) }),
+  }),
   contract({
     capture: "getacsvar",
     parse: parseAcsVars,
@@ -286,6 +359,20 @@ const CONTRACT: Contract<unknown>[] = [
     expect: (rows) => {
       expect(rows).toHaveLength(3);
       expect(rows[2]).toMatchObject({ section: "function", module: "MCPCONF", name: "confadd", runs: 1 });
+    },
+  }),
+  contract({
+    // A limit <= 0 prints `All scripts:`/`All functions:` instead of `Top <n> ...:`, over the same rows.
+    capture: "acsprofile_all",
+    parse: parseAcsProfile,
+    expect: (rows, e) => {
+      expect(capture(e, "acsprofile_all").filter((l) => /All (scripts|functions):$/.test(l))).toHaveLength(2);
+      expect(rows.map((p: { section: string; module: string; name: string }) => [p.section, p.module, p.name])).toEqual([
+        ["script", "MCPCONF", '"ConfLoop"'],
+        ["script", "MCPCONF", "901"],
+        ["function", "MCPCONF", "confadd"],
+      ]);
+      expect(rows[1]).toMatchObject({ total: 9, runs: 1 });
     },
   }),
   contract({

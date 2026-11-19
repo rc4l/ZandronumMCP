@@ -1,0 +1,9 @@
+IAll scripts:
+KModule       script                    Total    Runs     Avg     Min     Max
+K------------ -------------------- ---------- ------- ------- ------- -------
+MCPCONF      "ConfLoop"                  515     102       5       5      10
+MCPCONF      901                           9       1       9       9       9
+IAll functions:
+KModule       function                  Total    Runs     Avg     Min     Max
+K------------ -------------------- ---------- ------- ------- ------- -------
+MCPCONF      confadd                       4       1       4       4       4

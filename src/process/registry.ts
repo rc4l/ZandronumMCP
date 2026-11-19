@@ -67,10 +67,19 @@ function setupStep(what: string, step: () => void): void {
   }
 }
 
-/** Throws once the child exits unsuccessfully; a clean exit (a wrapper that backgrounds the engine) never settles. */
-async function failOnExit(exited: Promise<ChildExit> | undefined): Promise<never> {
+/** The wait for the engine's bridge port gave up, with no failed exit to blame. */
+export class PortWaitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PortWaitError";
+  }
+}
+
+/** Throws once the child exits unsuccessfully; a clean exit (a wrapper that backgrounds the engine)
+ *  never settles, unless `anyExit`. */
+async function failOnExit(exited: Promise<ChildExit> | undefined, anyExit: boolean): Promise<never> {
   const exit = await exited;
-  if (exit && exit.code !== 0) throw new EngineExitedError(exit);
+  if (exit && (anyExit || exit.code !== 0)) throw new EngineExitedError(exit);
   return new Promise<never>(() => {});
 }
 
@@ -144,7 +153,8 @@ export interface QuitIo {
   sleep: (ms: number) => Promise<void>;
 }
 
-export type QuitResult = "clean" | "forced" | "absent";
+/** `unbridged`: `ServerContext.quit` force-killed a launch whose bridge never came up, without asking. */
+export type QuitResult = "clean" | "forced" | "absent" | "unbridged";
 
 export const defaultQuitIo: QuitIo = {
   alive: (pid) => {
@@ -229,14 +239,18 @@ export class InstanceRegistry {
     return child;
   }
 
-  /** Wait for a spawned instance's bridge port and attach, leaving the child running on failure. */
-  async attachSpawned(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
+  /** Wait for a spawned instance's bridge port and attach, leaving the child running on failure;
+   *  `anyExit` also fails on a clean exit, as an engine that left its lobby exits 0. */
+  async attachSpawned(config: InstanceConfig, io: LaunchIo, anyExit = false): Promise<BridgeClient> {
     const host = config.host ?? "127.0.0.1";
     const child = this.children.get(config.id);
     const polling = new AbortController();
     try {
+      const opened = io.waitForPort(host, config.port, polling.signal).catch((e: unknown) => {
+        throw new PortWaitError(e instanceof Error ? e.message : String(e));
+      });
       // An engine that dies at startup fails the attach now, not at the port timeout.
-      await Promise.race([io.waitForPort(host, config.port, polling.signal), failOnExit(child?.exited)]);
+      await Promise.race([opened, failOnExit(child?.exited, anyExit)]);
     } finally {
       polling.abort();
     }
@@ -270,6 +284,11 @@ export class InstanceRegistry {
   /** The PID of the child this registry launched for an instance, if it has one. */
   childPid(id: number): number | undefined {
     return this.children.get(id)?.pid;
+  }
+
+  /** A spawned child with no client attached yet (`spawn` without `attachSpawned`). */
+  pending(id: number): boolean {
+    return this.children.has(id) && !this.clients.has(id);
   }
 
   /** Peek at an instance's client without attaching, connecting, or throwing.

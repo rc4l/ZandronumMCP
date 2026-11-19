@@ -33,6 +33,10 @@ export const engine: EngineAdapter = {
   refuseCommand: () => undefined,
   // FileReader::Open is a plain fopen (files.cpp).
   ansiPaths: true,
+  // file_directory.cpp: fts skips dot-dirs, macOS's readdir every dot entry, and Windows' _findfirst
+  // hidden entries (unseen here) and files named *.orig*/*.bak*.
+  dirWalkSkips: (name, isDir, platform) =>
+    platform === "win32" ? !isDir && /\.(orig|bak)/.test(name) : name.startsWith(".") && (isDir || platform === "darwin"),
   netgame: {
     hostFlag: "-host",
     clientFlag: "-connect",
@@ -62,6 +66,18 @@ export const engine: EngineAdapter = {
       "On a server pass a tid (tid 0 isn't your body there), and only replicated props and flags can be written " +
       "(others report not replicated); friction, damagemultiply and friendlyseeblocks are unsupported on this engine, " +
       "and a player pawn's height can't be set (the engine resets it every tic).",
+    actorWrites:
+      "Refused outside a level, on a client instance (act on the server) and on a spectator. " +
+      "On a server pass a tid (tid 0 isn't your body there).",
+    placeActor:
+      "A z above 32767 minus the actor's height is refused, force or not, since fixed point would wrap its top. " +
+      "A point in the void is only caught by the floor/ceiling fit here. On a server, a client's own body takes " +
+      "back its angle and pitch from that client's next move until the client has the new ones.",
+    removeActor:
+      "In a game mode that resets the map, a map-placed actor is hidden instead (hidden=1) and keeps its tid, " +
+      "but every later lookup (these tools, find_actors, actor_state) skips it, as ACS does.",
+    inventory:
+      "On a server only a player's inventory reaches the clients, so with a tid any other target is refused (not replicated).",
     runAcs:
       "Offline only (no server/client). Zandronum can't unload a module: one the engine rejects stays loaded, inert, " +
       "and every snippet stays until the map changes. While any is loaded",
@@ -85,6 +101,8 @@ export const engine: EngineAdapter = {
       "cheat bits, frags, deaths, kills/items/secrets, points, wins, team, ping and name",
     findActors: "With a tid filter each result also has index, the one to pass to actor_state(tid, index) for it (the list is in distance order, not index order).",
     rendererInfo: "Active backend (software/opengl), GL vendor/shader model, resolution, fullscreen/vsync.",
+    profileScripts:
+      "Stock Zandronum builds (not the MCP fork, which fixes it) never profile `busy` scripts: they are missing from the list, and functions they call show 0 instructions per run.",
   },
   e2e: {
     // `save <name>` fopens the name as given (cwd-relative or absolute); -savedir only moves autosaves.

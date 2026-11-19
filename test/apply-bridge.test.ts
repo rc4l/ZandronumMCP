@@ -264,6 +264,7 @@ describe("applyBridge", () => {
     expect(pacs).toContain('#include "mcp_bridge.h"');
     expect(pacs).toContain("MCP_ACSVARS");
     expect(pacs).toContain("MCP_MAPVARS");
+    expect(pacs).toContain("CCMD( mcp_mapslot )");
     expect(pacs).toContain("MCP_SCRIPTS");
     expect(pacs).toContain("MCP_RUNACS");
     // Every overlay translation unit is compiled in.
