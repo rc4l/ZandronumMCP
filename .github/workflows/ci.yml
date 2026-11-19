@@ -17,5 +17,4 @@ jobs:
       - run: npm run typecheck
       - run: npm run docs:tools:check
       - run: npm run coverage
-      # Note: the e2e smoke (real zandronum.exe + bridge patch) runs on a
-      # separate Windows job that is intentionally NOT part of coverage gating.
+      # The e2e smoke (`npm run e2e`) needs a bridge-patched engine, so it runs locally, not here.

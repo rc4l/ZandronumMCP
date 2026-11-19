@@ -8,6 +8,7 @@ import {
   InstanceRegistry,
   defaultLaunchIo,
   defaultQuitIo,
+  LaunchSetupError,
   type LaunchConfig,
   type LaunchIo,
 } from "../src/process/registry.js";
@@ -110,6 +111,28 @@ describe("InstanceRegistry", () => {
     expect(configDirs).toEqual([dirname(configPathFor(engine, "zandronum.exe"))]);
     expect(registry.has(1)).toBe(true);
     expect(registry.get(1)).toBe(client);
+  });
+
+  it("fails a launch whose config folder can't be made before spawning, naming the env var that moves it", () => {
+    const spawned: string[][] = [];
+    const io = (err: unknown): LaunchIo => ({
+      spawn: (_exe, a) => (spawned.push(a), { kill: () => {} }),
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+      ensureDir: () => {
+        throw err;
+      },
+    });
+    registry = new InstanceRegistry(engine);
+    const cfg = `can't create the config folder (${envName(engine, "CONFIG")} moves it)`;
+    expect(() => registry!.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1 }, io(new Error("EACCES")))).toThrow(
+      new LaunchSetupError(`${cfg}: EACCES`),
+    );
+    // A non-Error throw still reads as text.
+    expect(() => registry!.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1 }, io("EROFS"))).toThrow(new LaunchSetupError(`${cfg}: EROFS`));
+    // A caller's own -config never touches the default folder.
+    registry.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1, extraArgs: ["-config", "/t/my.ini"] }, io(new Error("EACCES")));
+    expect(spawned).toHaveLength(1);
   });
 
   it("accepts the attach when the engine's hello pid matches the spawned child", async () => {

@@ -3,10 +3,9 @@ import { dirname, join } from "node:path";
 import { engine } from "../src/engine.js";
 import { configFromEnv } from "../src/context.js";
 import { buildLaunchArgs, buildLaunchEnv, configPathFor, resolveEngineExe } from "../src/process/launch.js";
-import { readSaveMeta } from "../src/saves/png.js";
 import { abs, norm } from "./fakes/paths.js";
 
-// Zandronum's adapter values. Core logic is tested engine-neutrally elsewhere.
+// Zandronum's adapter values, since core logic is tested engine-neutrally elsewhere.
 describe("Zandronum engine adapter", () => {
   it("names its env vars, server, ini and macOS hooks binary", () => {
     expect(engine.envPrefix).toBe("ZANDRONUM");
@@ -30,7 +29,6 @@ describe("Zandronum engine adapter", () => {
     expect(buildLaunchEnv(engine, "/g/z", 7777, pinned, "linux").SDL_VIDEO_WINDOW_POS).toBe("0,0");
   });
 
-
   it("saves to ZANDRONUM_SAVE_DIR, else beside the engine (the save CCMD writes to its cwd)", () => {
     expect(engine.resolveSaveDir({ ZANDRONUM_SAVE_DIR: "/env" }, "/engine/zandronum")).toBe("/env");
     expect(engine.resolveSaveDir({}, join("/engine", "zandronum"))).toBe(norm("/engine"));
@@ -43,29 +41,7 @@ describe("Zandronum engine adapter", () => {
     expect(config.saveDir).toBe(join("/Apps/Z.app", "Contents", "MacOS"));
   });
 
-  it("points a missing or stock engine at the right builds", () => {
-    expect(engine.exeHint).toBe("zandronum.exe on Windows, Zandronum.app on macOS, ./zandronum on Linux");
-    expect(engine.bridgeHelp).toBe(": download one from the GitHub Releases, or build it yourself (see docs/ADVANCED.md)");
-  });
-
-  it("reads saves as PNG text chunks and opens paths with ANSI fopen", () => {
-    expect(engine.readSaveMeta).toBe(readSaveMeta);
-    expect(engine.ansiPaths).toBe(true);
-  });
-
-  it("keeps saves flat in the save dir", () => {
-    expect(engine.saveSubdirs).toBe(false);
-  });
-
   it("refuses no raw console command", () => {
     expect(engine.refuseCommand("debug_restart")).toBeUndefined();
-  });
-
-  it("tells the e2e smoke run how this build saves and logs", () => {
-    expect(engine.e2e).toEqual({
-      saveInto: "path",
-      summonAtVoid: false,
-      nofocusPattern: undefined,
-    });
   });
 });

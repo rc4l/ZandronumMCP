@@ -333,4 +333,14 @@ export class ServerContext {
     if (!d) throw new Error(`No save dir. Pass \`dir\`, or set ${this.env("SAVE_DIR")} or ${this.env("EXE")}.`);
     return d;
   }
+
+  /** The `.zds` files in a save dir, relative to it; one subfolder level deep when the engine nests saves. */
+  saveFiles(dir: string): string[] {
+    const names = this.io.readdirSync(dir);
+    const subs = this.engine.saveSubdirs ? names.filter((f) => this.io.isDirSync(path.join(dir, f))) : [];
+    return [
+      ...names.filter((f) => !subs.includes(f)),
+      ...subs.flatMap((s) => this.io.readdirSync(path.join(dir, s)).map((f) => path.join(s, f))),
+    ].filter((f) => f.toLowerCase().endsWith(".zds"));
+  }
 }

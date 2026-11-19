@@ -1,10 +1,6 @@
 import type { LaunchOptions } from "./process/launch.js";
 
-/**
- * What differs between the engines this host drives. Each repo supplies one in
- * its own `src/engine.ts`; everything else is shared core, which reads engine
- * identity and real engine differences only through this.
- */
+/** What differs between the engines this host drives; shared core reads engine specifics only through this. */
 export interface EngineAdapter {
   /** Matches the bridge hello's `engine` field. */
   id: string;
@@ -33,6 +29,8 @@ export interface EngineAdapter {
   saveSubdirs: boolean;
   /** Why run_command refuses this raw console text before sending it, or undefined to send it. */
   refuseCommand: (text: string) => string | undefined;
+  /** A whole console line the engine prints as decoration, dropped from replies; undefined when there is none. */
+  consoleBar?: RegExp;
   /** The engine opens files with ANSI `fopen` on Windows, so a non-ASCII path can't reach it. */
   ansiPaths: boolean;
   notes: EngineNotes;
@@ -63,7 +61,7 @@ export interface EngineNotes {
   runAcs: string;
   /** Appended to screenshot_file's description; "" for none. */
   screenshotFile: string;
-  /** set_pause's description after "Set the engine's master pause flag directly" (lead with ". " or ", "). */
+  /** set_pause's description after "Set the engine's master pause flag directly" (lead with `. ` or `, `). */
   setPause: string;
   /** What ensure_live checks for, before ", a pending map/save/demo load" in "list what could block it (...)". */
   ensureLiveBlockers: string;
@@ -102,6 +100,6 @@ export function envName(engine: Pick<EngineAdapter, "envPrefix">, suffix: string
 }
 
 /** `base`, then `note` after a space when there is one. */
-export function withNote(base: string, note: string): string {
+export function appendNote(base: string, note: string): string {
   return note ? `${base} ${note}` : base;
 }

@@ -23,6 +23,8 @@ supports so the client can degrade gracefully:
 
 `engine` is the engine adapter's `id` (`zandronum`); `bridge` is that
 overlay's own version (e.g. `0.5.0`). `pid` is the engine process ID.
+The bridge serves one client at a time: a second connection waits unanswered in
+the listen backlog until the first closes.
 
 `caps` values: `cmd` (console commands), `event` (input events), `time` (the
 `setpause` control below), `status` (the `mcp_status` CCMD used for the
@@ -193,6 +195,6 @@ Notes:
 
 | CCMD | Arguments | Reply |
 |---|---|---|
-| `dumphud` | none | `MCP_HUD`, then the last frame's `text <x> <y> <text>`, `image <x> <y> <patch>` and `msg <layer> <left> <top> <tics> <text>` lines; `image` names are cut to 8 characters |
+| `dumphud` | none | `MCP_HUD`, then the last frame's `text <x> <y> <text>`, `image <x> <y> <patch>` and `msg <layer> <left> <top> <tics> <text>` lines. A status bar that draws glyph by glyph adds no `text` lines (its glyphs are filtered as font characters); console notify lines appear as `text` while shown. `image` names are cut to 8 characters |
 | `dumprenderer` | none | `MCP_RENDERER`, then `key=value` lines: `renderer`, screen and view rect, `statusbar_y`, and render cvars, `gl_vendor`, `gl_shadermodel`, `gl_maxtexsize` (OpenGL only), `vid_renderer` and `fullscreen` among them; `renderer` is `opengl` or `software`, and `st_scale`, `hud_scale` are bools |
 | `mcp_unblock` | none | `unblock ok`. Closes the console, chat and automap |

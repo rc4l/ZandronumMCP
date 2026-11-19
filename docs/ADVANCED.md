@@ -183,4 +183,8 @@ Then in your client config use `"command": "node"` with the path to your
 npm test
 npm run coverage
 npm run docs:tools   # after adding or re-describing a tool (CI runs docs:tools:check)
+npm run e2e          # drives a real bridge build through the tools; needs ZANDRONUM_EXE, ZANDRONUM_IWAD and a display
 ```
+
+The `docs:tools` scripts load TypeScript with `node --import`, which needs Node 20.6 or newer.
+`npm run e2e` reads `dist/`, so build first; it ends with `all checks passed`.

@@ -103,11 +103,10 @@ describe("stripColor / cleanConsoleLines", () => {
     ]);
   });
 
-  it("drops UZDoom's 40-hyphen console bar but keeps other dashed lines", () => {
-    expect(cleanConsoleLines(["\x1c-" + "-".repeat(40), "-- not a bar", "-".repeat(41)])).toEqual([
-      "-- not a bar",
-      "-".repeat(41),
-    ]);
+  it("drops the engine's bar line, whole lines only, and keeps it when the engine has none", () => {
+    const lines = ["\x1c-" + "-".repeat(40), "-- not a bar", "-".repeat(41)];
+    expect(cleanConsoleLines(lines, /^-{40}$/)).toEqual(["-- not a bar", "-".repeat(41)]);
+    expect(cleanConsoleLines(lines)).toEqual(["-".repeat(40), "-- not a bar", "-".repeat(41)]);
   });
 
   it("returns nothing for empty output", () => {

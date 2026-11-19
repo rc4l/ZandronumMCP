@@ -38,6 +38,51 @@
       },
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "actors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "edNum": {
+                "type": "number"
+              },
+              "spawnId": {
+                "type": "number"
+              },
+              "filter": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "edNum",
+              "spawnId",
+              "filter",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "engineState": {
+          "type": "string",
+          "description": "The engine-state note, present only on a reply that prints one."
+        }
+      },
+      "required": [
+        "actors"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     }
   },
   {
@@ -152,6 +197,41 @@
     }
   },
   {
+    "name": "set_cheat",
+    "title": "Set a cheat on or off",
+    "description": "Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. Uses the engine's normal net path. Needs a bridge with the status cap and a cheats= field.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "noclip",
+            "god",
+            "notarget",
+            "fly",
+            "buddha",
+            "noclip2"
+          ]
+        },
+        "on": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "on"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
     "name": "give",
     "title": "Give item",
     "description": "Give an inventory item to the player.",
@@ -244,6 +324,49 @@
           "default": 1
         }
       },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "scripts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "name",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "engineState": {
+          "type": "string",
+          "description": "The engine-state note, present only on a reply that prints one."
+        }
+      },
+      "required": [
+        "scripts"
+      ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
@@ -1202,41 +1325,6 @@
           "default": 1
         }
       },
-      "additionalProperties": false,
-      "$schema": "http://json-schema.org/draft-07/schema#"
-    }
-  },
-  {
-    "name": "set_cheat",
-    "title": "Set a cheat on or off",
-    "description": "Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. Uses the engine's normal net path. Needs a bridge with the status cap and a cheats= field.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "instance": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "default": 1
-        },
-        "name": {
-          "type": "string",
-          "enum": [
-            "noclip",
-            "god",
-            "notarget",
-            "fly",
-            "buddha",
-            "noclip2"
-          ]
-        },
-        "on": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "name",
-        "on"
-      ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     }

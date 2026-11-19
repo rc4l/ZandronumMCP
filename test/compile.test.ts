@@ -41,8 +41,8 @@ const DIR = abs("/tmp/mcp-runacs-x");
 const at = (file: string) => path.join(DIR, file);
 
 /**
- * Deps that record writes and exec calls; `fail` makes exec throw it. `files` are executables
- * unless listed in `plain`; `path` is PATH; `links` maps a path to its realpath.
+ * Deps that record writes and exec calls: `fail` makes exec throw it, `files` are executables
+ * unless listed in `plain`, `path` is PATH, and `links` maps a path to its realpath.
  */
 function fakeDeps(
   opts: {

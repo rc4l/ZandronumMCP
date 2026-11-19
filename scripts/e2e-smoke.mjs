@@ -1,16 +1,6 @@
 //
-// e2e-smoke.mjs: drive a real bridge-patched engine build through the tool
-// surface: launch, hello handshake, run_command round trip, the file-backed tools
-// (map_info/get_sector against the IWAD, save/list_saves round trip), the
-// stock-CCMD tools (dumpactors, scriptstat, summon/give/take, currentpos/linetarget,
-// acsprofile), the overlay tools (actor_state, actors_near, renderer/viewport/hud
-// info, read_hud, ACS vars/modules/scripts), the `status` cap, the test-session
-// tools (set_cheat, set_view, find_actors, summon_at, ensure_live, step_until), run_acs
-// (needs bcc on PATH or <PREFIX>_BCC) and kill.
-//
-// Engine-neutral: env names and engine expectations come from dist/engine.js, so
-// <PREFIX> is that adapter's envPrefix (ZANDRONUM). Not part of `npm test`
-// (it needs a real engine and a display). Run it by hand after `npm run build`:
+// e2e-smoke.mjs: drive a real bridge-patched engine (and display) through the tool surface by hand after
+// `npm run build`, with <PREFIX> the dist/engine.js envPrefix and bcc on PATH or in <PREFIX>_BCC:
 //
 //   <PREFIX>_EXE=<bridge-patched build> <PREFIX>_IWAD=<DOOM2.WAD> npm run e2e
 //
@@ -36,13 +26,24 @@ const saveDir = mkdtempSync(path.join(tmpdir(), `${engine.serverName}-e2e-saves-
 const { saveInto } = engine.e2e;
 const saveName = (name) => (saveInto === "path" ? path.join(saveDir, name) : name);
 
-// Collect the handlers the same way the MCP server does, without the transport.
-// Args go through each tool's input schema, as the SDK does, so its defaults apply.
+// Collect handlers like the MCP server, parsing args through each input schema as the SDK does.
 const handlers = new Map();
 const fakeServer = {
   registerTool: (name, config, handler) => {
     const schema = z.object(config.inputSchema ?? {});
-    handlers.set(name, (args, extra) => handler(schema.parse(args), extra));
+    handlers.set(name, async (args, extra) => {
+      const parsed = schema.safeParse(args);
+      if (!parsed.success) {
+        const why = parsed.error.issues.map((i) => i.message).join("; ");
+        return { content: [{ type: "text", text: `Input validation error: Invalid arguments for tool ${name}: ${why}` }], isError: true };
+      }
+      // The SDK turns a thrown handler error (e.g. a ToolRefusal) into an error reply.
+      try {
+        return await handler(parsed.data, extra);
+      } catch (e) {
+        return { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }], isError: true };
+      }
+    });
   },
 };
 
@@ -84,9 +85,7 @@ try {
   if (launched.isError) process.exit(1);
 
   const client = ctx.attachedClient(1);
-  // The bridge is single-client (its accept loop blocks on the first connection),
-  // so this reads the hello the launch's own attach already captured. A second
-  // connect would sit unanswered in the listen backlog.
+  // Reuse the launch's attach, since the single-client bridge would leave a second connect unanswered.
   check(`hello reports engine ${engine.id}`, client.engineName === engine.id, String(client.engineName));
   check(
     "caps are cmd/event/time/status",
@@ -184,10 +183,7 @@ try {
     textOf(hudInfo),
   );
 
-  // HUD capture overlay. A live level exercises the text tee (status bar strings, or
-  // the console notify lines where the status bar draws glyph by glyph) and the
-  // texture tee with no extra setup. The `msg` line kind (HUD messages) needs a
-  // loaded BEHAVIOR with a HudMessage-calling script, which vanilla MAP01 lacks.
+  // HUD capture overlay, leaving the `msg` kind untested since vanilla MAP01 has no HudMessage script.
   const hud = await call("read_hud");
   check(
     "read_hud captures at least one HUD text string",
@@ -200,9 +196,7 @@ try {
     textOf(hud),
   );
 
-  // ACS internals overlay. World/global vars need no ACS content loaded, so a round
-  // trip works on any map. The stock MAP01 has no BEHAVIOR lump, so the map-scope
-  // tools are exercised via their not-found path instead of a real value round trip.
+  // ACS internals overlay, with map-scope tools on their not-found path since MAP01 has no BEHAVIOR lump.
   const setVar = await call("set_acs_var", { scope: "world", index: 0, value: 77 });
   check("set_acs_var accepted", !setVar.isError && setVar.structuredContent?.value === 77, textOf(setVar));
   const getVar = await call("get_acs_var", { scope: "world", index: 0 });
@@ -277,8 +271,7 @@ try {
   const faced = await call("set_view", { class: "DoomImp" });
   check("set_view faces the imp", faced.structuredContent?.class === "DoomImp", textOf(faced));
 
-  // summon_at. The spot is a mapper-placed pickup away from the player, so it's
-  // walkable and its z is the floor.
+  // summon_at on a mapper-placed pickup, so the spot is walkable and its z is the floor.
   const items = await call("find_actors", { class: "Inventory" });
   const spot = items.structuredContent?.actors?.find((a) => a.dist > 256);
   check("find_actors finds a pickup away from the player", !!spot, textOf(items));
@@ -344,8 +337,7 @@ try {
 
   const log = await call("read_log", { pattern: "degreeless" });
   check("read_log sees the god-mode prints", /Degreelessness/i.test(textOf(log)), textOf(log));
-  // The engine holds both no-focus hints at window creation. Bare Xvfb can't show
-  // the focus outcome (no EWMH WM), only that the hints landed.
+  // Checks only that the no-focus hints landed, since bare Xvfb has no EWMH WM to show the outcome.
   if (engine.e2e.nofocusPattern) {
     const nofocus = await call("read_log", { pattern: engine.e2e.nofocusPattern });
     check(
@@ -365,10 +357,7 @@ try {
   const crash = await call("get_crash");
   check("get_crash reports no crash", textOf(crash).toLowerCase().includes("no crash"), textOf(crash));
 
-  // save/list_saves round trip: the stock "save" CCMD through run_command, then
-  // list_saves reading the resulting .zds back.
-  // The save CCMD only flags a save for the next tic, which never runs while the
-  // engine sits paused, so step a few tics to let it land.
+  // The save CCMD only flags a save for a next tic that never runs while paused, so the step below lets it land.
   const saved = await call("run_command", { text: `save ${saveName("e2esmoke")}` });
   check("save command accepted", !saved.isError, textOf(saved));
   await call("step", { tics: 5 });
@@ -381,7 +370,7 @@ try {
     JSON.stringify(saves.structuredContent),
   );
 
-  // run_acs. Two snippets, so the second's Log() string resolves in module 1, not module 0.
+  // Two snippets load, so the second's Log() string must resolve in module 1, not module 0.
   const first = await call("run_acs", { compiler: "bcc", source: 'script 1 (void) { Log(s:"e2e first"); }', script: 1 });
   check("run_acs loads and runs a snippet in the call", !first.isError && /\ne2e first\n/.test(textOf(first)), textOf(first));
   const second = await call("run_acs", { compiler: "bcc",

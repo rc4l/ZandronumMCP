@@ -4,8 +4,7 @@ import type { RunningScript } from "../types.js";
  * Parse the output of the `scriptstat` console command.
  *
  * Format (from p_acs.cpp's CCMD(scriptstat) / DumpScriptStatus):
- *   - UZDoom only: a "Script status for MAP01" header per loaded level (ignored; it doesn't
- *     match the per-script pattern below)
+ *   - UZDoom only: a "Script status for MAP01" header per loaded level (ignored)
  *   - "No scripts are running." when idle
  *   - otherwise one line per running script:
  *       "script 5: Running"

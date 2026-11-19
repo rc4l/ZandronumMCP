@@ -155,8 +155,8 @@ function diagnosticsOf(err: unknown, compiler: AcsCompiler, exe: string): string
 
 /**
  * `p` as one console token, or why not: a bare token ends at a byte <= 0x20 (UTF-8 too, where char is signed) and
- * expands a leading `$`; quoted, `\"` `\\` `\c` are escapes. Windows gets `/` separators, and no non-ASCII for an
- * engine that opens files with ANSI fopen (`ansiPaths`).
+ * expands a leading `$`, a quoted one reads `\"` `\\` `\c` as escapes, and Windows gets `/` separators and no
+ * non-ASCII for an `ansiPaths` engine (ANSI fopen).
  */
 export function consolePath(
   p: string,

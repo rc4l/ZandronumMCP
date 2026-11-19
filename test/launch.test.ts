@@ -332,16 +332,18 @@ describe("buildLaunchArgs config", () => {
     expect(buildLaunchArgs({}, T, {}).includes("-config")).toBe(false);
   });
 
-  it("drops the default -config when extraArgs brings its own", () => {
-    const args = buildLaunchArgs({ config: "/b/z.ini", extraArgs: ["-CONFIG", "/t/mine.ini"] }, T, {});
-    expect(args.includes("/b/z.ini")).toBe(false);
-    expect(args.slice(-2)).toEqual(["-CONFIG", "/t/mine.ini"]);
+  it.each([
+    ["config", "-CONFIG", "/b/z.ini", "/t/mine.ini"],
+    ["iwad", "-Iwad", "/w/DOOM2.WAD", "/t/FREEDOOM2.WAD"],
+  ])("drops the default %s when extraArgs brings its own", (key, flag, ours, theirs) => {
+    const args = buildLaunchArgs({ [key]: ours, extraArgs: [flag, theirs] }, T, {});
+    expect(args.includes(ours)).toBe(false);
+    expect(args.slice(-2)).toEqual([flag, theirs]);
   });
-
 
   it("spots a flag in any case, even with no value after it", () => {
     expect(hasArg(["-nosound", "-CONFIG"], "-config")).toBe(true);
-    expect(hasArg(["-HOST"], "-Host")).toBe(true);
+    expect(hasArg(["-CONFIG"], "-Config")).toBe(true);
     expect(hasArg(["-nosound"], "-config")).toBe(false);
     expect(hasArg(undefined, "-config")).toBe(false);
   });

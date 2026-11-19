@@ -9,6 +9,7 @@ import {
   readLogWindow,
   crashReportText,
 } from "./process/startuplog.js";
+import { LaunchSetupError } from "./process/registry.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
@@ -28,7 +29,7 @@ import { parseBehaviorNames, parseMapExports, isAcsObject, parseLoadNames, missi
 import { parseRunAcs, runAcsText } from "./parsers/runacs.js";
 import { parseRenderInfo, pick } from "./parsers/renderinfo.js";
 import { command, kvArgs, realToken, buildPuke, buildPukeName, buildRunAcs, buildSave } from "./commands/builders.js";
-import { envName, withNote } from "./adapter.js";
+import { appendNote } from "./adapter.js";
 import { bridgeMarker } from "./process/verify.js";
 import {
   menuKeyEvent,
@@ -39,6 +40,7 @@ import {
   wheelEvent,
   type MenuKey,
 } from "./input/keys.js";
+import { ToolRefusal } from "./types.js";
 
 const instanceArg = z.number().int().positive().default(1);
 const acsScope = z.enum(["world", "global"]);
@@ -175,10 +177,25 @@ interface ToolExtra {
 
 // The TICRATE (35 tics/sec) is fixed in Doom.
 const TICRATE = 35;
-const NO_TIME_CAP =
-  "This engine bridge has no time-control support (rebuild/redownload with the latest bridge).";
-const NO_INPUT_CAP =
-  "This engine bridge has no input support (rebuild with the latest bridge).";
+/** The refusal for a bridge without each optional cap a tool needs (`requireCap`, `missingCap`). */
+const CAP_REFUSALS = {
+  time:
+    "This engine bridge has no time-control support (rebuild/redownload with the latest bridge).",
+  event:
+    "This engine bridge has no input support (rebuild with the latest bridge).",
+};
+type OptionalCap = keyof typeof CAP_REFUSALS;
+
+/** The refusal when the bridge lacks `cap`, else undefined. */
+function missingCap(client: BridgeClient, cap: OptionalCap): string | undefined {
+  return client.supports(cap) ? undefined : CAP_REFUSALS[cap];
+}
+
+/** Throws the refusal (an error reply) when the bridge lacks `cap`. */
+function requireCap(client: BridgeClient, cap: OptionalCap): void {
+  const refusal = missingCap(client, cap);
+  if (refusal) throw new ToolRefusal(refusal);
+}
 
 // A load tool polls status until its queued load runs: about 5 s in all.
 const LOAD_READ_MS = 500;
@@ -192,6 +209,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   const sleep = (ms: number) => ctx.io.sleep(ms);
   const engine = ctx.engine;
   const notes = engine.notes;
+  const consoleLines = (lines: string[]) => cleanConsoleLines(lines, engine.consoleBar);
 
   /**
    * Run `work`, reporting progress while it goes. `expectedMs` is only the
@@ -236,22 +254,15 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     .string()
     .optional()
     .describe("The engine-state note, present only on a reply that prints one.");
-  const notesField = z.array(z.string()).optional().describe("The reply's caveat lines, present only when it has some.");
 
   /**
    * Register a tool that talks to a live engine, so its response carries a
    * short "engine state" note when something about the game is unusual
    * (paused, in a menu, dead, at intermission, ...) and that note differs from
-   * the one this client's last reply was built from. Silence means unchanged
-   * since the last reply, so a steady round trip costs nothing to read. An
-   * error reply always carries the note, and a return to normal is said once.
-   * See `footerNote` in `parsers/status.ts`.
+   * the one this client's last reply was built from (`footerNote` in `parsers/status.ts`).
    *
-   * A reply with `structuredContent` gets the same text there as
-   * `engineState`, because a client that shows the model only the structured
-   * half would never see the text block. Caveat lines are the handler's job,
-   * via `withNotes`. An `outputSchema` is widened to allow `engineState` and
-   * `notes`, here rather than per tool.
+   * A reply with `structuredContent` also carries the note as `engineState`, since a client may
+   * show the model only the structured half.
    *
    * The `commandCount` diff decides whether to refresh: if it didn't move
    * across the handler call, the handler ran no console command (an
@@ -323,7 +334,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     const liveConfig = config.outputSchema
       ? {
           ...config,
-          outputSchema: { ...config.outputSchema, engineState: engineStateField, notes: notesField },
+          outputSchema: { ...config.outputSchema, engineState: engineStateField },
         }
       : config;
     server.registerTool(name, liveConfig, wrapped as unknown as ToolCallback<Input>);
@@ -336,14 +347,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
    */
   async function runLoad(client: BridgeClient, cmd: string): Promise<string[]> {
     const out = await client.runCommand(cmd);
-    if (!client.supports("status")) return cleanConsoleLines(out);
+    if (!client.supports("status")) return consoleLines(out);
     // pauseext stops every tic, so polling would only burn the whole wait.
     if (client.lastStatus?.pauseext === "1" && client.lastStatus.pending === "1") {
-      return [...cleanConsoleLines(out), "(focus-paused (pauseext): the load runs once ensure_live fix clears it)"];
+      return [...consoleLines(out), "(focus-paused (pauseext): the load runs once ensure_live fix clears it)"];
     }
     const { settled, printed } = await awaitLoad(client);
     const caveat = settled ? [] : ["(load still pending after ~5 s; the engine-state note may predate it)"];
-    return [...cleanConsoleLines([...out, ...printed]), ...caveat];
+    return [...consoleLines([...out, ...printed]), ...caveat];
   }
 
   /** Poll status until no load is pending (bounded, ~5 s), keeping what the engine printed meanwhile. */
@@ -441,7 +452,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Run console command",
       description:
-        withNote(
+        appendNote(
           `Send a raw console command to a running, bridge-patched ${engine.displayName} instance and return its captured output.`,
           notes.runCommand,
         ),
@@ -558,6 +569,49 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   registerLive(
+    "set_cheat",
+    {
+      title: "Set a cheat on or off",
+      description:
+        `Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. ${notes.setCheat} Needs a bridge with the status cap and a cheats= field.`,
+      inputSchema: {
+        instance: instanceArg,
+        name: z.enum(CHEAT_NAMES),
+        on: z.boolean(),
+      },
+    },
+    async ({ instance, name, on }) => {
+      const client = await ctx.clientFor(instance);
+      const bit = CHEATS[name];
+      const read = () => {
+        const cheats = client.lastStatus?.cheats;
+        return cheats === undefined ? undefined : (Number(cheats) & bit) !== 0;
+      };
+      await client.readStatus(STATUS_READ_MS);
+      const snapshot = statusField(client, "cheats", ", or there is no player");
+      if ("error" in snapshot) return fail(`can't read cheat state: ${snapshot.error}`);
+      // Fires only when the overlay sends pauseext.
+      if (snapshot.status.pauseext === "1") {
+        return fail("the engine is paused by focus loss (pauseext), so a cheat toggle would be deferred; run ensure_live with fix first");
+      }
+      const want = on ? "on" : "off";
+      if (read() === on) {
+        return { content: [{ type: "text", text: `${name} already ${want}; no change` }] };
+      }
+      const output = await client.runCommand(name);
+      const { value } = await pollUntil(read, (v) => v === on, {
+        waits: CHEAT_POLLS,
+        wait: async () => {
+          await sleep(CHEAT_POLL_MS);
+          await client.refreshStatus();
+        },
+      });
+      if (value !== on) return fail(`${name} did not turn ${want}; the engine said: ${outputText(output)}`);
+      return { content: [{ type: "text", text: `${name} ${want}` }] };
+    },
+  );
+
+  registerLive(
     "give",
     {
       title: "Give item",
@@ -664,7 +718,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Hot-load and run an ACS snippet",
       description:
-        `Compile full ACS source host-side (bcc by default: zt-bcc or bcc on PATH, with zt-bcc's lib/ found next to or one folder above the binary; or acc on PATH; ${envName(engine, "BCC")}/${envName(engine, "ACC")} override the executables) and load it into the running level as a temporary module, then optionally run one of its scripts by number or name with up to 4 args. The script runs inside this call until its first delay, so its Log() output comes back in the reply (Print() is a HUD message: use read_hud); stepTics then runs the sim that many tics and returns the log lines printed meanwhile. A snippet that isn't a #library is compiled as one, so its strings resolve. It may #import a library the level already loaded (pass includeDirs for its source) and then shares that library's live functions and map vars; importing a library that isn't loaded is refused before anything is sent. open runs its OPEN scripts. Compile errors come back without touching the engine. ${notes.runAcs} save_game refuses: a save would fail to load (in-game saves and leaving a hub level carry the same hazard, which this tool can't intercept).`,
+        `Compile full ACS source host-side (bcc by default: zt-bcc or bcc on PATH, with zt-bcc's lib/ found next to or one folder above the binary; or acc on PATH; ${ctx.env("BCC")}/${ctx.env("ACC")} override the executables) and load it into the running level as a temporary module, then optionally run one of its scripts by number or name with up to 4 args. The script runs inside this call until its first delay, so its Log() output comes back in the reply (Print() is a HUD message: use read_hud); stepTics then runs the sim that many tics and returns the log lines printed meanwhile. A snippet that isn't a #library is compiled as one, so its strings resolve. It may #import a library the level already loaded (pass includeDirs for its source) and then shares that library's live functions and map vars; importing a library that isn't loaded is refused before anything is sent. open runs its OPEN scripts. Compile errors come back without touching the engine. ${notes.runAcs} save_game refuses: a save would fail to load (in-game saves and leaving a hub level carry the same hazard, which this tool can't intercept).`,
       inputSchema: {
         instance: instanceArg,
         source: z.string().min(1),
@@ -682,7 +736,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     async ({ instance, source, script, args, compiler, includeDirs, open, stepTics }, extra) => {
       if (args !== undefined && script === undefined) return fail("args needs script");
       const client = await ctx.clientFor(instance);
-      if (stepTics > 0 && !client.supports("time")) return fail(NO_TIME_CAP);
+      if (stepTics > 0) requireCap(client, "time");
       // A blank env var means unset, so PATH is searched.
       const exe = ctx.config[compiler]?.trim() || undefined;
       const built = ctx.io.compileAcs({ compiler, exe, source, includeDirs, engine });
@@ -749,7 +803,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Screenshot to a file",
       description:
-        withNote(
+        appendNote(
           "Take a screenshot and leave it on disk, returning only its absolute path (no image content). For measuring pixels with a script instead of viewing the frame. A reused `name` overwrites that file.",
           notes.screenshotFile,
         ),
@@ -781,9 +835,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, key }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       postMenuKey(client, key);
       return { content: [{ type: "text", text: `sent ${key}` }] };
     },
@@ -799,9 +851,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, steps }, extra) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       await withProgress(extra, steps.length * 60, "sending menu keys", async () => {
         for (const key of steps) {
           postMenuKey(client, key);
@@ -824,9 +874,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, text }, extra) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       await withProgress(extra, text.length * 40, "typing", async () => {
         for (const ch of text) {
           const ev = charEvent(ch);
@@ -848,9 +896,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, x, y }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       const ev = mouseMoveEvent(x, y);
       client.sendEvent(ev.evtype, ev.subtype, ev.data1, ev.data2);
       return { content: [{ type: "text", text: `pointer at ${x},${y}` }] };
@@ -874,9 +920,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, x, y, toX, toY, double }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       const post = (e: { evtype: number; subtype: number; data1: number; data2: number }) =>
         client.sendEvent(e.evtype, e.subtype, e.data1, e.data2);
 
@@ -918,9 +962,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, notches }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      requireCap(client, "event");
       const count = Math.min(Math.abs(notches), 30);
       for (let i = 0; i < count; i++) {
         const ev = wheelEvent(notches > 0);
@@ -947,9 +989,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, open, steps }, extra) => {
       const client = await ctx.clientFor(instance);
-      if (steps.length > 0 && !client.supports("event")) {
-        return fail(NO_INPUT_CAP);
-      }
+      if (steps.length > 0) requireCap(client, "event");
       // Opening a menu can load assets and the capture waits on a frame, so this
       // runs well past a default client timeout.
       const shot = await withProgress(extra, 34000, "opening and capturing menu", async () => {
@@ -967,8 +1007,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
 
   // --- time control ----------------------------------------------------------
   // An engine that pauses when its window loses focus freezes the simulation
-  // whenever the MCP drives a backgrounded instance (how it pauses is per
-  // engine, see notes.setPause). These tools set the engine's pause flag directly so
+  // whenever the MCP drives a backgrounded instance. These tools set the engine's pause flag directly so
   // time-based behavior — charge weapons, projectiles, animations, monster AI —
   // is actually testable headless.
   registerLive(
@@ -981,9 +1020,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, paused }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("time")) {
-        return fail(NO_TIME_CAP);
-      }
+      requireCap(client, "time");
       client.setPause(paused);
       return { content: [{ type: "text", text: paused ? "paused" : "resumed" }] };
     },
@@ -1002,9 +1039,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, tics }, extra) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("time")) {
-        return fail(NO_TIME_CAP);
-      }
+      requireCap(client, "time");
       await withProgress(extra, (tics / TICRATE) * 1000, `advancing ${tics} tic(s)`, () =>
         runTics(client, tics),
       );
@@ -1022,9 +1057,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, fix }) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("time")) {
-        return fail(NO_TIME_CAP);
-      }
+      requireCap(client, "time");
       await client.readStatus(STATUS_READ_MS);
       // A load finishing mid-probe resets maptime and reads as not live: let it run first.
       // pauseext stops every tic and so the load too; then only fix's mcp_unblock releases it.
@@ -1099,7 +1132,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, condition, maxTics, chunkTics }, extra) => {
       const client = await ctx.clientFor(instance);
-      if (!client.supports("time")) return fail(NO_TIME_CAP);
+      requireCap(client, "time");
       // Every read is a command, whose own sentinel refreshes maptime for free.
       const maptime = () => Number(client.lastStatus?.maptime);
       const first = await readCondition(client, condition);
@@ -1316,16 +1349,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ dir }) => {
       const d = ctx.resolveSaveDir(dir);
-      // A fresh install may have no save dir until the first save.
-      const names = ctx.io.existsSync(d) ? ctx.io.readdirSync(d) : [];
-      const subs = engine.saveSubdirs ? names.filter((f) => ctx.io.isDirSync(path.join(d, f))) : [];
-      const files = [
-        ...names.filter((f) => !subs.includes(f)),
-        ...subs.flatMap((s) => ctx.io.readdirSync(path.join(d, s)).map((f) => path.join(s, f))),
-      ];
-      const saves = files
-        .filter((f) => f.toLowerCase().endsWith(".zds"))
-        .map((f) => engine.readSaveMeta(f, ctx.io.readFileSync(path.join(d, f))));
+      // A fresh install may have no save dir until the first save; a missing explicit dir is a typo.
+      if (!ctx.io.existsSync(d)) {
+        return dir === undefined ? { content: [{ type: "text", text: `0 save(s) in ${d}` }], structuredContent: { dir: d, saves: [] } } : fail(`no such directory: ${d}`);
+      }
+      const saves = ctx.saveFiles(d).map((f) => engine.readSaveMeta(f, ctx.io.readFileSync(path.join(d, f))));
       return {
         content: [{ type: "text", text: `${saves.length} save(s) in ${d}` }],
         structuredContent: { dir: d, saves },
@@ -1338,7 +1366,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Save the game",
       description:
-        withNote("Run `save` to write a savegame (single-player / cooperative only).", notes.saveGame),
+        appendNote("Run `save` to write a savegame (single-player / cooperative only).", notes.saveGame),
       inputSchema: {
         instance: instanceArg,
         name: z.string().min(1),
@@ -1517,49 +1545,6 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         content: [{ type: "text", text: JSON.stringify(target) }],
         structuredContent: { ...target },
       };
-    },
-  );
-
-  registerLive(
-    "set_cheat",
-    {
-      title: "Set a cheat on or off",
-      description:
-        `Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. ${notes.setCheat} Needs a bridge with the status cap and a cheats= field.`,
-      inputSchema: {
-        instance: instanceArg,
-        name: z.enum(CHEAT_NAMES),
-        on: z.boolean(),
-      },
-    },
-    async ({ instance, name, on }) => {
-      const client = await ctx.clientFor(instance);
-      const bit = CHEATS[name];
-      const read = () => {
-        const cheats = client.lastStatus?.cheats;
-        return cheats === undefined ? undefined : (Number(cheats) & bit) !== 0;
-      };
-      await client.readStatus(STATUS_READ_MS);
-      const snapshot = statusField(client, "cheats", ", or there is no player");
-      if ("error" in snapshot) return fail(`can't read cheat state: ${snapshot.error}`);
-      // Fires only when the overlay sends pauseext.
-      if (snapshot.status.pauseext === "1") {
-        return fail("the engine is paused by focus loss (pauseext), so a cheat toggle would be deferred; run ensure_live with fix first");
-      }
-      const want = on ? "on" : "off";
-      if (read() === on) {
-        return { content: [{ type: "text", text: `${name} already ${want}; no change` }] };
-      }
-      const output = await client.runCommand(name);
-      const { value } = await pollUntil(read, (v) => v === on, {
-        waits: CHEAT_POLLS,
-        wait: async () => {
-          await sleep(CHEAT_POLL_MS);
-          await client.refreshStatus();
-        },
-      });
-      if (value !== on) return fail(`${name} did not turn ${want}; the engine said: ${outputText(output)}`);
-      return { content: [{ type: "text", text: `${name} ${want}` }] };
     },
   );
 
@@ -2010,33 +1995,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, iwad, files, map, skill, fullscreen, width, height, extraArgs }, extra) => {
       const exe = ctx.config.exe;
-      if (!exe) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Set ${ctx.env("EXE")} to the engine path (${engine.exeHint}) to launch instances.`,
-            },
-          ],
-        };
-      }
-      if (!ctx.io.existsSync(exe)) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: `${ctx.env("EXE")} not found at ${exe} — check the path.` }],
-        };
-      }
+      if (!exe) return fail(`Set ${ctx.env("EXE")} to the engine path (${engine.exeHint}) to launch instances.`);
+      if (!ctx.io.existsSync(exe)) return fail(`${ctx.env("EXE")} not found at ${exe} — check the path.`);
       if (!ctx.io.hasBridge(exe, bridgeMarker(engine))) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `${ctx.env("EXE")} at ${exe} has no MCP bridge — that looks like a stock ${engine.displayName} (or GZDoom), which the MCP can't drive. Point it at a bridge-patched build${engine.bridgeHelp}.`,
-            },
-          ],
-        };
+        return fail(
+          `${ctx.env("EXE")} at ${exe} has no MCP bridge — that looks like a stock ${engine.displayName} (or GZDoom), which the MCP can't drive. Point it at a bridge-patched build${engine.bridgeHelp}.`,
+        );
       }
       // Pick the first free port at/above the conventional one for this instance, so a
       // stale engine (or anything) squatting the default port can't cause a mis-attach.
@@ -2070,6 +2034,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         // A spawn that reported no PID skipped the handshake, so the bridge's own PID is all there is.
         if (child.pid === undefined) ctx.rememberEngine(instance, client.enginePid);
       } catch (e) {
+        // Nothing was spawned, so any log on this port is an earlier run's.
+        if (e instanceof LaunchSetupError) return fail(e.message);
         // The bridge never opened. Most often that's a DECORATE/ACS compile error
         // that aborted startup — surface it from the captured log instead of just
         // reporting the timeout.
@@ -2080,12 +2046,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           const errs = parseStartupErrors(ctx.io.readTextSync(logFile));
           if (errs.length) detail = `\n\nEngine log shows:\n${errs.join("\n")}`;
         }
-        return {
-          isError: true,
-          content: [
-            { type: "text", text: `Instance ${instance} failed to come up: ${msg}.${detail}` },
-          ],
-        };
+        return fail(`Instance ${instance} failed to come up: ${msg}.${detail}`);
       }
       return { content: [{ type: "text", text: `launched instance ${instance} on bridge port ${port}` }] };
     },
@@ -2122,15 +2083,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         // Don't leave a binding pointing at something we couldn't reach.
         ctx.forgetInstance(instance);
         const msg = e instanceof Error ? e.message : String(e);
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Could not attach instance ${instance} to port ${target}: ${msg}. Is a bridge-patched engine listening there?`,
-            },
-          ],
-        };
+        return fail(`Could not attach instance ${instance} to port ${target}: ${msg}. Is a bridge-patched engine listening there?`);
       }
     },
   );

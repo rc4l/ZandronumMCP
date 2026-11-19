@@ -13,8 +13,7 @@ export const engine: EngineAdapter = {
   bridgeHelp: ": download one from the GitHub Releases, or build it yourself (see docs/ADVANCED.md)",
   fullscreenCvar: "fullscreen",
   launchPins: () => [],
-  // SDL 1.2 places the window from SDL_VIDEO_WINDOW_POS. Opt-in only: a fixed position isn't a
-  // safe default (it would push a single-monitor setup's window off-screen).
+  // Opt-in only, since a fixed SDL_VIDEO_WINDOW_POS could push a single-monitor setup's window off-screen.
   launchEnv: (base, platform) =>
     platform === "linux" && base.ZANDRONUM_WINDOW_POS ? { SDL_VIDEO_WINDOW_POS: base.ZANDRONUM_WINDOW_POS } : {},
   // `save <name>` writes a bare name relative to the engine's cwd, the exe's folder.

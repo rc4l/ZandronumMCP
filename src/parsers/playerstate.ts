@@ -40,8 +40,7 @@ export function withLiveStatus(state: PlayerState, status: EngineStatus | undefi
   return merged;
 }
 
-// Zandronum prints one "lightlevel"; UZDoom prints "sector lightlevel" then "actor lightlevel".
-// `light` is the sector value in both; the actor value isn't surfaced.
+// `light` is the sector value: Zandronum prints one "lightlevel", UZDoom "sector lightlevel" then "actor lightlevel".
 const POS_RE =
   /Current player position: \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\), angle: (-?[\d.]+), floorheight: (-?[\d.]+), sector:(\d+), (?:sector )?lightlevel: (-?\d+)/;
 

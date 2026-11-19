@@ -87,9 +87,7 @@ export class BridgeClient extends EventEmitter {
     return this.enginePidValue;
   }
 
-  /** Engine name the bridge advertised in its hello (the adapter's `id`), or undefined
-   *  if it sent none. The wire is the only source of this — nothing here hardcodes
-   *  an expected engine — so it also identifies a bridge built into a fork. */
+  /** Engine name the bridge advertised in its hello (the adapter's `id`), or undefined if it sent none. */
   get engineName(): string | undefined {
     return this.engineNameValue;
   }

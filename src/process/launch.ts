@@ -145,8 +145,7 @@ export function deriveBasePort(exe: string | undefined, envPort: string | undefi
  * The engines store their ini under the user's preferences directory, NOT next
  * to the binary, so every build on the machine reads and writes the SAME file —
  * this gives each checkout a dedicated one beside its binary instead.
- * `<PREFIX>_CONFIG` moves it, e.g. out of a build dir that a clean wipes; a
- * relative one resolves against the engine's folder, its cwd, as `-config` would.
+ * `<PREFIX>_CONFIG` moves it, a relative one resolving against the engine's cwd as `-config` would.
  */
 export function configPathFor(
   engine: Pick<EngineAdapter, "serverName" | "envPrefix">,
@@ -189,14 +188,12 @@ export function buildLaunchArgs(
 ): string[] {
   const args: string[] = [];
   // Before anything else: the config decides defaults the rest may override.
-  // A caller's own -config in extraArgs wins; the engine takes the first match.
+  // A caller's own -config in extraArgs wins, as the engine takes the first match.
   if (o.config && !hasArg(o.extraArgs, "-config")) args.push("-config", o.config);
-  if (o.iwad) args.push("-iwad", o.iwad);
+  if (o.iwad && !hasArg(o.extraArgs, "-iwad")) args.push("-iwad", o.iwad);
   if (o.files?.length) args.push("-file", ...o.files);
   if (o.skill !== undefined) args.push("-skill", String(o.skill));
-  // All +set pins run BEFORE +map: the engine executes +-prefixed args in
-  // argv order, so a launch with `map` set would otherwise load straight
-  // into a live level with the saved values still in force.
+  // All +set pins precede +map, since +args run in argv order and a map launch would otherwise load with the saved values.
   //
   // Always pin the video mode so an agent-driven instance never inherits the
   // saved fullscreen cvar (it's CVAR_ARCHIVE) and takes over the user's

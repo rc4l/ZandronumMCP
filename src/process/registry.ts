@@ -6,6 +6,7 @@ import { envName, type EngineAdapter } from "../adapter.js";
 import {
   buildLaunchArgs,
   buildLaunchEnv,
+  hasArg,
   clearQuarantine,
   configPathFor,
   waitForPort,
@@ -91,6 +92,23 @@ export interface LaunchConfig extends LaunchOptions {
   logFile?: string;
 }
 
+/** A launch that failed before the engine was spawned, so there is no engine output to show. */
+export class LaunchSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LaunchSetupError";
+  }
+}
+
+/** Run a pre-spawn step, rethrowing its failure as a `LaunchSetupError` that says `what` failed. */
+function setupStep(what: string, step: () => void): void {
+  try {
+    step();
+  } catch (e) {
+    throw new LaunchSetupError(`${what}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** Tracks bridge connections — and now child processes — for one or more instances. */
 export class InstanceRegistry {
   private readonly clients = new Map<number, BridgeClient>();
@@ -123,7 +141,11 @@ export class InstanceRegistry {
     // Give the engine its own persistent config, separate from the user's real
     // engine ini (see configPathFor).
     const configPath = configPathFor(this.engine, config.exe);
-    io.ensureDir(dirname(configPath));
+    if (!hasArg(config.extraArgs, "-config")) {
+      setupStep(`can't create the config folder (${envName(this.engine, "CONFIG")} moves it)`, () =>
+        io.ensureDir(dirname(configPath)),
+      );
+    }
     const args = buildLaunchArgs({ config: configPath, ...config }, this.engine);
     const env = buildLaunchEnv(this.engine, config.exe, config.port);
     if (config.logFile) env[envName(this.engine, "BRIDGE_LOG")] = config.logFile;

@@ -1,8 +1,7 @@
 # Conformance captures
 
 `test/conformance.test.ts` parses one real reply per bridge CCMD
-(`test/fixtures/zandronum/*.txt`). This directory holds what the capture run loads. A contract entry names an engine under `pending` while that
-engine's overlay has no such CCMD yet: record its capture, then drop it from the list.
+(`test/fixtures/zandronum/*.txt`). This directory holds what the capture run loads.
 
 - `mcpconf.acs`: a library with an exported map var and array, a world and a global var, a
   function, an `OPEN` loop, a numbered script and a `HudMessage` script. `res/` is loaded with
@@ -78,7 +77,7 @@ Then, before `kill_instance` (a launch recreates it), split the instance's bridg
 repo root:
 
 ```
-node scripts/split-captures.mjs <engine dir>/mcp-bridge-7777.log test/fixtures/zandronum
+node --import tsx scripts/split-captures.mjs <engine dir>/mcp-bridge-7777.log test/fixtures/zandronum
 ```
 
 It writes one file per marker. To redo only some captures, run just those markers plus `end`,

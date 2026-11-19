@@ -613,6 +613,13 @@ describe("savegame and demo tools", () => {
     expect(await h.text("list_saves")).toBe("0 save(s) in /saves");
   });
 
+  it("refuses an explicit dir that doesn't exist, rather than reporting no saves", async () => {
+    const h = await offline({ saveDir: "/saves" });
+    const r = await h.call("list_saves", { dir: "/savse" });
+    expect(r.isError).toBe(true);
+    expect(r.content?.[0]?.text).toBe("no such directory: /savse");
+  });
+
   it("errors when no save directory can be determined", async () => {
     const h = await offline();
     expect((await h.call("list_saves")).isError).toBe(true);
@@ -667,9 +674,16 @@ describe("savegame and demo tools", () => {
       expect(await h.text("load_game", { name: "bad" })).toBe("Could not read savegame 'bad'");
     });
 
-    it("strips UZDoom's level-start console bar and colour escapes", async () => {
+    it("strips the level-start banner's bar glyphs and colour escapes", async () => {
       const h = await live(statusCaps);
-      // g_level.cpp: "\n" TEXTCOLOR_NORMAL "%s\n\n" TEXTCOLOR_BOLD "%s - %s\n\n", console_bar first.
+      const bar = "\x1d" + "\x1e".repeat(30) + "\x1f";
+      bridge!.respondTo("map MAP01", [], [`\n${bar}\n`, "\n\x1c+MAP01 - entryway\n\n"]);
+      expect(await h.text("load_map", { mapName: "MAP01" })).toBe("MAP01 - entryway");
+    });
+
+    it("strips an engine's own console bar line (UZDoom's 40 hyphens) before the banner", async () => {
+      const h = await live({ ...statusCaps, engine: { ...engine, consoleBar: /^-{40}$/ } });
+      // UZDoom's g_level.cpp: "\n" TEXTCOLOR_NORMAL "%s\n\n" TEXTCOLOR_BOLD "%s - %s\n\n", console_bar first.
       bridge!.respondTo("map MAP01", [], ["\n\x1c-" + "-".repeat(40) + "\n\n\x1c+MAP01 - entryway\n\n"]);
       expect(await h.text("load_map", { mapName: "MAP01" })).toBe("MAP01 - entryway");
     });
@@ -1540,6 +1554,31 @@ describe("process management tools", () => {
     expect(harness.ctx.logPathFor(1)).toBe(path.join("/engine", `mcp-bridge-${bridge.port}.log`));
   });
 
+  it("reports a pre-spawn setup failure as itself, not with an earlier run's log", async () => {
+    harness = await startHarness({
+      config: { exe: "/engine/zandronum" },
+      io: {
+        existsSync: () => true,
+        readTextSync: () => "an earlier run's bridge log",
+        hasBridge: () => true,
+        findFreePort: (start) => Promise.resolve(start),
+        launchIo: {
+          spawn: () => {
+            throw new Error("must not spawn");
+          },
+          waitForPort: () => Promise.resolve(),
+          clearQuarantine: () => {},
+          ensureDir: () => {
+            throw new Error("EROFS");
+          },
+        },
+      },
+    });
+    const result = await harness.call("launch_instance");
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toBe(`can't create the config folder (${envName(engine, "CONFIG")} moves it): EROFS`);
+  });
+
   it("falls back to the configured IWAD when none is passed", async () => {
     bridge = await FakeBridge.start();
     const registry = new InstanceRegistry(engine);
@@ -2174,7 +2213,7 @@ describe("engine-state note (registerLive)", () => {
     // Listing the tools is what makes the SDK client check structuredContent against the schema.
     const { tools } = await h.client.listTools();
     const schema = tools.find((t) => t.name === "list_actor_classes")?.outputSchema;
-    expect(Object.keys(schema?.properties ?? {})).toEqual(["actors", "engineState", "notes"]);
+    expect(Object.keys(schema?.properties ?? {})).toEqual(["actors", "engineState"]);
     expect(schema?.required).toEqual(["actors"]);
     const result = await h.call("list_actor_classes");
     expect(result.isError).toBeFalsy();
