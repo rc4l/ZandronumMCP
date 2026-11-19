@@ -44,9 +44,12 @@ untested (consistent with the bridge), covered by a live smoke.
 ## Scripted gameplay input
 Posted key events can't hold a key for an exact number of tics, so gameplay
 input replaces the tic's command instead. `mcp_input.cpp` holds an `mcp_input`
-timeline (segments of one input for N tics), and `MCP_Input_Override` swaps it
-in inside `G_Ticker` (anchors.md rows 6-7). The `input` cap advertises it;
-`input_timeline` drives it. Contract: PROTOCOL.md, Scripted input.
+timeline (segments of one input for N tics, and walks steered by
+`overlay/mcp_steer.h`), and `MCP_Input_Override` swaps it in inside `G_Ticker`,
+before a recording demo writes the tic (anchors.md rows 6-7). The `input` and
+`walk` caps advertise it; `input_timeline` and `move_to`'s engine mode drive it.
+Contract: PROTOCOL.md, Scripted input. `test/steer-sim.cpp` runs the steering law
+against simulated Doom kinematics (`test/steer.test.ts`).
 
 ## Phases
 1. Generic event primitive + `menu_key`/`menu_nav`/`verify_menu`. Done.

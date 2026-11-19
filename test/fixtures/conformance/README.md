@@ -105,13 +105,112 @@ alone). The digests are those of `res/acs/mapslot.o` and `res/acs/mapslotn.o`
 | `mapslot_nomatch` | `mapslot_get`'s command with the md5's last digit changed |
 | `end` | (marker only) |
 
+The `rec_*` captures take a third launch, set up as the first. Before any marker: switch to the
+rocket launcher with rockets, `summon_at DoomImp` 256 units north of the player with tid 77,
+`set_view tid=77`, `set_pause true`, then the `record` tool with `watch: [{tid: 77}, {class:
+"Rocket"}, {player: 0}]`, `events: ["spawn","destroy","damage","death","state"]`,
+`vars: [{world: 5}]`, `scripts: "all"`, `tics: 70` and `command: "+attack; pukename ConfHud"`, and `run_command
+"-attack"`. Repeat until its counts include `damage` and `death`. Then:
+
+| Name | Command |
+|---|---|
+| `rec_status_done` | `mcp_rec status` |
+| `rec_dump` | `mcp_rec dump mcp-rec-conf.txt`; copy that file from beside the engine binary to `test/fixtures/<engine>/rec_file.txt` |
+| `rec_stop_idle` | `mcp_rec stop` |
+| `rec_watch_bad` | `mcp_rec watch class=NoSuchClass` |
+| `rec_var_bad` | `mcp_rec var map=NoSuchRecorderVar` |
+| `rec_go_refused` | `mcp_rec go tics=10` (the bad watch above marked the setup bad) |
+| `rec_clear` | `mcp_rec clear` |
+| `rec_go_nothing` | `mcp_rec go tics=10` (the cleared setup has no watch, script or var) |
+| `rec_watch` | `mcp_rec watch player=0` |
+| `rec_var` | `mcp_rec var world=5` |
+| `rec_armed` | `mcp_rec go tics=500` (still paused, so nothing runs) |
+| `rec_status` | `mcp_rec status` |
+| `rec_stop` | `mcp_rec stop` |
+| `end` | (marker only) |
+
+The `rec_file_player` capture uses a separate fresh launch with the first setup and pistol ready.
+Pause, then `record` with `watch: [{player: 0}]`, `fields: ["input", "weaponstate"]`,
+`events: ["psprite"]`, `tics: 35`, `onChange: false`, `command: "+attack"`; release with
+`run_command "-attack"`. Dump with `mcp_rec dump mcp-rec-conf-player.txt` and capture that file as
+`rec_file_player.txt`. It must include player sample fields, weapon/flash state-change rows and
+the flash removal. Keep this separate from `rec_file`, whose kinds gain `var`, not `psprite`.
+
+The 2026-11-08 player captures were recorded at the MAP01 spawn (-96,784,56), facing north,
+after an idle 35-tic recording with the same fields. The run started at maptime 2182 and dumped 36
+samples and 17 psprite events over 35 tics, with no dropped rows.
+
 The `dumphud` captures were taken with `res/` loaded, god/notarget enabled, the player at
-(-800,700,8) facing north, and `ConfHud` active after three stepped tics. The capture (2026-11-12,
+(-800,700,8) facing north, and `ConfHud` active after three stepped tics. The capture (2026-11-13,
 a stock ZA_3.2.1 build with this overlay) used OpenGL at 800x500 (the OpenGL precondition above
 binds only `dumprenderer` and `pointinfo`, so a redo of `dumphud` alone can run on either renderer). It contains
 no bridge correlator and retains the HUD message and pause image.
 
-The `status` and `status_acstemp` captures include `pending=0`.
+The `input_walk*` captures take a short run of the first launch's setup (the walk moves the
+player, which the later rows' positions depend on): `set_pause true`, then the rows below, then
+`end`. Split into a temp dir and copy only the `input_walk*` files:
+
+| Name | Command |
+|---|---|
+| `input_walk_bad` | `mcp_input clear; mcp_input walk nosuch:1 0 0 1 -` |
+| `input_walk` | `mcp_input clear; mcp_input walk pt:-800,800 0 0 1 -` |
+| `input_walk_go` | `mcp_input go 1 350`, then wait 3 s before the next marker: the walk's `MCP_INPUT_SEG` and `MCP_INPUT_END` log lines belong to this capture |
+| `input_walk_status` | `mcp_input status` |
+
+The `clock_*` captures follow `status_acstemp` in a short run of the first launch's setup:
+markers `status`, `runacs`, `status_acstemp`, then the rows below, then `end`. Split into a temp
+dir and copy only `status`, `status_acstemp` and the `clock_*` files. The game must be unpaused
+with no menu or console open:
+
+| Name | Command |
+|---|---|
+| `clock_step_refused` | `mcp_clock step 1` (not frozen yet) |
+| `clock_frametime_refused` | `mcp_clock frametime 1` (not frozen yet) |
+| `clock_freeze` | `mcp_clock freeze` |
+| `clock_status` | `mcp_clock status` |
+| `clock_frametime_on` | `mcp_clock frametime 1` |
+| `clock_step` | `mcp_clock step 3` |
+| `clock_shot` | `mcp_clock shot mcp_clock_conf 1 2` (leaves `mcp_clock_conf.png` beside the engine binary) |
+| `clock_status_after` | `mcp_clock status` |
+| `clock_stop` | `mcp_clock step 200; mcp_clock stop` in one `run_command` |
+| `clock_frametime_off` | `mcp_clock frametime 0` |
+| `clock_thaw` | `mcp_clock thaw` |
+
+The `demo_*` run takes its own launch: DOOM2.WAD `MAP01`, no `files`, `-nosound -nomusic` and
+`-record mcp-demo-conf.lmp` (relative, so it lands beside the engine binary and no host path
+enters the captures), then `closemenu`. Unpaused, run the first four rows; then `set_pause true`
+and the rest, waiting about 0.5 s after each `mcp_clock freeze`/`thaw` and `stop`, 2 s after
+`playdemo`, and after `clock_demo_step` until `mcp_clock status` shows `jobs=0`. Split into a temp
+dir and copy every file below except `demo_stop` and `clock_demo_step`:
+
+| Name | Command |
+|---|---|
+| `checkpoint` | `mcp_checkpoint` |
+| `checkpoint_rows` | `mcp_checkpoint rows` |
+| `input_go_recording` | `mcp_input clear; mcp_input seg 3 - 12800 0 0 - 0 -; mcp_input go 1` (refused: recording unfrozen) |
+| `rec_go_recording` | `mcp_rec clear; mcp_rec watch player=0; mcp_rec go tics=10 run=1` (refused the same way) |
+| `clock_freeze_recording` | `mcp_clock freeze`, after the `set_pause true` (`restore=1`) |
+| `clock_thaw_recording` | `mcp_clock thaw` (`restore_skipped=demo`) |
+| `demo_stop` | `stop` (writes the demo) |
+| `clock_freeze_demo` | `mcp_clock freeze demo` |
+| `clock_demo_engaged` | `playdemo mcp-demo-conf.lmp` (the engage line arrives in the bridge log) |
+| `clock_demo_status` | `mcp_clock status` |
+| `checkpoint_demo` | `mcp_checkpoint` |
+| `clock_demo_step` | `mcp_clock step 5000` |
+| `clock_demo_end` | `mcp_clock status` (`reason=demo_end`) |
+| `clock_demo_thaw` | `mcp_clock thaw` |
+| `end` | (marker only) |
+
+Zandronum prints `NetUpdate: Node 0 missed too many tics` after a played demo longer than about
+70 tics (`BACKUPTICS`) ends, frozen or not (stock: `NetUpdate` skips the exchange during playback, so the resend
+window is stale when it resumes). It lands in `clock_demo_thaw` and is not a bridge reply.
+
+The var/player/frame-time captures above are real rebuilt-overlay replies with shared
+conformance contracts. The `rec_file` capture includes a world[5] baseline at the
+recording's start; `rec_var`, `rec_var_bad`, `rec_go_nothing` and `rec_armed` pin the variable setup replies.
+The clock captures cover frame-time refusal, on/off replies and status fields
+`frametime`, `framems` and `armed`. The `status` and `status_acstemp` captures include
+`pending=0`.
 Never hand-edit captures into a new format. On resolver changes, re-capture `mapslot_*` and
 verify byte-identical replies. For notify conformance, re-run the first launch through `dumphud`
 with its HUD-message script active; bridge correlator text must be absent.

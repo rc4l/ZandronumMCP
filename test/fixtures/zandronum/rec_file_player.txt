@@ -1,0 +1,55 @@
+MCP_RECFILE v=1 engine=zandronum map=MAP01 start=260 ran=35 rows=54 dropped=0 fields=buttons,modbuttons,wclass,pending,refire,wflags,wstate,wlabel,wsprite,wframe,wtics reason=done
+rec t=260 k=seen id=1 class=DoomPlayer tid=0 x=-800.0 y=700.0 z=8.0
+rec t=260 k=sample id=1 buttons=0 modbuttons=0 wclass=Pistol refire=0 wflags=143 wstate=Pistol.0 wlabel=Ready wsprite=PISG wframe=A wtics=1
+rec t=260 k=psprite id=1 layer=1 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=261 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=262 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=3
+rec t=263 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=2
+rec t=264 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=1
+rec t=264 k=psprite id=1 layer=1 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=264 k=psprite id=1 layer=1000 wstate=Pistol.7 wlabel=Flash wsprite=PISF wframe=A wtics=7
+rec t=265 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=266 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=5
+rec t=267 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=4
+rec t=268 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=3
+rec t=269 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=2
+rec t=270 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=1
+rec t=270 k=psprite id=1 layer=1 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=4
+rec t=271 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=4
+rec t=271 k=psprite id=1 layer=1000 wstate=Weapon.0 wlabel=LightDone wsprite=SHTG wframe=E wtics=0
+rec t=271 k=psprite id=1 layer=1000 wstate=none
+rec t=272 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=3
+rec t=273 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=2
+rec t=274 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=0 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=1
+rec t=274 k=psprite id=1 layer=1 wstate=Pistol.6 wlabel=Fire+3 wsprite=PISG wframe=B wtics=5
+rec t=274 k=psprite id=1 layer=1 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=275 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=276 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=3
+rec t=277 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=2
+rec t=278 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=1
+rec t=278 k=psprite id=1 layer=1 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=278 k=psprite id=1 layer=1000 wstate=Pistol.7 wlabel=Flash wsprite=PISF wframe=A wtics=7
+rec t=279 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=280 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=5
+rec t=281 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=4
+rec t=282 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=3
+rec t=283 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=2
+rec t=284 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=1
+rec t=284 k=psprite id=1 layer=1 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=4
+rec t=285 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=4
+rec t=285 k=psprite id=1 layer=1000 wstate=Weapon.0 wlabel=LightDone wsprite=SHTG wframe=E wtics=0
+rec t=285 k=psprite id=1 layer=1000 wstate=none
+rec t=286 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=3
+rec t=287 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=2
+rec t=288 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=1 wflags=128 wstate=Pistol.5 wlabel=Fire+2 wsprite=PISG wframe=C wtics=1
+rec t=288 k=psprite id=1 layer=1 wstate=Pistol.6 wlabel=Fire+3 wsprite=PISG wframe=B wtics=5
+rec t=288 k=psprite id=1 layer=1 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=289 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=4
+rec t=290 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=3
+rec t=291 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=2
+rec t=292 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.3 wlabel=Fire wsprite=PISG wframe=A wtics=1
+rec t=292 k=psprite id=1 layer=1 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=292 k=psprite id=1 layer=1000 wstate=Pistol.7 wlabel=Flash wsprite=PISF wframe=A wtics=7
+rec t=293 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=6
+rec t=294 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=5
+rec t=295 k=sample id=1 buttons=1 modbuttons=1 wclass=Pistol refire=2 wflags=128 wstate=Pistol.4 wlabel=Fire+1 wsprite=PISG wframe=B wtics=4

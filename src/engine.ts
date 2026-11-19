@@ -33,6 +33,10 @@ export const engine: EngineAdapter = {
   refuseCommand: () => undefined,
   // FileReader::Open is a plain fopen (files.cpp).
   ansiPaths: true,
+  // Measured: the replay starts from the save's state.
+  demoRecordFromSave: true,
+  // d_main.cpp hands -loadgame's value to G_LoadGame as given, so an absolute path works.
+  loadSaveArgs: (save) => ["-loadgame", save],
   // file_directory.cpp: fts skips dot-dirs, macOS's readdir every dot entry, and Windows' _findfirst
   // hidden entries (unseen here) and files named *.orig*/*.bak*.
   dirWalkSkips: (name, isDir, platform) =>
@@ -82,12 +86,15 @@ export const engine: EngineAdapter = {
       "Offline only (no server/client). Zandronum can't unload a module: one the engine rejects stays loaded, inert, " +
       "and every snippet stays until the map changes. While any is loaded",
     screenshotFile: "",
+    recordNetgame:
+      "On a -host server only run: false records (a server ignores pause, so its tics run in real time from the " +
+      "arm; read with record_read); a client is refused, record on the server.",
     setPause:
       ". Use this to resume a backgrounded instance that auto-paused on focus loss, so the simulation keeps " +
       "advancing while the MCP drives it.",
     ensureLiveBlockers: "menu, console, chat, automap, not in a level, dead/spectating player, demo",
     ensureLiveLoadWait: "",
-    ensureLiveUnblock: " and hides the console, chat and automap (`mcp_unblock`)",
+    ensureLiveUnblock: " and hides the console, chat and automap and thaws a frozen clock (`mcp_unblock`)",
     setCheat: "Uses the engine's normal net path.",
     listSaves:
       "List .zds savegames in the save directory with metadata (title, map, engine, game wad, creation time) " +

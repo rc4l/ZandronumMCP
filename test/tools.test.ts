@@ -7,12 +7,16 @@ import { configPathFor, isolatedConfigPathFor } from "../src/process/launch.js";
 import { envName, type EngineAdapter, type NetgameCaps } from "../src/adapter.js";
 import { engine } from "../src/engine.js";
 import type { ContextIo, LaunchArgs, ServerConfig } from "../src/context.js";
-import type { MapSlotRequest, MapSlotResult } from "../src/acs/probe.js";
+import { resolveMapSlot, type MapSlotRequest, type MapSlotResult } from "../src/acs/probe.js";
+import { defaultCompileDeps } from "../src/acs/compile.js";
 import { buildWad, buildZip, sectorsLump, doomLinedefsLump, sidedefsLump, vertexesLump } from "./fakes/wad-builder.js";
-import { buildBehaviorAcse, buildBehaviorExports } from "./fakes/acs-builder.js";
+import { buildBehaviorAcse, buildBehaviorExports, buildObject, chunk, funcChunk, nameChunk, u32 } from "./fakes/acs-builder.js";
 import { readFileSync } from "node:fs";
 import { engineFixture } from "./fakes/fixtures.js";
 import type { KvRecord } from "../src/parsers/lines.js";
+import { REC_KEEP } from "../src/recorder/files.js";
+import { clockEndText } from "../src/clock/frames.js";
+import { CAPTURE_TAG } from "../src/screenshot/tag.js";
 import { MAPSLOT_DIGESTS } from "./fixtures/mapslot/digests.js";
 import { abs, norm, PathMap, sepRe } from "./fakes/paths.js";
 
@@ -505,6 +509,649 @@ describe("time control tools", () => {
   });
 });
 
+describe("frozen clock", () => {
+  const sent = () =>
+    bridge!.received
+      .filter((m) => m.t === "cmd")
+      .map((m) => (m.text ?? "").replace(/\s*;\s*mcp_status \S+$/, ""))
+      .filter((c) => !c.startsWith("mcp_status"));
+  const FROZEN = "time is frozen: freeze_time off first";
+
+  /** The overlay's mcp_clock as the fake runs it: queued jobs all run between two commands, as frames do between polls. */
+  class ClockModel {
+    frozen = false;
+    frameTime = false;
+    framems = 1000;
+    nextFramems?: number;
+    paused = 1;
+    restore = 0;
+    /** A demo plays or records, so thaw restores no pause. */
+    demo = false;
+    gametic = 100;
+    maptime = 1;
+    steps = 0;
+    shots = 0;
+    reason = "-";
+    interp = true;
+    jobs: Array<{ shot: boolean; left: number; name: string; k: number; n: number }> = [];
+    /** The next frames end the queue with this reason instead of running it. */
+    abort?: string;
+    /** No frame runs (a hung loop). */
+    stall = false;
+    /** A thawed clock's map tics move on every command. */
+    ticking = false;
+    /** Subcommands refused with this error text. */
+    refuse: Record<string, string> = {};
+    readonly reply: string[] = [];
+
+    status() {
+      const interp = this.interp ? "interp=1" : "interp=0 nointerp=cl_capfps";
+      return `MCP_CLOCK frozen=${+this.frozen} gametic=${this.gametic} maptime=${this.maptime} frac=1/1 ${interp} jobs=${this.jobs.length} steps=${this.steps} shots=${this.shots} reason=${this.reason} frametime=${+this.frameTime} framems=${this.framems}`;
+    }
+
+    private frames() {
+      if (this.nextFramems !== undefined) [this.framems, this.nextFramems] = [this.nextFramems, undefined];
+      if (!this.frozen && this.ticking) this.maptime++;
+      if (this.stall || this.jobs.length === 0) return;
+      if (this.abort) {
+        this.reason = this.abort;
+        this.abort = undefined;
+      } else {
+        this.reason = "done";
+        for (const j of this.jobs) {
+          // A sub-tic shot reaching the head with interpolation off ends the queue.
+          if (j.shot && j.k < j.n && !this.interp) {
+            this.reason = "nointerp";
+            break;
+          }
+          if (j.shot) this.shots++;
+          for (; j.left > 0; j.left--, this.steps++) this.gametic++, this.maptime++;
+        }
+      }
+      this.jobs = [];
+    }
+
+    private queue(shot: boolean, left: number, name = "", k = 1, n = 1) {
+      this.jobs.push({ shot, left, name, k, n });
+      this.reason = "-";
+      return `MCP_CLOCK queued jobs=${this.jobs.length}`;
+    }
+
+    thaw() {
+      if (!this.frozen) return "MCP_CLOCK frozen=0";
+      if (this.jobs.length) [this.jobs, this.reason] = [[], "stopped"];
+      this.frozen = false;
+      this.frameTime = false;
+      this.paused = this.demo ? 0 : this.restore;
+      this.sync();
+      return `MCP_CLOCK frozen=0 maptime=${this.maptime} paused=${this.paused}${this.demo ? " restore_skipped=demo" : ""}`;
+    }
+
+    sync() {
+      bridge!.setStatus({ frozen: String(+this.frozen), paused: String(this.paused), maptime: String(this.maptime) });
+    }
+
+    run(text: string) {
+      this.frames();
+      this.reply.length = 0;
+      for (const [verb, sub, a, k = "1", n = "1"] of text.split(";").map((p) => p.trim().split(/\s+/))) {
+        if (verb !== "mcp_clock") continue;
+        if (this.refuse[sub]) this.reply.push(`error ${this.refuse[sub]}`);
+        else if (sub === "status") this.reply.push(this.status());
+        else if (sub === "freeze" && this.frozen) this.reply.push(this.status());
+        else if (sub === "freeze") {
+          [this.frozen, this.restore, this.paused, this.steps, this.shots] = [true, this.paused, 0, 0, 0];
+          this.queue(false, 1);
+          this.reply.push(`MCP_CLOCK frozen=1 gametic=${this.gametic} maptime=${this.maptime} restore=${this.restore} jobs=1`);
+        } else if (sub === "thaw") this.reply.push(this.thaw());
+        else if (sub === "frametime") {
+          this.frameTime = a === "1";
+          this.reply.push(`MCP_CLOCK frametime=${+this.frameTime} framems=${this.framems}`);
+        }
+        else if (sub === "step") this.reply.push(this.queue(false, Number(a)));
+        // As the overlay: a step queued ahead decides interpolation, so only a shot with none is refused here.
+        else if (sub === "shot" && +k < +n && !this.interp && !this.jobs.some((j) => !j.shot)) {
+          this.reply.push("error interpolation off (cl_capfps)");
+        } else if (sub === "shot") this.reply.push(this.queue(true, 0, a, +k, +n));
+        else if (sub === "stop") {
+          this.reply.push(`MCP_CLOCK stopped dropped=${this.jobs.length}`);
+          if (this.jobs.length) [this.jobs, this.reason] = [[], "stopped"];
+        }
+      }
+      this.sync();
+    }
+  }
+
+  async function clocked(opts: LiveOptions = {}) {
+    const model = new ClockModel();
+    const reads: string[] = [];
+    const removed: string[] = [];
+    const ctl = { failRead: false };
+    const h = await live({
+      ...opts,
+      caps: opts.caps ?? ["cmd", "event", "time", "status", "clock", "frametime"],
+      responses: { mcp_clock: model.reply, ...opts.responses },
+      io: {
+        readShot: (dir, name, keep) => {
+          if (ctl.failRead) return Promise.reject(new Error(`screenshot ${name}.png did not appear in ${dir}`));
+          reads.push(`${name}${keep ? " keep" : ""}`);
+          return Promise.resolve({ base64: "RlJN", path: `${dir}/${name}.png` });
+        },
+        removeFile: (p) => void removed.push(p),
+        ...opts.io,
+      },
+    });
+    bridge!.onCommand("", (text) => model.run(text));
+    bridge!.onCommand("mcp_unblock", () => model.thaw());
+    model.sync();
+    return { h, model, reads, removed, ctl };
+  }
+
+  async function frozen(opts: LiveOptions = {}) {
+    const c = await clocked(opts);
+    await c.h.call("freeze_time", { frozen: true });
+    bridge!.clearReceived();
+    return c;
+  }
+
+  it("freezes a paused game behind one live tic, and thaws back to the pause", async () => {
+    const { h, model } = await clocked();
+    const res = await h.call("freeze_time", { frozen: true });
+    expect(res.content?.[0]?.text).toBe("frozen at maptime 2; interpolation on; freeze_time off resumes paused");
+    expect(res.structuredContent).toMatchObject({ frozen: true, maptime: 2, interp: true, restorePaused: true });
+    expect(res.structuredContent).not.toHaveProperty("nointerp");
+    expect(sent()[0]).toBe("mcp_clock status; mcp_clock freeze");
+    expect(res.content?.map((c) => c.text)).toContain("Engine state: time is frozen (freeze_time off resumes).");
+    expect(await h.text("freeze_time", { frozen: true })).toBe("already frozen at maptime 2");
+    const off = await h.call("freeze_time", { frozen: false });
+    expect(off.content?.[0]?.text).toBe("resumed at maptime 2, paused as at the freeze");
+    expect(off.structuredContent).toMatchObject({ frozen: false, maptime: 2, paused: true });
+    expect(model.frozen).toBe(false);
+    expect(await h.text("freeze_time", { frozen: false })).toBe("not frozen; nothing to do");
+    expect(bridge!.pauses).toEqual([]);
+  });
+
+  it("says a thaw during a demo leaves the game unpaused whatever the freeze found", async () => {
+    const { h, model } = await clocked();
+    await h.call("freeze_time", { frozen: true });
+    model.demo = true;
+    const off = await h.call("freeze_time", { frozen: false });
+    expect(off.content?.[0]?.text).toBe("resumed at maptime 2, unpaused: a demo is playing or recording, so the freeze's pause isn't restored");
+    expect(off.structuredContent).toMatchObject({ frozen: false, paused: false, restoreSkipped: true });
+  });
+
+  it("freezes a running game, and says when interpolation is off", async () => {
+    const { h, model } = await clocked();
+    [model.paused, model.interp] = [0, false];
+    const res = await h.call("freeze_time", { frozen: true });
+    expect(res.content?.[0]?.text).toBe(
+      "frozen at maptime 2; interpolation off (cl_capfps): sub-tic frames are refused; freeze_time off resumes running",
+    );
+    expect(res.structuredContent).toMatchObject({ interp: false, nointerp: "cl_capfps", restorePaused: false });
+    expect(await h.text("freeze_time", { frozen: false })).toBe("resumed at maptime 2");
+  });
+
+  it("holds frame time explicitly, toggles without another tic, and releases it on thaw", async () => {
+    const { h, model } = await clocked();
+    bridge!.onCommand("mcp_clock frametime", () => { model.nextFramems = 1234; });
+    const first = await h.call("freeze_time", { frozen: true, frameTime: true });
+    expect(first.isError).not.toBe(true);
+    expect(first.structuredContent).toMatchObject({ frozen: true, maptime: 2, frameTime: true, framems: 1234 });
+    expect(first.content?.[0]?.text).toContain("frame time held per tic (fps is not meaningful)");
+    expect(sent()).toContain("mcp_clock frametime 1");
+    expect(model.frameTime).toBe(true);
+    expect(await h.text("freeze_time", { frozen: true })).toBe("already frozen at maptime 2");
+    expect(model.frameTime).toBe(true);
+    const off = await h.call("freeze_time", { frozen: true, frameTime: false });
+    expect(off.structuredContent).toMatchObject({ maptime: 2, frameTime: false, framems: 1234 });
+    expect(off.content?.[0]?.text).toBe("already frozen at maptime 2; frame time running");
+    expect(model.frameTime).toBe(false);
+    await h.call("freeze_time", { frozen: true, frameTime: true });
+    expect(model.frameTime).toBe(true);
+    expect(model.steps).toBe(1);
+    await h.call("freeze_time", { frozen: false });
+    expect(model.frameTime).toBe(false);
+  });
+
+  it("rejects a frame-time option on thaw or an old overlay without sending a command", async () => {
+    const { h, model } = await clocked({ caps: ["cmd", "event", "time", "status", "clock"] });
+    for (const frameTime of [true, false]) {
+      expect(await h.text("freeze_time", { frozen: false, frameTime })).toContain("only valid with frozen true");
+      expect(await h.text("freeze_time", { frozen: true, frameTime })).toContain("no frame-time hold");
+    }
+    expect(sent()).toEqual([]);
+    expect(model.frozen).toBe(false);
+    expect((await h.call("freeze_time", { frozen: true })).isError).not.toBe(true);
+  });
+
+  it("reports a refused frame-time toggle without pretending it succeeded", async () => {
+    const { h, model } = await clocked();
+    model.refuse.frametime = "test frame-time refusal";
+    const res = await h.call("freeze_time", { frozen: true, frameTime: true });
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toBe("test frame-time refusal");
+    expect(model.frozen).toBe(true);
+    expect(model.frameTime).toBe(false);
+  });
+
+  it("surfaces a failed settled frame-time status read", async () => {
+    const { h, model } = await clocked();
+    bridge!.onCommand("mcp_clock frametime", () => { model.refuse.status = "settled frame-time status unavailable"; });
+    const res = await h.call("freeze_time", { frozen: true, frameTime: true });
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toBe("settled frame-time status unavailable");
+  });
+
+  it("fails a refused freeze, a freeze whose live tic didn't run, and a bridge without the clock", async () => {
+    const { h, model } = await clocked();
+    model.refuse.freeze = "netgame";
+    expect(await h.text("freeze_time", { frozen: true })).toBe("can't freeze: netgame");
+    delete model.refuse.freeze;
+    model.abort = "paused";
+    const paused = await h.call("freeze_time", { frozen: true });
+    expect(paused.isError).toBe(true);
+    expect(paused.content?.[0]?.text).toBe(`froze, but its live tic didn't run: ${clockEndText("paused")}. freeze_time off resumes.`);
+    model.thaw();
+    model.stall = true;
+    expect(await h.text("freeze_time", { frozen: true })).toBe(
+      `froze, but its live tic didn't run: ${clockEndText("stalled")}. freeze_time off resumes.`,
+    );
+    expect(sent()).toContain("mcp_clock stop");
+    model.refuse.thaw = "boom";
+    expect(await h.text("freeze_time", { frozen: false })).toBe("boom");
+    await harness!.close();
+    await bridge!.close();
+    const old = await live({ caps: ["cmd", "event", "time", "status"] });
+    for (const [tool, args] of [["freeze_time", { frozen: true }], ["frame_sweep", { of: 2 }]] as const) {
+      expect(await old.text(tool, args)).toMatch(/no frozen clock/);
+    }
+  });
+
+  it("steps exactly the tics asked, and reports a short, refused or stalled run", async () => {
+    const { h, model } = await frozen();
+    expect(await h.text("step", { tics: 300 })).toBe("advanced 300 tic(s) (frozen clock)");
+    expect(sent()[0]).toBe("mcp_clock status; mcp_clock step 300");
+    expect(model.maptime).toBe(302);
+    model.abort = "paused";
+    expect(await h.text("step", { tics: 5 })).toBe(`advanced 0 tic(s) (frozen clock); stopped: ${clockEndText("paused")}`);
+    model.refuse.step = "menu or console open";
+    expect(await h.text("step", { tics: 1 })).toBe("advanced 0 tic(s) (frozen clock); stopped: menu or console open");
+    delete model.refuse.step;
+    model.stall = true;
+    bridge!.clearReceived();
+    expect(await h.text("step", { tics: 2 })).toBe(`advanced 0 tic(s) (frozen clock); stopped: ${clockEndText("stalled")}`);
+    expect(sent()).toContain("mcp_clock stop");
+    expect(bridge!.pauses).toEqual([]);
+    model.refuse.status = "boom";
+    const broken = await h.call("step", { tics: 1 });
+    expect([broken.isError, broken.content?.[0]?.text]).toEqual([true, "boom"]);
+  });
+
+  it("runs stepTics on the clock, noting a short run", async () => {
+    const { h, model } = await frozen();
+    const full = await h.text("run_command", { text: "give shotgun", stepTics: 3 });
+    expect(full).toBe(["(no output)", "ran 3 tic(s); no engine log to read"].join("\n"));
+    expect(model.maptime).toBe(5);
+    model.abort = "level_change";
+    const short = await h.call("run_command", { text: "map MAP02", stepTics: 1 });
+    const head = `advanced 0 tic(s) (frozen clock); stopped: ${clockEndText("level_change")}`;
+    expect(short.content?.[0]?.text).toBe(["(no output)", head, "ran 0 tic(s); no engine log to read"].join("\n"));
+    expect(short.structuredContent).toMatchObject({ notes: [head, "ran 0 tic(s); no engine log to read"] });
+  });
+
+  it("captures the held frame through a capture job, and fails a refused or aborted one", async () => {
+    const { h, model, reads, removed } = await frozen();
+    const shot = await h.call("screenshot");
+    expect(shot.content?.[0]).toMatchObject({ type: "image", data: "RlJN" });
+    expect(sent()[0]).toMatch(new RegExp(`^mcp_clock status; mcp_clock shot mcp_frame_${CAPTURE_TAG}_\\d+_0$`));
+    expect(await h.text("screenshot_file", { name: "held" })).toBe(path.resolve("/shots/held.png"));
+    expect(reads).toEqual([expect.stringMatching(new RegExp(`^mcp_frame_${CAPTURE_TAG}_\\d+_0$`)), "held keep"]);
+    // The engine counts a capture whose write failed, so a stale kept file goes first.
+    expect(removed).toEqual([norm("/shots/held.png")]);
+    model.abort = "level_change";
+    expect(await h.text("screenshot")).toBe(`frozen-clock capture failed: ${clockEndText("level_change")}`);
+    model.refuse.shot = "no display";
+    bridge!.clearReceived();
+    expect(await h.text("screenshot")).toBe("frozen-clock capture failed: no display");
+    expect(sent()).not.toContain("mcp_clock stop");
+  });
+
+  it("sweeps frames across a tic, inline or to files", async () => {
+    const { h, reads } = await frozen();
+    const res = await h.call("frame_sweep", { of: 4, frames: [0, 2, 4] });
+    expect(res.content?.[0]?.text).toBe(["tic +0  0/4", "tic +0  2/4", "tic +0  4/4", "maptime 2"].join("\n"));
+    expect(res.content?.slice(1)).toEqual(Array(3).fill({ type: "image", data: "RlJN", mimeType: "image/png" }));
+    expect(res.structuredContent).toMatchObject({
+      maptime: 2,
+      frames: [{ tic: 0, k: 0, of: 4, frac: 0 }, { tic: 0, k: 2, of: 4, frac: 0.5 }, { tic: 0, k: 4, of: 4, frac: 1 }],
+    });
+    expect(sent()[0]).toMatch(new RegExp(`^mcp_clock status; mcp_clock shot (mcp_frame_${CAPTURE_TAG}_\\d+)_0 0 4; mcp_clock shot \\1_1 2 4; mcp_clock shot \\1_2 4 4$`));
+    const files = await h.call("frame_sweep", { of: 2, tics: 2, output: "file" });
+    expect(files.content).toHaveLength(1);
+    const lines = files.content?.[0]?.text?.split("\n");
+    expect(lines?.map((l) => l.replace(/  \S+\.png$/, ""))).toEqual(["tic +1  0/2", "tic +1  1/2", "tic +2  0/2", "tic +2  1/2", "maptime 4"]);
+    const first = lines![0].slice(lines![0].lastIndexOf("  ") + 2);
+    expect(first).toBe(path.join(abs("/shots"), path.basename(first)));
+    expect(path.basename(first)).toMatch(new RegExp(`^mcp_frame_${CAPTURE_TAG}_\\d+_0\\.png$`));
+    expect(reads.slice(-4).every((r) => r.endsWith(" keep"))).toBe(true);
+  });
+
+  it("refuses a sweep off the clock or with bad frames, and cleans up one that stops short", async () => {
+    const { h, model, removed, ctl } = await clocked();
+    expect(await h.text("frame_sweep", { of: 2 })).toBe("time is not frozen: freeze_time on first");
+    await h.call("freeze_time", { frozen: true });
+    expect(await h.text("frame_sweep", { of: 3, tics: 3 })).toMatch(/^9 images is over 8 inline/);
+    model.interp = false;
+    bridge!.clearReceived();
+    // 2/2 queues, then 0/2 is refused: the stop drops the shot queued ahead.
+    expect(await h.text("frame_sweep", { of: 2, frames: [2, 0] })).toBe("the sweep was refused: interpolation off (cl_capfps)");
+    expect(sent()).toContain("mcp_clock stop");
+    expect(removed).toEqual([expect.stringMatching(/_0\.png$/), expect.stringMatching(/_1\.png$/)]);
+    // With a step ahead the shots queue, and the first one at the head ends the sweep.
+    expect(await h.text("frame_sweep", { of: 2, tics: 1, output: "file" })).toBe(
+      `the sweep stopped after 0 of 2 frame(s): ${clockEndText("nointerp")}`,
+    );
+    expect(removed).toHaveLength(4);
+    model.interp = true;
+    ctl.failRead = true;
+    expect(await h.text("frame_sweep", { of: 2 })).toMatch(/did not appear/);
+    expect(removed).toHaveLength(6);
+    ctl.failRead = false;
+    model.stall = true;
+    expect(await h.text("frame_sweep", { of: 2 })).toBe(`the sweep stopped after 0 of 2 frame(s): ${clockEndText("stalled")}`);
+  });
+
+  it("refuses every tool that needs tics to run by themselves, sending nothing", async () => {
+    const { h } = await frozen();
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["give", { item: "shotgun" }],
+      ["take", { item: "shotgun" }],
+      ["summon", { className: "DoomImp" }],
+      ["set_cheat", { name: "god", on: true }],
+      ["run_script", { script: 1 }],
+      ["load_map", { mapName: "MAP02" }],
+      ["load_game", { name: "a.zds" }],
+      ["save_game", { name: "a" }],
+      ["play_demo", { name: "d" }],
+      ["menu_key", { key: "up" }],
+      ["menu_nav", { steps: ["up"] }],
+      ["menu_text", { text: "a" }],
+      ["mouse_move", { x: 1, y: 1 }],
+      ["mouse_click", { x: 1, y: 1 }],
+      ["mouse_wheel", { notches: 1 }],
+      ["verify_menu", {}],
+      ["set_pause", { paused: true }],
+      ["move_to", { to: [{ x: 0, y: 0 }] }],
+      ["add_bot", {}],
+      ["profile_window", { seconds: 1 }],
+    ];
+    for (const [name, args] of calls) {
+      const res = await h.call(name, args);
+      expect([name, res.isError, res.content?.[0]?.text]).toEqual([name, true, FROZEN]);
+    }
+    expect(sent()).toEqual([]);
+    expect(bridge!.events).toEqual([]);
+    expect(await h.text("set_pause", { paused: true, all: true })).toBe(`instance 1: ${FROZEN}`);
+    // mcp_inv acts at once, so a give to a tid still runs.
+    await h.call("give", { item: "shotgun", tid: 5 });
+    expect(sent().at(-1)).toMatch(/^mcp_inv 5 0 give shotgun$/);
+  });
+
+  it("a frozen refusal inside run_scenario is a failed step, so onFail continue runs on", async () => {
+    const { h } = await frozen();
+    const res = await h.call("run_scenario", {
+      onFail: "continue",
+      steps: [
+        { call: "summon", args: { className: "DoomImp" } },
+        { call: "step", args: { tics: 1 } },
+      ],
+    });
+    const steps = res.structuredContent?.steps as Array<Record<string, unknown>>;
+    expect(steps.map((s) => [s.call, s.ok, s.text])).toEqual([
+      ["summon", false, FROZEN],
+      ["step", true, "advanced 1 tic(s) (frozen clock)"],
+    ]);
+  });
+
+  it("sees a frozen clock on the first call after a reconnect, with no status cached", async () => {
+    const { h } = await frozen();
+    // A fresh client, as after a reconnect: no status read yet.
+    h.ctx.registry.detach(1);
+    expect(await h.text("summon", { className: "DoomImp" })).toBe(FROZEN);
+    expect(sent().some((c) => c.startsWith("summon"))).toBe(false);
+    // A status read that times out after a reconnect refuses rather than guess.
+    h.ctx.registry.detach(1);
+    bridge!.swallowProbes(1);
+    expect(await h.text("summon", { className: "DoomImp" })).toMatch(/^can't tell whether time is frozen/);
+  });
+
+  it("a chunked tool whose frozen steps stop says why, not just that the sim stalled", async () => {
+    const { h, model } = await frozen({ responses: { findactors: ["MCP_FOUND"] } });
+    model.refuse.step = "paused";
+    const res = await h.call("watch_actors", { class: "DoomImp", tics: 10, everyTics: 1 });
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toBe(`the frozen clock's steps stopped at maptime 2: ${clockEndText("paused")}`);
+  });
+
+  it("ensure_live reports a frozen clock unprobed, and fix thaws it back to the pause found at the freeze", async () => {
+    const { h, model } = await frozen();
+    const res = await h.call("ensure_live");
+    expect(res.content?.[0]?.text).toBe("time is frozen at maptime 2: not probed (freeze_time off resumes, fix thaws)");
+    expect(res.structuredContent).toMatchObject({
+      live: false,
+      frozen: true,
+      maptime: { before: 2, after: 2 },
+      remaining: ["time is frozen (freeze_time off resumes)"],
+    });
+    expect(bridge!.pauses).toEqual([]);
+    model.ticking = true;
+    const fixed = await h.call("ensure_live", { fix: true });
+    expect(fixed.content?.[0]?.text).toMatch(/^live \(maptime \d+ -> \d+\); fixed: time is frozen \(freeze_time off resumes\)$/);
+    expect(model.frozen).toBe(false);
+    await settle(() => bridge!.pauses.length === 2);
+    expect(bridge!.pauses).toEqual([0, 1]);
+  });
+
+  describe("while a demo plays or records", () => {
+    const FROZE = "froze the clock: a paused tic desyncs a demo (freeze_time off resumes)";
+
+    async function recording(opts: LiveOptions = {}, field = "demorec") {
+      const c = await clocked(opts);
+      bridge!.setStatus({ [field]: "1" });
+      c.model.demo = true;
+      await c.h.ctx.attachedClient(1)!.refreshStatus();
+      bridge!.clearReceived();
+      return c;
+    }
+
+    it("step freezes first and steps the rest, never pausing", async () => {
+      const { h, model } = await recording();
+      expect(await h.text("step", { tics: 35 })).toBe(`advanced 35 tic(s) (frozen clock); ${FROZE}`);
+      expect(sent().filter((c) => c.startsWith("mcp_clock status;"))).toEqual(["mcp_clock status; mcp_clock freeze", "mcp_clock status; mcp_clock step 34"]);
+      expect(model.frozen).toBe(true);
+      expect(bridge!.pauses).toEqual([]);
+    });
+
+    it("step 1 during playback is the freeze's live tic alone", async () => {
+      const { h } = await recording({}, "demo");
+      expect(await h.text("step", { tics: 1 })).toBe(`advanced 1 tic(s) (frozen clock); ${FROZE}`);
+      expect(sent().some((c) => c.includes("mcp_clock step"))).toBe(false);
+    });
+
+    it("an action's stepTics says it froze the clock", async () => {
+      const { h } = await recording();
+      const res = await h.call("run_command", { text: "echo hi", stepTics: 3 });
+      expect(res.content?.[0]?.text).toContain(`advanced 3 tic(s) (frozen clock); ${FROZE}`);
+    });
+
+    it("a refused freeze fails the step instead of unpausing", async () => {
+      const { h, model } = await recording();
+      model.refuse.freeze = "menu open";
+      const res = await h.call("step", { tics: 5 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("a demo is recording, so stepping freezes the clock first: can't freeze: menu open");
+      expect(bridge!.pauses).toEqual([]);
+      bridge!.setStatus({ demorec: "0", demo: "1" });
+      expect(await h.text("step", { tics: 5 })).toBe("a demo is playing, so stepping freezes the clock first: can't freeze: menu open");
+    });
+
+    it("steps the old way once a refresh shows the demo ended", async () => {
+      const { h, model } = await recording({}, "demo");
+      bridge!.setStatus({ demo: "0" });
+      await h.call("step", { tics: 2 });
+      expect(model.frozen).toBe(false);
+      await settle(() => bridge!.pauses.length === 2);
+    });
+
+    it("set_pause freezes instead of pausing and thaws instead of resuming", async () => {
+      const { h, model } = await recording();
+      expect(await h.text("set_pause", { paused: true })).toBe(
+        "froze the clock at maptime 2 instead of pausing: a demo is recording, and a paused tic desyncs it (set_pause false thaws)",
+      );
+      expect(await h.text("set_pause", { paused: true })).toBe("already frozen at maptime 2");
+      expect(await h.text("set_pause", { paused: false })).toBe("thawed at maptime 2, left unpaused: a demo is recording, and a paused tic desyncs it");
+      expect(model.frozen).toBe(false);
+      expect(await h.text("set_pause", { paused: false })).toBe("resumed");
+      await settle(() => bridge!.pauses.length === 1);
+      expect(bridge!.pauses).toEqual([0]);
+    });
+
+    it("set_pause reports a refused freeze or thaw", async () => {
+      const { h, model } = await recording();
+      model.refuse.freeze = "console open";
+      const res = await h.call("set_pause", { paused: true, all: true });
+      expect(res.content?.[0]?.text).toBe(
+        "instance 1: a demo is recording, and a paused tic desyncs it, so pausing freezes the clock: can't freeze: console open",
+      );
+      delete model.refuse.freeze;
+      await h.call("set_pause", { paused: true });
+      model.refuse.thaw = "busy";
+      const thaw = await h.call("set_pause", { paused: false });
+      expect([thaw.isError, thaw.content?.[0]?.text]).toEqual([true, "busy"]);
+    });
+
+    it("ensure_live reports from status without probing", async () => {
+      const { h } = await recording();
+      const res = await h.call("ensure_live");
+      expect(res.content?.[0]?.text).toBe("a demo is recording at maptime 1: liveness probe skipped (it would advance the demo)");
+      expect(res.structuredContent).toMatchObject({ live: false, demo: "recording", maptime: { before: 1, after: 1 } });
+      expect(sent()).toEqual([]);
+      bridge!.setStatus({ demorec: "0", demo: "1" });
+      expect((await h.call("ensure_live")).structuredContent).toMatchObject({ demo: "playing" });
+    });
+
+    it("queues a net command on a frozen recording, and still refuses one on a frozen live game", async () => {
+      const { h } = await recording();
+      await h.call("freeze_time", { frozen: true });
+      expect(await h.text("summon", { className: "DoomImp" })).toBe("summoned DoomImp (queued for the next step: the frozen recording records it then)");
+      expect(await h.text("give", { item: "Clip" })).toBe("gave Clip (queued for the next step: the frozen recording records it then)");
+      bridge!.setStatus({ demorec: "0" });
+      expect(await h.text("take", { item: "Clip" })).toBe(FROZEN);
+    });
+
+    describe("input schedules", () => {
+      const tic = (tag: string, maptime: number, seg: number, x: number) =>
+        `${tag} maptime=${maptime} seg=${seg} x=${x.toFixed(3)} y=0.000 z=0.000 angle=0.000 pitch=0.000 momx=0.0000 momy=0.0000 momz=0.0000 health=100 buttons=-`;
+      const TRAIL = ["MCP_INPUT_TRAIL", tic("start", 100, 0, 0), tic("tic", 101, 1, 20), tic("tic", 104, 2, 50)];
+      const SEGMENTS = [{ tics: 2, forward: 1 }, { tics: 3, angle: 90 }];
+
+      /** mcp_input on the model's clock: an armed run consumes `endAt` tics and, as the engine does, disarms at the next tic's start. */
+      async function scheduled(endAt: number, opts: LiveOptions = {}, field = "demorec") {
+        const c = await recording({ ...opts, caps: ["cmd", "event", "time", "status", "clock", "input", "walk"] }, field);
+        const reply: string[] = [];
+        let armedAt: number | undefined;
+        bridge!.respondTo("mcp_input go", ["MCP_INPUT cleared", "MCP_INPUT armed segs=2 tics=5 maptime=100"]);
+        bridge!.respondTo("mcp_input status", reply);
+        bridge!.respondTo("mcp_input trail", TRAIL);
+        bridge!.respondTo("mcp_input stop", ["MCP_INPUT idle"]);
+        bridge!.onCommand("mcp_input go", () => (armedAt = c.model.steps));
+        bridge!.onCommand("mcp_input status", () => {
+          const consumed = armedAt === undefined ? 0 : Math.min(c.model.steps - armedAt, endAt);
+          const active = armedAt !== undefined && c.model.steps - armedAt <= endAt;
+          reply[0] = `MCP_INPUT active=${+active} consumed=${consumed} total=5 seg=1 maptime=${c.model.maptime} reason=${active ? "-" : "done"} done=1 limit=350 net=0 dist=0.000 target=0.000,0.000`;
+        });
+        return c;
+      }
+
+      it("a timed-only timeline on a frozen clock steps exactly its tics", async () => {
+        const { h } = await scheduled(5);
+        await h.call("freeze_time", { frozen: true });
+        bridge!.clearReceived();
+        const res = await h.call("input_timeline", { segments: SEGMENTS });
+        expect(res.isError).toBeFalsy();
+        expect(sent()).toContain("mcp_clock status; mcp_clock step 5");
+        expect(sent().find((c) => c.includes("mcp_input go"))).toMatch(/mcp_input go 0$/);
+        expect(res.structuredContent).toMatchObject({ reason: "done", tics: 5 });
+        expect(res.structuredContent).not.toHaveProperty("ranPast");
+      });
+
+      it("a frozen timed timeline cut short is a stall, and one the engine already ended is done", async () => {
+        const { h, model } = await scheduled(3);
+        await h.call("freeze_time", { frozen: true });
+        expect((await h.call("input_timeline", { segments: SEGMENTS })).structuredContent).toMatchObject({ reason: "done", tics: 3 });
+        model.abort = "demo_end";
+        expect((await h.call("input_timeline", { segments: SEGMENTS })).structuredContent).toMatchObject({ reason: "stalled" });
+      });
+
+      it("a paused recording freezes first, then runs frozen", async () => {
+        const { h, model } = await scheduled(5);
+        const res = await h.call("input_timeline", { segments: SEGMENTS });
+        expect(model.frozen).toBe(true);
+        expect(res.content?.[0]?.text).toContain("froze the clock first (one live tic): a paused tic desyncs a recording");
+        expect(bridge!.pauses).toEqual([]);
+      });
+
+      it("a refused freeze refuses the timeline", async () => {
+        const { h, model } = await scheduled(5);
+        model.refuse.freeze = "automap open";
+        const res = await h.call("input_timeline", { segments: SEGMENTS });
+        expect(res.content?.[0]?.text).toBe("can't run a timeline on a paused recording: can't freeze: automap open");
+      });
+
+      it("a frozen walk steps in chunks and reports the tics run past its end", async () => {
+        const { h } = await scheduled(7, {
+          responses: { currentpos: ["Current player position: (0.0,0.0,0.0), angle: 0.0, floorheight: 0.0, sector:0, lightlevel: 0"] },
+        });
+        await h.call("freeze_time", { frozen: true });
+        bridge!.clearReceived();
+        const res = await h.call("move_to", { to: [{ x: 64, y: 0 }] });
+        expect(sent().filter((c) => c.includes("mcp_clock step"))).toEqual(["mcp_clock status; mcp_clock step 5", "mcp_clock status; mcp_clock step 5"]);
+        expect(res.structuredContent).toMatchObject({ mode: "engine", ranPast: 3 });
+        expect(res.content?.at(-1)?.text).toBe("stepped 3 tic(s) past the end (a frozen walk steps 5 at a time)");
+        const timeline = await h.call("input_timeline", { segments: [{ to: { x: 64, y: 0 } }] });
+        expect(timeline.structuredContent).toMatchObject({ ranPast: 3 });
+      });
+
+      it("a walk timeline that stays armed past its limit, or whose step runs short, ends the drive", async () => {
+        const { h, model } = await scheduled(1000);
+        await h.call("freeze_time", { frozen: true });
+        const res = await h.call("input_timeline", { segments: [{ to: { x: 64, y: 0 } }], maxTics: 7 });
+        expect(res.isError).toBe(true);
+        expect(res.structuredContent).toMatchObject({ reason: "stalled", tics: 7 });
+        model.abort = "demo_end";
+        const short = await h.call("input_timeline", { segments: [{ to: { x: 64, y: 0 } }], maxTics: 20 });
+        expect(short.structuredContent).toMatchObject({ reason: "stalled" });
+      });
+
+      it("a frozen step the engine refuses fails the schedule and stops it", async () => {
+        const { h, model } = await scheduled(5);
+        await h.call("freeze_time", { frozen: true });
+        model.refuse.step = "paused";
+        bridge!.clearReceived();
+        const res = await h.call("input_timeline", { segments: SEGMENTS });
+        expect(res.content?.[0]?.text).toBe("the frozen clock refused a step: paused");
+        expect(sent()).toContain("mcp_input stop");
+      });
+
+      it("refuses host-mode move_to while recording", async () => {
+        const { h } = await recording({ caps: ["cmd", "event", "time", "status", "clock"] });
+        const res = await h.call("move_to", { to: [{ x: 64, y: 0 }] });
+        expect(res.content?.[0]?.text).toBe("a demo is recording: host-mode move_to turns the view directly, which isn't recorded, so the replay desyncs");
+      });
+    });
+  });
+});
+
 describe("stepTics and logPattern", () => {
   const cmds = () => bridge!.received.filter((m) => m.t === "cmd").map((m) => m.text ?? "");
   /** An engine log read as `before` for the baseline, then `before + after` for every read after it. */
@@ -776,7 +1423,7 @@ describe("map vars by sourceFile", () => {
   function resolver(result: MapSlotResult) {
     const seen: MapSlotRequest[] = [];
     const io: Partial<ContextIo> = {
-      resolveMapSlot: (r) => (seen.push(r), result),
+      resolveMapSlot: (r) => (seen.push(r), [result]),
       readFileSync: () => LIB.data,
     };
     return { seen, io };
@@ -832,7 +1479,7 @@ describe("map vars by sourceFile", () => {
     const result = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC, includeDirs: ["/inc"] });
     expect(result.isError).toBe(true);
     expect(result.content?.[0]?.text).toBe("ms_hid refused by the deployed check, nothing sent to the engine: build A equals no deployed module");
-    expect(r.seen).toEqual([{ sourceFile: SRC, expr: "ms_hid", exe: "/opt/bcc", includeDirs: ["/inc"], deployed: [{ name: "mapslot.o", data: LIB.data }], engine }]);
+    expect(r.seen).toEqual([{ sourceFile: SRC, exprs: ["ms_hid"], exe: "/opt/bcc", includeDirs: ["/inc"], deployed: [{ name: "mapslot.o", data: LIB.data }], engine }]);
     await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC, object: "/other/lib.o" });
     expect(r.seen[1]).toMatchObject({ deployed: [{ name: "lib.o" }], includeDirs: undefined });
     expect(sent()).toEqual([]);
@@ -908,7 +1555,7 @@ describe("map vars by sourceFile", () => {
     const reply = ["MCP_MAPSLOT module=1 slot=6 index=5 value=104 name=MAPSLOT"];
     const h = await launched(r.io, { [head]: reply });
     const got = await h.call("get_map_array", { name: "ms_hid_arr", index: 2, sourceFile: SRC });
-    expect(r.seen[0].expr).toBe("ms_hid_arr[2]");
+    expect(r.seen[0].exprs).toEqual(["ms_hid_arr[2]"]);
     expect(got.content?.[0]?.text).toBe("104 (slot 6[5] of module 1 MAPSLOT, acs/mapslot.o)");
     expect(got.structuredContent).toEqual({
       name: "ms_hid_arr",
@@ -1238,6 +1885,60 @@ describe("savegame and demo tools", () => {
         "(focus-paused (pauseext): the load runs once ensure_live fix clears it)",
       );
       expect(probes()).toHaveLength(0);
+    });
+
+    // The map command unpauses as the engine does; `after` is the status the load leaves.
+    it.each([
+      ["a real pause, once the load settles", "1", { pending: "0" }, [1], "loaded MAP02"],
+      ["no pause", "0", { pending: "0" }, [], "loaded MAP02"],
+      ["no focus pause", "-1", { pending: "0" }, [], "loaded MAP02"],
+      ["no pause while the load is pending", "1", { pending: "1" }, [],
+        "(load still pending after ~5 s; the engine-state note may predate it)\n(the pause found before the load was not put back: the load is still pending)"],
+      ["no pause while a demo records", "1", { pending: "0", demorec: "1" }, [],
+        "loaded MAP02\n(the pause found before the load was not put back: a demo is recording)"],
+    ])("load_map puts back %s", async (_what, paused, after, pauses, text) => {
+      const h = await live(statusCaps);
+      // The pause as the previous call left it cached.
+      bridge!.setStatus({ paused });
+      await h.call("run_command", { text: "echo before" });
+      bridge!.onCommand("map MAP02", () => bridge!.setStatus({ paused: "0", ...after }));
+      const result = await h.call("load_map", { mapName: "MAP02" });
+      expect(result.content?.[0]?.text).toBe(text);
+      // A later command's reply comes after any setpause on the same socket.
+      await h.call("run_command", { text: "echo after" });
+      expect(bridge!.pauses).toEqual(pauses);
+    });
+
+    it("load_map reads the pause it put back, so a second load puts it back too", async () => {
+      const h = await live(statusCaps);
+      bridge!.setStatus({ paused: "1" }).trackPause();
+      await h.call("run_command", { text: "echo before" });
+      bridge!.onCommand("map MAP0", () => bridge!.setStatus({ paused: "0", pending: "0" }));
+      expect(await h.text("load_map", { mapName: "MAP02" })).toBe("loaded MAP02");
+      expect(await h.text("load_map", { mapName: "MAP03" })).toBe("loaded MAP03");
+      expect(bridge!.pauses).toEqual([1, 1]);
+    });
+
+    it("load_map puts no pause back when the last status read timed out", async () => {
+      const h = await live(statusCaps);
+      bridge!.setStatus({ paused: "1" });
+      await h.call("run_command", { text: "echo before" });
+      bridge!.onCommand("map MAP02", () => bridge!.setStatus({ paused: "0", pending: "0" }));
+      // Every read of the ~5 s budget (a first read plus 9 waits) goes unanswered.
+      bridge!.swallowProbes(10);
+      const result = await h.call("load_map", { mapName: "MAP02" });
+      expect(result.content?.[0]?.text).toContain("(the pause found before the load was not put back: the load is still pending)");
+      await h.call("run_command", { text: "echo after" });
+      expect(bridge!.pauses).toEqual([]);
+    }, 15_000);
+
+    it("load_map puts no pause back without the time cap", async () => {
+      const h = await live({ caps: ["cmd", "event", "status"] });
+      bridge!.setStatus({ paused: "1" });
+      await h.call("run_command", { text: "echo before" });
+      expect(await h.text("load_map", { mapName: "MAP02" })).toBe("loaded MAP02");
+      await h.call("run_command", { text: "echo after" });
+      expect(bridge!.pauses).toEqual([]);
     });
 
     it("adds no pauseext caveat when the command queued nothing, e.g. an unknown map", async () => {
@@ -3448,6 +4149,216 @@ describe("test-session tools", () => {
       const noTime = await live({ caps: ["cmd", "status"] });
       expect((await noTime.call("move_to", { to: [{ x: 1, y: 2 }] })).content?.[0]?.text).toMatch(/no time-control/);
     });
+
+    it("prechecks host routes with geometry-only traces, chained starts and the default arrival radius", async () => {
+      const h = await walker([0, 100, 200], {
+        "mcp_tracemove 100 0": ["MCP_TRACE", "trace ok=1 x=100 y=0 z=0 dist=100 total=100"],
+        "mcp_tracemove 168 0": ["MCP_TRACE", "trace ok=1 x=168 y=0 z=0 dist=68 total=68"],
+      });
+      ticking();
+      const res = await h.call("move_to", { to: [{ x: 100, y: 0 }, { x: 200, y: 0 }], precheck: "geometry" });
+      expect(res.isError).toBeUndefined();
+      expect(res.structuredContent).toMatchObject({ mode: "host", reason: "arrived", precheck: "clear" });
+      expect(tail().filter((c) => c.startsWith("mcp_tracemove"))).toEqual([
+        "mcp_tracemove 100 0 actors=0", "mcp_tracemove 168 0 from=100,0 actors=0",
+      ]);
+      expect(tail().indexOf("+forward")).toBeGreaterThan(tail().indexOf("mcp_tracemove 168 0 from=100,0 actors=0"));
+    });
+
+    it("prechecks with the clamped host radius and preserves clear on a later stall", async () => {
+      const h = await walker([0], { mcp_tracemove: ["MCP_TRACE", "trace ok=1 x=884 y=0 z=0 dist=884 total=884"] });
+      const res = await h.call("move_to", { to: [{ x: 900, y: 0 }], radius: 0, precheck: "actors" });
+      expect(res.isError).toBe(true);
+      expect(res.structuredContent).toMatchObject({ reason: "stalled", precheck: "clear" });
+      expect(tail()).toContain("mcp_tracemove 884 0");
+    });
+
+    it("does not start host movement when a route is blocked or a probe refuses", async () => {
+      const trace = ["MCP_TRACE", "trace ok=0 reason=step x=10 y=0 z=0 dist=10 total=68 rise=32"];
+      const h = await walker([0], { mcp_tracemove: trace });
+      const res = await h.call("move_to", { to: [{ x: 100, y: 0 }], precheck: "actors" });
+      expect(tail().some((c) => c.includes("forward") || c.includes("mcp_input walk"))).toBe(false);
+      expect(res.structuredContent).toMatchObject({ mode: "host", reason: "blocked", tics: 0, x: 0, blocked: { leg: 1, reason: "step", rise: 32 } });
+      expect(res.structuredContent).not.toHaveProperty("precheck");
+      expect(bridge!.pauses).toEqual([]);
+      trace[1] = "error no mover";
+      const refused = await h.call("move_to", { to: [{ x: 200, y: 0 }], precheck: "geometry" });
+      expect(refused.isError).toBe(true);
+      expect(refused.content?.[0]?.text).toBe("no mover; drop precheck to walk without it.");
+      expect(tail().some((c) => c.includes("forward"))).toBe(false);
+    });
+  });
+
+  describe("move_to engine mode", () => {
+    const pos = `Current player position: (0.0,0.0,0.0), angle: 0.0, floorheight: 0.0, sector:0, lightlevel: 160`;
+    const row = (tag: string, maptime: number, x: number, momx = 0) =>
+      `${tag} maptime=${maptime} seg=1 x=${x.toFixed(3)} y=0.000 z=0.000 angle=0.000 pitch=0.000 momx=${momx.toFixed(4)} momy=0.0000 momz=0.0000 health=100 buttons=-`;
+    const st = (active: number, consumed: number, reason: string, more = "done=1 limit=350 net=0 dist=0.010 target=512.000,0.000") =>
+      `MCP_INPUT active=${active} consumed=${consumed} total=0 seg=1 maptime=${100 + consumed} reason=${reason} ${more}`;
+    const IDLE = "MCP_INPUT active=0 consumed=0 total=0 seg=0 maptime=100 reason=- done=0 limit=0 net=0 dist=- target=-";
+    const ARMED = ["MCP_INPUT cleared", "MCP_INPUT walk 1", "MCP_INPUT armed segs=1 tics=0 limit=350 maptime=100"];
+    const TRAIL = ["MCP_INPUT_TRAIL", row("start", 100, 0), row("tic", 100, 400, 8), row("tic", 146, 512)];
+    const sent = () => cmds().map((c) => c.split(" ;")[0]).filter((c) => !c.startsWith("mcp_status"));
+
+    /** An engine with walk support whose status polls answer `statuses` in turn after the first (mode) read. */
+    async function engine(statuses: string[], responses: Record<string, string[]> = {}) {
+      const reply = [IDLE];
+      const h = await live({
+        caps: ["cmd", "event", "time", "status", "input", "walk"],
+        responses: { currentpos: [pos], "mcp_input go": ARMED, "mcp_input status": reply, "mcp_input trail": TRAIL, "mcp_input stop": ["MCP_INPUT idle"], ...responses },
+      });
+      let polls = 0;
+      bridge!.onCommand("mcp_input status", () => (reply[0] = polls++ === 0 ? IDLE : statuses[Math.min(polls - 2, statuses.length - 1)]));
+      bridge!.clearReceived();
+      return h;
+    }
+
+    it("arms one walk entry per waypoint, polls to the end and maps the result", async () => {
+      const h = await engine([st(1, 20, "-"), st(0, 47, "done", "done=2 limit=350 net=0 dist=0.010 target=512.000,0.000")]);
+      bridge!.setStatus({ paused: "1" });
+      const res = await h.call("move_to", { to: [{ x: 256, y: 0, pass: true }, { tid: 5 }], trail: true });
+      expect(res.isError).toBeUndefined();
+      expect(res.content?.[0]?.text).toBe("arrived at waypoint 2/2 after 47 tic(s) at (512.0, 0.0), 0.0 from target");
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "arrived", reached: 2, speed: 0, target: { tid: 5, x: 512 } });
+      expect(res.structuredContent?.trail).toEqual([[100, 0, 0], [101, 400, 0], [147, 512, 0]]);
+      expect(sent()).toEqual([
+        "mcp_input stop; mcp_input status",
+        "currentpos",
+        "mcp_input stop; mcp_input clear; mcp_input walk pt:256,0 0 1 1 -; mcp_input walk tid:5 0 0 1 -; mcp_input go 1 350 35",
+        "mcp_input status",
+        "mcp_input status",
+        "mcp_input trail 0",
+      ]);
+      expect(bridge!.pauses).toEqual([]);
+    });
+
+    it("passes radius, speed and a maxTics clamped to 2100, and reads only entry ends without trail", async () => {
+      const h = await engine([st(0, 10, "timeout")]);
+      const res = await h.call("move_to", { to: [{ class: "Imp" }], radius: 64, speed: 0.5, maxTics: 9000, stuckTics: 10 });
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "timeout" });
+      expect(sent()).toContain("mcp_input stop; mcp_input clear; mcp_input walk class:Imp 64 0 0.5 -; mcp_input go 0 2100 10");
+      expect(sent().at(-1)).toBe("mcp_input trail ends");
+    });
+
+    it("runs host mode on a netgame, with no blocker refusal", async () => {
+      const h = await engine([], { "mcp_input status": [IDLE.replace("net=0", "net=1")] });
+      bridge!.setStatus({ menu: "on" });
+      ticking();
+      const res = await h.call("move_to", { to: [{ x: 0, y: 0 }] });
+      expect(res.structuredContent).toMatchObject({ mode: "host", reason: "arrived" });
+      expect(sent().some((c) => c.includes("mcp_input walk"))).toBe(false);
+    });
+
+    it("refuses on a blocker or a refused go before running, and reports a dead start as died", async () => {
+      const h = await engine([IDLE]);
+      bridge!.setStatus({ menu: "on" });
+      const blocked = await h.call("move_to", { to: [{ x: 9, y: 0 }] });
+      expect(blocked.content?.[0]?.text).toBe("can't run move_to: a menu is open. Try ensure_live with fix.");
+      expect(sent().some((c) => c.includes("mcp_input go"))).toBe(false);
+      bridge!.setStatus({ player: "dead", menu: "off" });
+      const dead = await h.call("move_to", { to: [{ x: 9, y: 0 }] });
+      expect(dead.structuredContent).toMatchObject({ mode: "engine", reason: "died", tics: 0 });
+      await harness!.close();
+      await bridge!.close();
+      const bad = await engine([], { "mcp_input go": ["MCP_INPUT cleared", "error unknown class Nope"] });
+      const refused = await bad.call("move_to", { to: [{ class: "Nope" }] });
+      expect(refused.isError).toBe(true);
+      expect(refused.content?.[0]?.text).toMatch(/unknown class Nope/);
+    });
+
+    it("fails stalled when no tic runs and stops the run, and fails on an unreadable trail", async () => {
+      const h = await engine([st(1, 0, "-")]);
+      const res = await h.call("move_to", { to: [{ x: 9, y: 0 }] });
+      expect(res.isError).toBe(true);
+      expect(res.structuredContent).toMatchObject({ reason: "stalled", mode: "engine", tics: 0 });
+      expect(sent().at(-1)).toBe("mcp_input stop");
+      await harness!.close();
+      await bridge!.close();
+      const noTrail = await engine([st(0, 3, "stopped")], { "mcp_input trail": ["Unknown command"] });
+      expect((await noTrail.call("move_to", { to: [{ x: 9, y: 0 }] })).isError).toBe(true);
+    });
+
+    it("maps a walk already done at the first poll from the start row, with no stop", async () => {
+      const h = await engine([st(0, 0, "done", "done=1 limit=350 net=0 dist=0.000 target=512.000,0.000")], {
+        "mcp_input trail": ["MCP_INPUT_TRAIL", row("start", 100, 512)],
+      });
+      const res = await h.call("move_to", { to: [{ x: 512, y: 0 }] });
+      expect(res.isError).toBeUndefined();
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "arrived", reached: 1, tics: 0, x: 512, speed: 0 });
+      expect(sent().slice(-2)).toEqual(["mcp_input status", "mcp_input trail ends"]);
+      expect(sent()).not.toContain("mcp_input stop");
+    });
+
+    it("stops the walk when a status read fails mid-run", async () => {
+      const h = await engine(["Unknown command"]);
+      const res = await h.call("move_to", { to: [{ x: 9, y: 0 }] });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toMatch(/Unknown command/);
+      expect(sent().slice(-2)).toEqual(["mcp_input status", "mcp_input stop"]);
+    });
+
+    it("runs host mode without asking the engine when the bridge lacks the walk cap", async () => {
+      await live({ caps: ["cmd", "event", "time", "status", "input"], responses: { currentpos: [pos] } });
+      bridge!.clearReceived();
+      ticking();
+      const res = await harness!.call("move_to", { to: [{ x: 0, y: 0 }] });
+      expect(res.structuredContent).toMatchObject({ mode: "host", reason: "arrived" });
+      expect(sent().some((c) => c.startsWith("mcp_input"))).toBe(false);
+    });
+
+    it("prechecks engine pass and stop waypoints before arming, with a clear marker", async () => {
+      const h = await engine([st(0, 47, "done", "done=2 limit=350 net=0")], {
+        "mcp_tracemove 100 0": ["MCP_TRACE", "trace ok=1 x=100 y=0 z=0 dist=100 total=100"],
+        "mcp_tracemove 180 0": ["MCP_TRACE", "trace ok=1 x=180 y=0 z=0 dist=80 total=80"],
+      });
+      const res = await h.call("move_to", { to: [{ x: 100, y: 0, pass: true }, { x: 200, y: 0 }], radius: 20, precheck: "actors" });
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "arrived", precheck: "clear" });
+      expect(sent().slice(2, 4)).toEqual(["mcp_tracemove 100 0", "mcp_tracemove 180 0 from=100,0"]);
+      expect(sent()[4]).toContain("mcp_input walk pt:100,0 20 1 1 -; mcp_input walk pt:200,0 20 0 1 -");
+    });
+
+    it("returns a later precheck block without sending movement", async () => {
+      const h = await engine([st(0, 47, "done")], {
+        "mcp_tracemove 100 0": ["MCP_TRACE", "trace ok=1 x=100 y=0 z=0 dist=100 total=100"],
+        "mcp_tracemove 200 0": ["MCP_TRACE", "trace ok=0 reason=line x=120 y=0 z=0 dist=20 total=100 line=45"],
+      });
+      const res = await h.call("move_to", { to: [{ x: 100, y: 0 }, { x: 200, y: 0 }], precheck: "geometry" });
+      expect(sent().some((c) => c.includes("+forward") || c.includes("mcp_input walk"))).toBe(false);
+      expect(res.isError).toBeUndefined();
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "blocked", reached: 1, tics: 0, x: 0, y: 0, speed: 0, blocked: { leg: 2, line: 45, x: 120, dist: 20 } });
+      expect(res.structuredContent).not.toHaveProperty("precheck");
+      expect(res.content?.[0]?.text).toBe("blocked at waypoint 2/2 (precheck, nothing moved): line 45 after 20.0 of 100.0 at (120.0, 0.0)");
+      expect(sent().slice(-2)).toEqual(["mcp_tracemove 100 0 actors=0", "mcp_tracemove 200 0 from=100,0 actors=0"]);
+    });
+
+    it.each([
+      { w: { tid: 5 }, actor: "class=Imp tid=5 x=200 y=0 radius=20", ref: "Imp#5" },
+      { w: { class: "DoomPlayer" }, actor: "class=DoomPlayer tid=0 player=1 dist=200 x=200 y=0", ref: "player1" },
+    ])("prechecks actor targets using the engine actor reference: $ref", async ({ w, actor, ref }) => {
+      const h = await engine([st(0, 47, "died")], {
+        findactors: ["MCP_FOUND", `found ${actor}`],
+        mcp_tracemove: ["MCP_TRACE", `trace ok=0 reason=actor blocker=${ref} x=160 y=0 z=0 dist=160 total=200`],
+      });
+      const res = await h.call("move_to", { to: [w], precheck: "actors" });
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "died", precheck: "clear" });
+      expect(sent()).toContain("mcp_tracemove 200 0");
+      expect(sent().some((c) => c.includes("mcp_input walk"))).toBe(true);
+    });
+
+    it("returns target_gone with zero tics when a precheck target is missing", async () => {
+      const h = await engine([], { findactors: ["MCP_FOUND"] });
+      const res = await h.call("move_to", { to: [{ tid: 9 }], precheck: "actors" });
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "target_gone", tics: 0 });
+      expect(res.structuredContent).not.toHaveProperty("precheck");
+      expect(sent().some((c) => c.includes("mcp_tracemove") || c.includes("mcp_input walk"))).toBe(false);
+    });
+
+    it("keeps precheck clear when the subsequent engine walk stalls", async () => {
+      const h = await engine([st(1, 0, "-")], { mcp_tracemove: ["MCP_TRACE", "trace ok=1 x=100 y=0 z=0 dist=100 total=100"] });
+      const res = await h.call("move_to", { to: [{ x: 100, y: 0 }], precheck: "actors" });
+      expect(res.isError).toBe(true);
+      expect(res.structuredContent).toMatchObject({ mode: "engine", reason: "stalled", precheck: "clear" });
+    });
   });
 
   describe("input_timeline", () => {
@@ -3464,7 +4375,7 @@ describe("test-session tools", () => {
       const reply = [statuses[0]];
       const h = await live({
         ...opts,
-        caps: ["cmd", "event", "time", "status", "input"],
+        caps: opts.caps ?? ["cmd", "event", "time", "status", "input"],
         responses: {
           "mcp_input go": ARMED,
           "mcp_input status": reply,
@@ -3569,6 +4480,51 @@ describe("test-session tools", () => {
         expect((await h.call("input_timeline", { segments })).isError).toBe(true);
       }
       expect(sent()).toEqual([]);
+    });
+
+    it("refuses missing walk cap before sending anything", async () => {
+      const h = await timeline([status(0, 0, 0)]);
+      const res = await h.call("input_timeline", { segments: [{ to: { x: 64, y: 0 } }] });
+      expect(sent()).toEqual([]);
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toMatch(/no walk cap.*nothing sent/);
+    });
+
+    it("sends mixed entries and limits exactly, returning a stuck walk without later segments", async () => {
+      let reads = 0;
+      const logs = ["MCP_INPUT_SEG 1 maptime=100", ...Array.from({ length: 500 }, (_, i) => `walk ${i}`), "MCP_INPUT_SEG 2 maptime=140", "MCP_INPUT_SEG 3 maptime=145", "MCP_INPUT_END reason=stuck", ""].join("\n");
+      const h = await timeline([status(0, 90, 5, "stuck") + " done=2 dist=37.2 target=100,0 limit=200"], {
+        "mcp_input trail": ["MCP_INPUT_TRAIL", tic("start", 100, 0, 0), tic("tic", 139, 1, 64), tic("tic", 144, 2, 64), tic("tic", 189, 3, 62.8)],
+      }, {
+        caps: ["cmd", "event", "time", "status", "input", "walk"],
+        config: { exe: "/engine/zandronum" },
+        io: { existsSync: () => true, readTextSync: () => reads++ === 0 ? "" : logs },
+      });
+      const res = await h.call("input_timeline", { segments: [
+        { to: { x: 64, y: 0 }, buttons: ["use"] }, { tics: 5, angle: 90 },
+        { to: { tid: 7 }, radius: 2, speed: 0.5, pass: true }, { tics: 1 },
+      ], maxTics: 200, stuckTics: 10 });
+      expect(res.isError).toBeUndefined();
+      expect(sent()[1]).toBe("mcp_input stop; mcp_input clear; mcp_input walk pt:64,0 0 0 1 use; mcp_input seg 5 - 0 0 0 90 0 -; mcp_input walk tid:7 2 1 0.5 -; mcp_input seg 1 - 0 0 0 - 0 -; mcp_input go 0 200 10");
+      expect(res.structuredContent).toMatchObject({ reason: "stuck", tics: 90, limit: 200, segments: [
+        { seg: 1, tics: 40, walk: { outcome: "arrived", distance: 0 } },
+        { seg: 2, tics: 5 },
+        { seg: 3, tics: 45, walk: { outcome: "stuck", distance: 37.2, at: { x: 100, y: 0 } } },
+      ] });
+      expect((res.structuredContent?.segments as Array<{ log: string[] }>)[0].log).toHaveLength(500);
+      expect(res.content?.[0]?.text).toMatch(/stuck in seg 3\/4 after 90 tic\(s\)$/);
+    });
+
+    it("sets default limits for walk-only schedules and explicit limits for timed-only schedules", async () => {
+      const h = await timeline([status(0, 0, 0, "done") + " done=1 dist=0 target=0,0"], {
+        "mcp_input trail": ["MCP_INPUT_TRAIL", tic("start", 100, 0, 0)],
+      }, { caps: ["cmd", "event", "time", "status", "input", "walk"] });
+      const res = await h.call("input_timeline", { segments: [{ to: { class: "Imp" } }] });
+      expect(res.structuredContent).toMatchObject({ reason: "done", limit: 2100, segments: [{ tics: 0, walk: { outcome: "arrived" } }] });
+      expect(sent()[1]).toBe("mcp_input stop; mcp_input clear; mcp_input walk class:Imp 0 0 1 -; mcp_input go 0 2100 35");
+      bridge!.clearReceived();
+      await h.call("input_timeline", { segments: [{ tics: 1 }], maxTics: 10 });
+      expect(sent()[1]).toBe("mcp_input stop; mcp_input clear; mcp_input seg 1 - 0 0 0 - 0 -; mcp_input go 0 10 35");
     });
 
     it("needs the input cap, a status snapshot and no blockers", async () => {
@@ -3677,6 +4633,536 @@ describe("test-session tools", () => {
     });
   });
 
+  describe("record and record_read", () => {
+    const status = (active: number, ran: number, reason = "-", untracked = 0) =>
+      `MCP_REC active=${active} ran=${ran} tics=35 rows=3 dropped=0 tracked=1 untracked=${untracked} maptime=${412 + ran} reason=${reason}`;
+    const ARMED = ["MCP_REC cleared", "MCP_REC watch n=1", "MCP_REC fields n=7", "MCP_REC events n=4", "MCP_REC armed watches=1 tracked=1 tics=35 maptime=412"];
+    const recFile = (head = "ran=35 rows=3 dropped=0 fields=tid,hp,x reason=done") =>
+      [
+        `MCP_RECFILE v=1 engine=zandronum map=MAP01 start=412 ${head}`,
+        "rec t=412 k=seen id=1 class=DoomPlayer tid=0 x=0.0 y=0.0 z=0.0",
+        "rec t=412 k=sample id=1 tid=0 hp=100 x=0.0",
+        "rec t=447 k=sample id=1 tid=0 hp=100 x=64.0",
+        "",
+      ].join("\n");
+    const DUMP = norm("/tmp/mcp-rec-T/mcp-rec-1-1.txt");
+    // consolePath sends `/` separators on every OS.
+    const DUMP_CMD = "mcp_rec dump /tmp/mcp-rec-T/mcp-rec-1-1.txt";
+    const sent = () => cmds().map((c) => c.split(" ;")[0]).filter((c) => !c.startsWith("mcp_status"));
+
+    /** An engine with the rec cap whose status polls answer from `statuses` in turn, the last one repeating. */
+    async function recorder(statuses: string[], opts: { responses?: Record<string, string[]>; io?: Partial<ContextIo>; caps?: string[]; engine?: EngineAdapter; config?: Partial<ServerConfig> } = {}) {
+      const reply = [statuses[0]];
+      const read: string[] = [];
+      const h = await live({
+        caps: opts.caps ?? ["cmd", "event", "time", "status", "rec"],
+        engine: opts.engine,
+        config: opts.config,
+        // The schedule also holds "mcp_rec stop", so go is matched first.
+        responses: {
+          "mcp_rec go": ARMED,
+          "mcp_rec dump": ["MCP_REC wrote rows=3 dropped=0"],
+          "mcp_rec status": reply,
+          "mcp_rec stop": ["MCP_REC idle"],
+          ...opts.responses,
+        },
+        io: { mkdtemp: () => "/tmp/mcp-rec-T", removeFile: () => {}, readTextSync: (p) => (read.push(p), recFile()), ...opts.io },
+      });
+      let polls = 0;
+      bridge!.onCommand("mcp_rec status", () => (reply[0] = statuses[Math.min(polls++, statuses.length - 1)]));
+      bridge!.clearReceived();
+      return { h, read };
+    }
+
+    it("records a run in one schedule, polls it to done, then dumps and reads the file back", async () => {
+      const { h, read } = await recorder([status(1, 20), status(0, 35, "done", 2)]);
+      bridge!.setStatus({ paused: "1" });
+      const { result, progress } = await h.callWithProgress("record", { watch: [{ player: 0 }], tics: 35, command: "+attack" });
+      expect(result.isError).toBeUndefined();
+      expect(result.content?.[0]?.text).toBe(
+        [
+          "recorded 35 tic(s), maptime 412..447: 1 actor(s), 3 row(s) (2 sample, 1 seen, 0 event, 0 var), done",
+          "#1 DoomPlayer: seen 412..447",
+          "2 matching actor(s) past the 512-actor cap were not tracked",
+          `file: ${DUMP}`,
+        ].join("\n"),
+      );
+      expect(result.structuredContent).toMatchObject({
+        reason: "done",
+        tics: 35,
+        start: 412,
+        end: 447,
+        untracked: 2,
+        file: DUMP,
+        table: { columns: ["t", "kind", "id", "class", "tid", "hp", "x", "info"] },
+        notes: ["2 matching actor(s) past the 512-actor cap were not tracked"],
+      });
+      expect(sent()).toEqual([
+        "mcp_rec stop",
+        "mcp_rec stop; mcp_rec clear; mcp_rec watch player=0; mcp_rec fields tid,hp,x,y,z,sprite,frame; " +
+          "mcp_rec events spawn,destroy,damage,death; mcp_rec go tics=35 run=1 every=1 changes=1; +attack",
+        "mcp_rec status",
+        "mcp_rec status",
+        DUMP_CMD,
+      ]);
+      expect(read).toEqual([DUMP]);
+      expect(progress[0]).toMatchObject({ message: "recording 35 tic(s)" });
+      // The engine owns the pause in run mode: the host never sends setpause.
+      expect(bridge!.pauses).toEqual([]);
+    });
+
+    it("only arms with run: false, with no blocker check, poll or dump", async () => {
+      const { h } = await recorder([status(1, 0)]);
+      bridge!.setStatus({ menu: "on" });
+      const res = await h.call("record", { watch: [{ class: "DoomImp" }], scripts: "all", events: [], fields: ["state", "state"], tics: 500, run: false });
+      expect(res.isError).toBeUndefined();
+      expect(res.content?.[0]?.text).toBe("armed for 500 tic(s) at maptime 412");
+      expect(res.structuredContent).toBeUndefined();
+      expect(sent()).toEqual([
+        "mcp_rec stop; mcp_rec clear; mcp_rec watch class=DoomImp; mcp_rec fields state; mcp_rec events none; mcp_rec scripts all; mcp_rec go tics=500 every=1 changes=1",
+      ]);
+    });
+
+    const CAPS = ["cmd", "event", "time", "status", "rec", "recvars", "mapslot", "recplayer", "rechost"];
+    const SRC = "/mods/src/record.bcs";
+    const DIGEST = MAPSLOT_DIGESTS.mapslot;
+    const MODULE = { name: "acs/record.o", data: buildBehaviorAcse([], []) };
+    const SLOT = { slot: 4, digest: DIGEST, module: MODULE };
+    const sourceVar = { map: "private_flag", sourceFile: SRC, object: "/mods/record.o" };
+
+    it("requires recvars before resolving or sending any recorder command", async () => {
+      const resolve = vi.fn(() => [SLOT]);
+      const { h } = await recorder([status(0, 0)], { io: { resolveMapSlot: resolve } });
+      for (const vars of [[{ world: 5 }], [sourceVar]]) {
+        const res = await h.call("record", { vars, tics: 10 });
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toMatch(/no recvars cap.*rebuild.*nothing compiled or sent/);
+      }
+      expect(resolve).not.toHaveBeenCalled();
+      expect(sent()).toEqual([]);
+      // An empty optional list does not require the new cap.
+      expect((await h.call("record", { scripts: "all", vars: [], tics: 10, run: false })).isError).toBeUndefined();
+    });
+
+    it("requires mapslot for a source var before compiling or stopping an abandoned recording", async () => {
+      const resolve = vi.fn(() => [SLOT]);
+      const { h } = await recorder([status(0, 0)], { caps: CAPS.filter((c) => c !== "mapslot"), io: { resolveMapSlot: resolve } });
+      const res = await h.call("record", { vars: [sourceVar], tics: 10 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toMatch(/no slot-addressed map var access.*nothing compiled or sent/);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(sent()).toEqual([]);
+    });
+
+    it("validates var selectors and source pairing with positional refusals before sending", async () => {
+      const { h } = await recorder([status(0, 0)], { caps: CAPS });
+      const cases: Array<[Record<string, unknown>, string]> = [
+        [{}, "give exactly one of map, world or global"],
+        [{ world: 1, global: 1 }, "give exactly one of map, world or global"],
+        [{ world: 1, sourceFile: SRC }, "sourceFile requires map"],
+        [{ map: "v", object: "/x.o" }, "object and includeDirs require sourceFile"],
+        [{ map: "v", includeDirs: [] }, "object and includeDirs require sourceFile"],
+        [{ ...sourceVar, index: 1 }, "put the index in the sourceFile map expression, not index"],
+        [{ ...sourceVar, map: "flag + 1" }, "map must be a name followed by constant [index] and .member parts with sourceFile"],
+      ];
+      for (const [v, why] of cases) {
+        const res = await h.call("record", { vars: [{ world: 0 }, v], tics: 10 });
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toBe(`var 2: ${why}`);
+      }
+      for (const vars of [Array.from({ length: 33 }, () => ({ world: 0 })), [{ world: 256 }], [{ global: 64 }], [{ world: -1 }], [{ global: 0, index: -1 }], [{ map: "v", extra: 1 }]]) {
+        expect((await h.call("record", { vars, tics: 10 })).isError).toBe(true);
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("arms vars-only recordings with exported map and world/global scalar/array selectors at their bounds", async () => {
+      const { h } = await recorder([status(1, 0)], { caps: CAPS });
+      const res = await h.call("record", { vars: [{ map: "flag" }, { map: "arr", index: 0 }, { world: 255 }, { world: 0, index: 5 }, { global: 63 }, { global: 0, index: 7 }], tics: 10500, run: false });
+      expect(res.isError).toBeUndefined();
+      expect(sent()[0]).toContain("mcp_rec var map=flag; mcp_rec var map=arr index=0; mcp_rec var world=255; mcp_rec var world=0 index=5; mcp_rec var global=63; mcp_rec var global=0 index=7; mcp_rec go tics=10500 every=1 changes=1");
+      const full = await h.call("record", { vars: Array.from({ length: 32 }, (_, world) => ({ world })), tics: 1, run: false });
+      expect(full.isError).toBeUndefined();
+      expect(sent()[1].match(/mcp_rec var world=/g)).toHaveLength(32);
+    });
+
+    it("batches source groups into two compile calls each before ANY engine command, preserving var order", async () => {
+      const code = Buffer.from([1, 1, 1, 1]);
+      const layout = [chunk("MINI", u32(4, 0))];
+      const plain = buildObject({ code, chunks: layout });
+      const files = new Map<string, Buffer>();
+      const compiles = vi.fn((_exe: string, args: string[], cwd: string) => {
+        expect(cmds()).toEqual([]);
+        const source = files.get(path.join(cwd, args.at(-2)!))!.toString("latin1");
+        const names = [...source.matchAll(/function raw (__mcp_p_\d+)/g)].map((m) => m[1]);
+        const probes = names.map((_, i) => Buffer.from([0x1d, 4 + i, 0xce]));
+        files.set(args.at(-1)!, names.length ? buildObject({ code: Buffer.concat([code, ...probes]), chunks: [funcChunk(names.map((_, i) => 12 + i * 3)), nameChunk("FNAM", names), ...layout] }) : plain);
+        return "";
+      });
+      const requests: MapSlotRequest[] = [];
+      const { h } = await recorder([status(0, 1, "done")], {
+        caps: CAPS,
+        config: { bcc: "/opt/bcc" },
+        io: {
+          readFileSync: () => plain,
+          resolveMapSlot: (r) => {
+            requests.push(r);
+            expect(cmds()).toEqual([]);
+            return resolveMapSlot(r, {
+              readFile: (p) => files.get(p) ?? Buffer.from("int flag;"),
+              removeDir: () => {},
+              compile: { ...defaultCompileDeps, mkdtemp: () => "/tmp/mcp-probe-test", writeFile: (p, data) => void files.set(p, Buffer.from(data)), exec: compiles, isExec: () => true, realpath: (p) => p, exists: () => false },
+            });
+          },
+        },
+      });
+      h.ctx.rememberLaunchArgs(1, { files: ["/mods/record.o"] }, bridge!.port, "/tmp/log");
+      const res = await h.call("record", { tics: 1, vars: [
+        { world: 3 }, { map: "a", sourceFile: SRC }, { map: "b", sourceFile: SRC },
+        { map: "c", sourceFile: "/mods/other.bcs" },
+        { map: "d", sourceFile: SRC, object: "/other.o" },
+        { map: "e", sourceFile: SRC, includeDirs: ["/a", "/b"] },
+        { map: "f", sourceFile: SRC, includeDirs: ["/b", "/a"] },
+        { map: "g", sourceFile: "/mods/other.bcs" },
+      ] });
+      expect(res.isError).toBeUndefined();
+      expect(compiles).toHaveBeenCalledTimes(10);
+      expect(requests.map((r) => r.exprs)).toEqual([["a", "b"], ["c", "g"], ["d"], ["e"], ["f"]]);
+      expect(requests.map((r) => r.deployed[0].name)).toEqual(["record.o", "record.o", "other.o", "record.o", "record.o"]);
+      expect(sent()[0]).toBe("mcp_rec stop");
+      expect(sent()[1].match(/mcp_rec var [^;]+/g)).toEqual([
+        "mcp_rec var world=3",
+        ...["a", "b", "c", "d", "e", "f", "g"].map((label) => expect.stringMatching(new RegExp(`slot=${["b", "g"].includes(label) ? 5 : 4} .*label=${label}$`))),
+      ]);
+    });
+
+    it("resolves every source group before surfacing a per-probe refusal with the original var position", async () => {
+      const resolve = vi.fn((r: MapSlotRequest): MapSlotResult[] => r.exprs.map((e) => e === "bad[14]" ? { guard: "bounds", refused: "index 14 is past 14 elements" } : SLOT));
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, io: { resolveMapSlot: resolve, readFileSync: () => MODULE.data } });
+      const res = await h.call("record", { tics: 1, vars: [{ world: 1 }, sourceVar, { ...sourceVar, map: "bad[14]" }, { ...sourceVar, sourceFile: "/other.bcs" }] });
+      expect(resolve).toHaveBeenCalledTimes(2);
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("var 3: bad[14] refused by the bounds check, nothing sent to the engine: index 14 is past 14 elements");
+      expect(sent()).toEqual([]);
+    });
+
+    it("surfaces a build-wide refusal and missing launch files without sending a recorder command", async () => {
+      const resolve = vi.fn((r: MapSlotRequest): MapSlotResult[] => r.exprs.map(() => ({ guard: "compile", refused: `${r.exprs.join(", ")}: build A failed` })));
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, io: { resolveMapSlot: resolve, readFileSync: () => MODULE.data } });
+      const noFiles = await h.call("record", { tics: 1, vars: [{ map: "a", sourceFile: SRC }] });
+      expect(noFiles.isError).toBe(true);
+      expect(noFiles.content?.[0]?.text).toMatch(/^var 1: a refused by the deployed check, nothing sent to the engine: .*pass object, the deployed file$/);
+      expect(resolve).not.toHaveBeenCalled();
+      const bad = await h.call("record", { tics: 1, vars: [{ ...sourceVar, map: "a" }, { ...sourceVar, map: "b" }] });
+      expect(bad.isError).toBe(true);
+      expect(bad.content?.[0]?.text).toBe("var 1: a refused by the compile check, nothing sent to the engine: a, b: build A failed");
+      expect(sent()).toEqual([]);
+    });
+
+    it("sends a resolved array var as a labeled slot and passes engine var errors through even with command", async () => {
+      const refusal = ["MCP_REC cleared", "error map var not found: missing", "error bad setup: a line failed, mcp_rec clear first", "command still ran"];
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, io: { readFileSync: () => MODULE.data, resolveMapSlot: () => [{ ...SLOT, index: 11 }] }, responses: { "mcp_rec go": refusal } });
+      const res = await h.call("record", { tics: 1, vars: [{ ...sourceVar, map: "pts[1].y" }, { map: "missing" }], command: "pukename Test" });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("map var not found: missing");
+      expect(sent()).toHaveLength(2);
+      expect(sent()[1]).toContain(`mcp_rec var slot=4 v=1 code=44 first=SPTR md5=${DIGEST.md5} index=11 label=pts[1].y; mcp_rec var map=missing; mcp_rec go`);
+      expect(sent()[1]).toMatch(/; pukename Test$/);
+    });
+
+    it("uses the shared source-mismatch explanation for the first failing slot after successful vars", async () => {
+      const module = { ...MODULE, name: "maps/ARENA.WAD:ARENA", map: "ARENA" };
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, io: { readFileSync: () => MODULE.data, resolveMapSlot: () => [{ ...SLOT, module }] }, responses: { "mcp_rec go": ["MCP_REC var n=1", "error no module matches map=MAP01 modules=3", "error bad setup"] } });
+      const res = await h.call("record", { tics: 1, vars: [{ world: 1 }, sourceVar] });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe(`The loaded module isn't the one resolved: none of the 3 loaded on map MAP01 matches maps/ARENA.WAD:ARENA (the BEHAVIOR of map ARENA), built from ${SRC}. Another map is loaded, the map has no BEHAVIOR of its own, or the file was rebuilt after launch (relaunch to load it).`);
+    });
+
+    it("passes unrelated slot errors and a missing armed reply through without a false module explanation", async () => {
+      const reply = ["error ambiguous modules=1,2"];
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, io: { readFileSync: () => MODULE.data, resolveMapSlot: () => [SLOT] }, responses: { "mcp_rec go": reply } });
+      expect(await h.text("record", { tics: 1, vars: [sourceVar] })).toBe("ambiguous modules=1,2");
+      reply.length = 0;
+      expect(await h.text("record", { tics: 1, vars: [sourceVar] })).toBe("(no output)");
+    });
+
+    it("returns var summaries from record and record_read with no actor watch", async () => {
+      const file = "MCP_RECFILE v=1 engine=zandronum map=MAP01 start=412 ran=1 rows=2 dropped=0 fields=hp reason=done\nrec t=412 k=var var=1 value=0 name=flag\nrec t=413 k=var var=1 value=1 prev=0 name=flag\n";
+      const { h } = await recorder([status(0, 1, "done")], { caps: CAPS, io: { readTextSync: () => file } });
+      for (const tool of ["record", "record_read"]) {
+        const res = await h.call(tool, { vars: [{ map: "flag" }], tics: 1 });
+        expect(res.isError).toBeUndefined();
+        expect(res.structuredContent).toMatchObject({ vars: [{ var: 1, name: "flag", values: [[412, 0], [413, 1]], changes: 1 }], counts: { var: 2 } });
+        expect(res.content?.[0]?.text).toContain("flag: 0 @412, 1 @413");
+      }
+    });
+
+    it("requires recplayer for every player field, both groups and psprite events before sending", async () => {
+      const { h } = await recorder([status(0, 0)]);
+      const fields = ["buttons", "modbuttons", "wclass", "pending", "refire", "wflags", "wstate", "wlabel", "wsprite", "wframe", "wtics", "input", "weaponstate"];
+      for (const options of [...fields.map((f) => ({ fields: [f] })), { events: ["psprite"] }]) {
+        const res = await h.call("record", { watch: [{ player: 0 }], tics: 1, ...options });
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toMatch(/no recplayer cap.*rebuild.*nothing sent/);
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("expands and de-duplicates input/weaponstate in order and schedules opt-in psprite events", async () => {
+      const { h } = await recorder([status(1, 0)], { caps: CAPS });
+      const res = await h.call("record", { watch: [{ player: 0 }], tics: 1, run: false, fields: ["buttons", "input", "hp", "weaponstate", "wstate", "input"], events: ["psprite", "state", "psprite"] });
+      expect(res.isError).toBeUndefined();
+      expect(sent()[0]).toContain("mcp_rec fields buttons,modbuttons,hp,wclass,pending,refire,wflags,wstate,wlabel,wsprite,wframe,wtics; mcp_rec events psprite,state;");
+    });
+
+    it("refuses client calls to record and record_read before status blockers or recorder commands", async () => {
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, engine: LAN_ENGINE });
+      h.ctx.rememberLaunchArgs(1, { extraArgs: ["-connect", "localhost"] }, bridge!.port, "/tmp/log");
+      bridge!.setStatus({ player: "none", console: "down" });
+      for (const [tool, args] of [["record", { scripts: "all", tics: 1 }], ["record", { scripts: "all", tics: 1, run: false }], ["record_read", {}], ["record_read", { stop: false }]] as const) {
+        const res = await h.call(tool, args);
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toBe("can't record on a netgame client: record on the server instance (a client's sim is predicted, not authoritative)");
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("refuses server run mode before no-player blockers and requires rechost for passive record/read", async () => {
+      const { h } = await recorder([status(0, 0)], { caps: CAPS.filter((c) => c !== "rechost"), engine: LAN_ENGINE });
+      h.ctx.rememberLaunchArgs(1, { extraArgs: ["-host"] }, bridge!.port, "/tmp/log");
+      bridge!.setStatus({ player: "none", menu: "on" });
+      const run = await h.call("record", { scripts: "all", tics: 1 });
+      expect(run.isError).toBe(true);
+      expect(run.content?.[0]?.text).toBe("a netgame server's sim ignores pause, so run mode can't count its tics: use run: false, then record_read");
+      for (const tool of ["record", "record_read"]) {
+        const res = await h.call(tool, { scripts: "all", tics: 1, run: false });
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toMatch(/no rechost cap.*rebuild.*nothing sent/);
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("arms a passive authoritative server despite no player and reads map_reset without pausing", async () => {
+      const { h } = await recorder([status(0, 5, "map_reset")], { caps: CAPS, engine: LAN_ENGINE, io: { readTextSync: () => recFile("ran=5 rows=3 dropped=0 fields=tid,hp,x reason=map_reset") } });
+      h.ctx.rememberLaunchArgs(1, { extraArgs: ["-host"] }, bridge!.port, "/tmp/log");
+      bridge!.setStatus({ player: "none", console: "down" });
+      const armed = await h.call("record", { watch: [{ class: "DoomImp" }], tics: 500, run: false });
+      expect(armed.isError).toBeUndefined();
+      for (const stop of [true, false]) {
+        const res = await h.call("record_read", { stop });
+        expect(res.isError).toBeUndefined();
+        expect(res.structuredContent).toMatchObject({ reason: "map_reset", tics: 5, end: 417 });
+      }
+      expect(sent()[0]).toContain("mcp_rec go tics=500 every=1 changes=1");
+      expect(sent().some((c) => c === "mcp_rec stop")).toBe(false);
+      expect(bridge!.pauses).toEqual([]);
+    });
+
+    it("refuses lockstep netgames on an adapter without server support before blockers for record/read", async () => {
+      const offlineEngine = { ...engine, netgame: undefined, notes: { ...engine.notes, recordNetgame: "Offline only." } };
+      const { h } = await recorder([status(0, 0)], { caps: CAPS, engine: offlineEngine });
+      bridge!.setStatus({ player: "none", console: "down" });
+      for (const extraArgs of [["-host", "2"], ["-join", "localhost"]]) {
+        h.ctx.rememberLaunchArgs(1, { extraArgs }, bridge!.port, "/tmp/log");
+        for (const tool of ["record", "record_read"]) {
+          const res = await h.call(tool, { scripts: "all", tics: 1 });
+          expect(res.isError).toBe(true);
+          expect(res.content?.[0]?.text).toBe("can't record in a netgame: this engine supports offline recording only");
+        }
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("keeps offline record and record_read working on an adapter without netgame support", async () => {
+      const { h } = await recorder([status(0, 1, "done")], { engine: { ...engine, netgame: undefined } });
+      h.ctx.rememberLaunchArgs(1, { extraArgs: ["-file", "/mod.pk3"] }, bridge!.port, "/tmp/log");
+      for (const tool of ["record", "record_read"]) {
+        const res = await h.call(tool, { scripts: "all", tics: 1 });
+        expect(res.isError).toBeUndefined();
+        expect(res.structuredContent).toMatchObject({ reason: "done" });
+      }
+    });
+
+    it("leaves attached-instance netgame admission to the engine", async () => {
+      const { h } = await recorder([status(0, 0)], { responses: { "mcp_rec go": ["error netgame client: record on the server"] } });
+      const res = await h.call("record", { scripts: "all", tics: 1, run: false });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("netgame client: record on the server");
+      expect(sent()).toHaveLength(1);
+    });
+
+    it("describes caps, vars, player layers, failure blind spots and adapter netgame notes", async () => {
+      const note = "Offline only. custom recorder note";
+      const { h } = await recorder([status(0, 0)], { engine: { ...engine, notes: { ...engine.notes, recordNetgame: note } } });
+      const { tools } = await h.client.listTools();
+      const record = tools.find((t) => t.name === "record")!;
+      const read = tools.find((t) => t.name === "record_read")!;
+      for (const text of [note, "two bcc builds", "everyTics/onChange", "wstate=none", "flash 1000", "two-state idle loop", "failure does not stop command", "set and reset within one tic", "Same-maptime reload", "32 vars", "recvars", "recplayer", "mapslot", "rechost"]) {
+        expect(record.description).toContain(text);
+      }
+      expect(record.description).not.toContain("weapon psprites make no state rows");
+      expect(read.description).toContain(note);
+      expect(read.description).toContain("map_reset");
+    });
+
+    it("refuses before sending anything: nothing to record, a selectorless watch, the run cap, a bad name, a command", async () => {
+      const quitless = { ...engine, refuseCommand: (t: string) => (t.includes("quit") ? "no quitting here" : undefined) };
+      const { h } = await recorder([status(0, 0)], { engine: quitless });
+      const refused = async (args: Record<string, unknown>) => {
+        const res = await h.call("record", { tics: 35, ...args });
+        expect(res.isError).toBe(true);
+        return res.content?.[0]?.text;
+      };
+      expect(await refused({})).toBe("give watch, scripts or vars: nothing to record");
+      expect(await refused({ watch: [{}] })).toBe("watch 1: give class, tid or player");
+      expect(await refused({ watch: [{ player: 0 }], tics: 2101 })).toMatch(/^run mode records at most 2100 tics/);
+      expect(await refused({ scripts: ["a,b"] })).toMatch(/^script name "a,b" can't be sent/);
+      expect(await refused({ scripts: "all", run: false, command: "+attack" })).toBe("command needs run: true (with run: false, arm first, then run_command)");
+      expect(await refused({ scripts: "all", command: "quit" })).toBe("no quitting here");
+      // A class the console can't take throws while the schedule is built, before the stop.
+      expect(await refused({ watch: [{ class: 'Foo"' }] })).toMatch(/Unsafe console token/);
+      expect(sent()).toEqual([]);
+    });
+
+    it("needs the rec cap and a temp dir the console can take", async () => {
+      const { h } = await recorder([status(0, 0)], { caps: ["cmd", "event", "time", "status"] });
+      for (const tool of ["record", "record_read"]) {
+        const res = await h.call(tool, { watch: [{ player: 0 }], tics: 35 });
+        expect(res.content?.[0]?.text).toMatch(/no per-tic recorder .*nothing sent/);
+      }
+      await harness!.close();
+      await bridge!.close();
+      const quoted = await recorder([status(0, 0)], { io: { mkdtemp: () => '/tmp/a"b' } });
+      for (const tool of ["record", "record_read"]) {
+        const res = await quoted.h.call(tool, { watch: [{ player: 0 }], tics: 35 });
+        expect(res.content?.[0]?.text).toMatch(/^temp dir "\/tmp\/a\\"b" can't be passed as a console token: .*Set TMPDIR/);
+      }
+      expect(sent()).toEqual([]);
+    });
+
+    it("refuses a run on a blocker or an unread status, after stopping an abandoned run", async () => {
+      const { h } = await recorder([status(0, 0)]);
+      bridge!.setStatus({ console: "down" });
+      const blocked = await h.call("record", { watch: [{ player: 0 }], tics: 35 });
+      expect(blocked.content?.[0]?.text).toBe("can't record: console is down. Try ensure_live with fix.");
+      bridge!.setStatus({ console: "up", paused: undefined });
+      const unread = await h.call("record", { watch: [{ player: 0 }], tics: 35 });
+      expect(unread.content?.[0]?.text).toMatch(/^can't record: .*no paused= field/);
+      expect(sent()).toEqual(["mcp_rec stop", "mcp_rec stop"]);
+    });
+
+    it("surfaces the engine's first error when go doesn't arm, without polling", async () => {
+      const refusal = ["MCP_REC cleared", "error unknown class NoSuchClass", "error bad setup: a line failed, mcp_rec clear first"];
+      const { h } = await recorder([status(0, 0)], { responses: { "mcp_rec go": refusal } });
+      const res = await h.call("record", { watch: [{ class: "NoSuchClass" }], tics: 35 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("unknown class NoSuchClass");
+      expect(sent()).toHaveLength(2);
+    });
+
+    it("stops a stalled run and reports it as an error with the blockers", async () => {
+      const { h } = await recorder([status(1, 3)]);
+      bridge!.onCommand("mcp_rec status", () => bridge!.setStatus({ console: "down", maptime: "415" }));
+      const res = await h.call("record", { watch: [{ player: 0 }], tics: 35 });
+      const why = "the sim stopped advancing (maptime stuck at 415); console is down. Try ensure_live with fix.";
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe(why);
+      expect(res.structuredContent).toEqual({ reason: "stalled", tics: 3, error: why, engineState: "Engine state: console is down." });
+      // One read that made progress, ten that didn't, then the stop.
+      expect(sent().filter((c) => c === "mcp_rec status")).toHaveLength(11);
+      expect(sent().at(-1)).toBe("mcp_rec stop");
+    });
+
+    it("keeps the original error when the bridge dies mid-run and the stop fails too", async () => {
+      const { h } = await recorder([status(1, 1)]);
+      bridge!.onCommand("mcp_rec status", () => bridge!.resetClients());
+      const res = await h.call("record", { watch: [{ player: 0 }], tics: 5 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).not.toMatch(/mcp_rec stop/);
+    });
+
+    it("reports a level change as its reason, with what was recorded before it", async () => {
+      const { h } = await recorder([status(0, 5, "level_change")], {
+        io: { readTextSync: () => recFile("ran=5 rows=3 dropped=0 fields=tid,hp,x reason=level_change") },
+      });
+      const res = await h.call("record", { watch: [{ player: 0 }], tics: 35, maxRows: 2 });
+      expect(res.isError).toBeUndefined();
+      expect(res.structuredContent).toMatchObject({ reason: "level_change", tics: 5, end: 417, rowsDropped: 1 });
+      expect((res.structuredContent?.table as { rows: unknown[] }).rows).toHaveLength(2);
+      expect(sent().filter((c) => c === "mcp_rec stop")).toHaveLength(1);
+    });
+
+    it("fails when the dump is refused or its file is unreadable or headerless", async () => {
+      const cases: Array<[Parameters<typeof recorder>[1], RegExp]> = [
+        // The engine echoes the console token it was sent.
+        [{ responses: { "mcp_rec dump": ["error cannot write /tmp/mcp-rec-T/mcp-rec-1-1.txt"] } }, /^cannot write \/tmp\/mcp-rec-T\/mcp-rec-1-1\.txt$/],
+        [{ io: { readTextSync: () => { throw new Error("ENOENT: gone"); } } }, sepRe(/^can't read the recording file \/tmp\/mcp-rec-T\/mcp-rec-1-1\.txt: ENOENT: gone$/)],
+        [{ io: { readTextSync: () => "rec t=1 k=sample id=1\n" } }, sepRe(/^the recording file \/tmp\/mcp-rec-T\/mcp-rec-1-1\.txt has no MCP_RECFILE header$/)],
+      ];
+      for (const [opts, error] of cases) {
+        const { h } = await recorder([status(0, 35, "done")], opts);
+        const res = await h.call("record", { watch: [{ player: 0 }], tics: 35 });
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toMatch(error);
+        await harness!.close();
+        await bridge!.close();
+      }
+    });
+
+    it("record_read stops by default, then dumps and reads the recording", async () => {
+      const { h } = await recorder([status(0, 20, "stopped")], {
+        io: { readTextSync: () => recFile("ran=20 rows=3 dropped=0 fields=tid,hp,x reason=stopped") },
+      });
+      const res = await h.call("record_read");
+      expect(res.content?.[0]?.text).toMatch(/^recorded 20 tic\(s\), maptime 412\.\.432: 1 actor\(s\), .*, stopped\n/);
+      expect(sent()).toEqual(["mcp_rec stop; mcp_rec status", DUMP_CMD]);
+    });
+
+    it("record_read with stop: false reads a live recording and leaves it armed", async () => {
+      const { h } = await recorder([status(1, 10)], { io: { readTextSync: () => recFile("ran=10 rows=3 dropped=0 fields=tid,hp,x reason=-") } });
+      const res = await h.call("record_read", { stop: false, maxRows: 1 });
+      expect(res.structuredContent).toMatchObject({ reason: "recording", tics: 10, rowsDropped: 2 });
+      expect(sent()).toEqual(["mcp_rec status", DUMP_CMD]);
+    });
+
+    it("record_read says nothing recorded when none was armed, without a dump or a used file name", async () => {
+      const removed: string[] = [];
+      const { h } = await recorder(["MCP_REC active=0 ran=0 tics=0 rows=0 dropped=0 tracked=0 untracked=0 maptime=5 reason=-"], {
+        io: { removeFile: (p) => void removed.push(p) },
+      });
+      for (let i = 0; i <= REC_KEEP; i++) {
+        const res = await h.call("record_read");
+        expect(res.isError).toBeUndefined();
+        expect(res.content?.[0]?.text).toBe("nothing recorded: no recording has been armed (arm one with record)");
+      }
+      expect(sent().every((c) => c === "mcp_rec stop; mcp_rec status")).toBe(true);
+      expect(removed).toEqual([]);
+    });
+
+    it("record_read replies on a recording that ran but matched nothing", async () => {
+      const { h } = await recorder(["MCP_REC active=0 ran=20 tics=500 rows=0 dropped=0 tracked=0 untracked=0 maptime=432 reason=stopped"], {
+        io: { readTextSync: () => "MCP_RECFILE v=1 engine=zandronum map=MAP01 start=412 ran=20 rows=0 dropped=0 fields=tid reason=stopped\n" },
+      });
+      const res = await h.call("record_read");
+      expect(res.content?.[0]?.text).toMatch(/^recorded 20 tic\(s\), maptime 412\.\.432: 0 actor\(s\), 0 row\(s\).*, stopped\n/);
+      expect(sent()).toEqual(["mcp_rec stop; mcp_rec status", DUMP_CMD]);
+    });
+
+    it("record_read fails on a reply with no status line", async () => {
+      const { h } = await recorder(["Unknown command \"mcp_rec\""]);
+      const res = await h.call("record_read", { stop: false });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("Unknown command \"mcp_rec\"");
+    });
+
+    it("record_read reads a finished recording whose rows were all dropped", async () => {
+      const { h } = await recorder(["MCP_REC active=0 ran=9 tics=9 rows=0 dropped=5 tracked=1 untracked=0 maptime=5 reason=done"], {
+        io: { readTextSync: () => "MCP_RECFILE v=1 engine=zandronum map=MAP01 start=0 ran=9 rows=0 dropped=5 fields=hp reason=done\n" },
+      });
+      const res = await h.call("record_read");
+      expect(res.structuredContent).toMatchObject({ engineDropped: 5, notes: ["5 row(s) past the engine's 20000-row buffer were never recorded"] });
+    });
+  });
 });
 
 describe("script listing and profiling tools", () => {

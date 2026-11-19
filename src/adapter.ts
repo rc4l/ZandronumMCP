@@ -35,6 +35,10 @@ export interface EngineAdapter {
   consoleBar?: RegExp;
   /** The engine opens files with ANSI `fopen` on Windows, so a non-ASCII path can't reach it. */
   ansiPaths: boolean;
+  /** `-record` with `-loadgame` records from the save; false refuses `save` with `record`. */
+  demoRecordFromSave: boolean;
+  /** The args that start a launch from the absolute savegame path `save`, given the caller's own extraArgs. */
+  loadSaveArgs: (save: string, extraArgs: readonly string[] | undefined) => string[];
   /** Whether the engine's walk of a -file directory on `platform` leaves out an entry, by its own name, at any depth. */
   dirWalkSkips: (name: string, isDir: boolean, platform: NodeJS.Platform) => boolean;
   /** LAN roles and their pause caveats; undefined for an engine with no netgame support here. */
@@ -91,6 +95,8 @@ export interface EngineNotes {
   inventory: string;
   /** run_acs net-mode and unload caveats, before "save_game refuses". */
   runAcs: string;
+  /** record's netgame mode caveat. */
+  recordNetgame: string;
   /** Appended to screenshot_file's description; "" for none. */
   screenshotFile: string;
   /** set_pause's description after "Set the engine's master pause flag directly" (lead with `. ` or `, `). */

@@ -57,6 +57,8 @@ const ROWS: StatusRow[] = [
   { key: "automap", normal: "0", note: () => "automap is open" },
   { key: "chat", normal: "0", note: () => "chat input is open" },
   { key: "demorec", normal: "0", note: () => "recording a demo", blocker: false },
+  // The MCP's frozen clock, where only its own steps run tics.
+  { key: "frozen", normal: "0", note: () => "time is frozen (freeze_time off resumes)" },
   // A queued map/load/playdemo that hasn't run yet.
   { key: "pending", normal: "0", note: () => "a map/save/demo load is pending" },
   // run_acs snippet modules in the level, which make a save unloadable.

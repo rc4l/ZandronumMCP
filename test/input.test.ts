@@ -16,6 +16,17 @@ describe("parseInputStatus", () => {
   });
 });
 
+describe("parseInputStatus walk fields", () => {
+  it("reads done, limit, net, dist and target, and drops a - distance and target", () => {
+    const line = "MCP_INPUT active=0 consumed=47 total=0 seg=1 maptime=90 reason=done done=1 limit=350 net=0 dist=0.012 target=512.000,-3.500";
+    expect(parseInputStatus([line])).toMatchObject({ done: 1, limit: 350, net: false, dist: 0.012, target: { x: 512, y: -3.5 } });
+    const none = parseInputStatus(["MCP_INPUT active=0 consumed=0 total=0 seg=0 maptime=9 reason=- done=0 limit=0 net=1 dist=- target=-"]);
+    expect(none).toMatchObject({ net: true });
+    expect(none?.dist).toBeUndefined();
+    expect(none?.target).toBeUndefined();
+  });
+});
+
 describe("parseInputArmed", () => {
   it("reads the armed line, and is undefined when go refused", () => {
     expect(parseInputArmed(["MCP_INPUT seg 1 total=5", "MCP_INPUT armed segs=1 tics=5 maptime=77"])).toEqual({
@@ -49,5 +60,11 @@ describe("parseInputTrail", () => {
 
   it("is undefined without the header", () => {
     expect(parseInputTrail(["Unknown command mcp_input", TIC])).toBeUndefined();
+  });
+});
+
+describe("parseInputArmed limit", () => {
+  it("reads limit= when the bridge prints it", () => {
+    expect(parseInputArmed(["MCP_INPUT armed segs=1 tics=0 limit=350 maptime=7"])).toEqual({ segs: 1, tics: 0, limit: 350, maptime: 7 });
   });
 });

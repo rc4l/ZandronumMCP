@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { InputRow, InputStatus } from "../src/parsers/input.js";
 import {
+  engineResult,
   runMoveTo,
+  runPrecheck,
+  legEnd,
   decide,
   headingDeg,
   describeMove,
@@ -13,6 +17,8 @@ import {
   type MoveOptions,
   type Waypoint,
   type TargetRead,
+  type PrecheckPort,
+  type TraceReply,
 } from "../src/movement/moveto.js";
 
 const STOPSPEED = 0x1000 / 0x10000;
@@ -390,5 +396,132 @@ describe("runMoveTo against a simulated player", () => {
     const r = await go(new Sim({ cost: 0 }), [{ x: 5000, y: 0 }], { maxTics: 60 });
     expect(r.reason).toBe("timeout");
     expect(r.speed).toBeGreaterThan(10);
+  });
+});
+
+describe("engineResult", () => {
+  const row = (maptime: number, x: number, momx = 0): InputRow => ({
+    maptime, seg: 1, x, y: 0, z: 0, angle: 0, pitch: 0, momx, momy: 0, momz: 0, health: 100, buttons: [],
+  });
+  const status = (over: Partial<InputStatus>): InputStatus => ({
+    active: false, consumed: 0, total: 0, seg: 1, maptime: 0, reason: "done", ...over,
+  });
+
+  it("maps done to arrived with the last row's position and speed, and a per-tic trail", () => {
+    const r = engineResult(status({ consumed: 2, done: 1, dist: 0.01, target: { x: 50, y: 0 } }), row(10, 0), [row(10, 20, 5), row(11, 50)], [{ x: 50, y: 0 }], true);
+    expect(r).toEqual({
+      reason: "arrived", reached: 1, waypoints: 1, tics: 2, x: 50, y: 0, z: 0, speed: 0, distance: 0.01,
+      target: { x: 50, y: 0 }, trail: [[10, 0, 0], [11, 20, 0], [12, 50, 0]],
+    });
+  });
+
+  it("uses the start row when no tic ran, and names the waypoint it stopped on", () => {
+    const r = engineResult(status({ reason: "level_change" }), row(3, 7), [], [{ tid: 4 }, { class: "Imp" }], false);
+    expect(r).toMatchObject({ reason: "player_gone", reached: 0, tics: 0, x: 7 });
+    expect(r.trail).toBeUndefined();
+    expect(r.distance).toBeUndefined();
+    const stuck = engineResult(status({ reason: "stuck", done: 1, consumed: 40, dist: 90, target: { x: 1, y: 2 } }), row(3, 7), [row(42, 9, 1)], [{ tid: 4 }, { class: "Imp" }], false);
+    expect(stuck).toMatchObject({ reason: "stuck", reached: 1, speed: 1, target: { class: "Imp", x: 1, y: 2 } });
+    // A run whose last waypoint was already satisfied: reached counts it, the target is the last.
+    const all = engineResult(status({ done: 2, dist: 0, target: { x: 1, y: 2 } }), row(3, 7), [], [{ tid: 4 }, { class: "Imp" }], false);
+    expect(all).toMatchObject({ reason: "arrived", reached: 2, tics: 0, target: { class: "Imp" } });
+  });
+});
+
+describe("runPrecheck", () => {
+  const start = { x: 0, y: 0, z: 8, dead: false };
+  const clear = (x: number, y = 0): TraceReply => ({ ok: true, x, y, z: 8, dist: 100, total: 100 });
+  const block = (over: Partial<TraceReply> = {}): TraceReply => ({ ...clear(50), ok: false, reason: "line", line: 45, dist: 50, ...over });
+  const opts = { stops: [true, true, true], standoff: 0, actors: true };
+  const port = (replies: TraceReply[] = [], target: (TargetRead & { ref: string }) | null = null) => ({
+    resolve: vi.fn<PrecheckPort["resolve"]>().mockResolvedValue(target),
+    trace: vi.fn<PrecheckPort["trace"]>().mockImplementation(async ({ to }) => replies.shift() ?? clear(to.x, to.y)),
+  });
+
+  it("pulls stop points back along the leg, skipping legs wholly covered by stand-off", async () => {
+    expect(legEnd({ x: 1, y: 2 }, { x: 4, y: 6 }, 2)).toEqual({ x: 2.8, y: 4.4 });
+    expect(legEnd(start, start, 0)).toBeNull();
+    expect(legEnd(start, { x: 10, y: 0 }, 10)).toBeNull();
+    const p = port();
+    expect(await runPrecheck(p, [{ x: 10, y: 0 }, { x: 100, y: 0 }], { ...opts, standoff: 20 }, start)).toEqual({ clear: true });
+    expect(p.trace.mock.calls).toEqual([[{ from: { x: 0, y: 0 }, to: { x: 80, y: 0 }, actors: true }]]);
+    expect(p.resolve).not.toHaveBeenCalled();
+  });
+
+  it("traces all clear legs, chaining the replies and distinguishing passes from stops", async () => {
+    const p = port();
+    expect(await runPrecheck(p, [{ x: 100, y: 0 }, { x: 100, y: 100 }], { ...opts, stops: [false, true], standoff: 20 }, start)).toEqual({ clear: true });
+    expect(p.trace.mock.calls).toEqual([
+      [{ to: { x: 100, y: 0 }, actors: true }],
+      [{ from: { x: 100, y: 0 }, to: { x: 100, y: 80 }, actors: true }],
+    ]);
+  });
+
+  it.each([0, 1])("returns a block on leg %i without changing the player's reported position", async (leg) => {
+    const p = port([...(leg ? [clear(100)] : []), block({ rise: 32, drop: 48, blocker: "Imp#3" })]);
+    const checked = await runPrecheck(p, [{ x: 100, y: 0 }, { x: 200, y: 0 }], opts, start);
+    expect(checked).toEqual({ result: {
+      reason: "blocked", reached: leg, waypoints: 2, tics: 0, x: 0, y: 0, z: 8, speed: 0,
+      blocked: { leg: leg + 1, reason: "line", x: 50, y: 0, z: 8, dist: 50, total: 100, line: 45, rise: 32, drop: 48, blocker: "Imp#3" },
+    } });
+    expect(p.trace).toHaveBeenCalledTimes(leg + 1);
+  });
+
+  it("describes a block using its trace stop, not the unchanged player's start", async () => {
+    const p = port([clear(100), block()]);
+    const checked = await runPrecheck(p, [{ x: 100, y: 0 }, { x: 200, y: 0 }], opts, start);
+    expect("result" in checked && describeMove(checked.result)).toBe("blocked at waypoint 2/2 (precheck, nothing moved): line 45 after 50.0 of 100.0 at (50.0, 0.0)");
+  });
+
+  it.each(["Imp#5", "player1"])("accepts a nearby self-block for %s and starts the next leg at the last clear stop", async (ref) => {
+    const target = { x: 200, y: 0, radius: 20, ref };
+    const p = port([block({ reason: "actor", blocker: ref, x: 160 })], target);
+    expect(await runPrecheck(p, [{ tid: 5 }, { x: 160, y: 100 }], opts, start)).toEqual({ clear: true });
+    expect(p.resolve).toHaveBeenCalledWith({ tid: 5 });
+    expect(p.trace.mock.calls[0][0].to).toEqual({ x: 200, y: 0 });
+    expect(p.trace.mock.calls[1][0].from).toEqual({ x: 160, y: 0 });
+  });
+
+  it.each([
+    { reason: "actor", blocker: "Imp#5", x: 0 },
+    { reason: "actor", blocker: "Other#5", x: 160 },
+    { reason: "line", blocker: "Imp#5", x: 160 },
+  ])("does not wave through a distant, different or non-actor block: %j", async (over) => {
+    const p = port([block(over)], { x: 200, y: 0, radius: 20, ref: "Imp#5" });
+    expect(await runPrecheck(p, [{ class: "Imp" }], opts, start)).toMatchObject({ result: { reason: "blocked", reached: 0 } });
+  });
+
+  it("uses the inclusive self-block bound and preserves optional fields only when reported", async () => {
+    const distance = (32 + 20) * Math.SQRT2 + 32;
+    const p = port([{ ok: false, reason: "actor", blocker: "Imp#0", x: 200 - distance, y: 0, z: 8, dist: 50, total: 200 }], { x: 200, y: 0, radius: 20, ref: "Imp#0" });
+    expect(await runPrecheck(p, [{ tid: 5 }], opts, start)).toEqual({ clear: true });
+    const bare = port([{ ok: false, reason: "ceiling", x: 10, y: 0, z: 8, dist: 10, total: 100 }]);
+    const checked = await runPrecheck(bare, [{ x: 100, y: 0 }], opts, start);
+    expect(checked).toMatchObject({ result: { blocked: { reason: "ceiling" } } });
+    if ("result" in checked) expect(checked.result.blocked).not.toHaveProperty("line");
+  });
+
+  it("ignores actors in geometry mode, chaining from the target centre", async () => {
+    const p = port([], { x: 100, y: 0, radius: 20, ref: "Imp#5" });
+    expect(await runPrecheck(p, [{ class: "Imp" }, { x: 100, y: 100 }], { ...opts, actors: false }, start)).toEqual({ clear: true });
+    expect(p.trace.mock.calls).toEqual([
+      [{ to: { x: 100, y: 0 }, actors: false }],
+      [{ from: { x: 100, y: 0 }, to: { x: 100, y: 100 }, actors: false }],
+    ]);
+  });
+
+  it("returns target_gone at its leg with zero tics and no further traces", async () => {
+    const p = port();
+    expect(await runPrecheck(p, [{ x: 100, y: 0 }, { tid: 5 }], opts, start)).toEqual({ result: {
+      reason: "target_gone", reached: 1, waypoints: 2, tics: 0, x: 0, y: 0, z: 8, speed: 0,
+    } });
+    expect(p.trace).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates probe failures without tracing later legs", async () => {
+    const p = port();
+    p.trace.mockRejectedValue(new Error("no mover"));
+    await expect(runPrecheck(p, [{ x: 100, y: 0 }, { x: 200, y: 0 }], opts, start)).rejects.toThrow("no mover");
+    expect(p.trace).toHaveBeenCalledTimes(1);
   });
 });

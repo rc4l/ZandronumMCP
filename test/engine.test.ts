@@ -51,6 +51,10 @@ describe("Zandronum engine adapter", () => {
     expect(config.saveDir).toBe(join("/Apps/Z.app", "Contents", "MacOS"));
   });
 
+  it("loads a save by its absolute path, whatever save dir the caller sets", () => {
+    expect(engine.loadSaveArgs("/s/base.zds", ["-savedir", "/other"])).toEqual(["-loadgame", "/s/base.zds"]);
+  });
+
   it("refuses no raw console command", () => {
     expect(engine.refuseCommand("debug_restart")).toBeUndefined();
   });

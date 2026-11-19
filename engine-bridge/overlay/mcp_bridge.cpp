@@ -71,12 +71,6 @@
 // server does for stdin. Forward-declared to avoid pulling in c_dispatch.h.
 void AddCommandString(char *text, int keynum);
 
-// The engine's global pause flag (defined in g_game.cpp). The MCP drives it
-// directly so a backgrounded, defocused window can keep advancing tics — vital
-// for automated testing, because single-player auto-pauses on focus loss
-// (S_SetSoundPaused in i_input.cpp forces `paused = -1`, with no cvar to opt out).
-extern int paused;
-
 // Post a synthetic input event (implemented in mcp_event.cpp, which owns the
 // engine-header includes so this socket TU doesn't have to).
 void MCP_PostInputEvent( int type, int subtype, int data1, int data2 );
@@ -90,9 +84,10 @@ void StartLogging( const char *szFileName );
 
 namespace
 {
-	// One queued inbound message: a console command, an input event or a pause.
+	// One queued inbound message: a console command, an input event, a pause, or the client gone.
 	struct InboundMsg
 	{
+		bool        isLost = false;        // the client disconnected, queued in order after its last message
 		bool        isEvent;
 		bool        isPause;               // setpause control (isPause == true)
 		int         pauseVal;              // target value for the engine `paused` flag
@@ -291,9 +286,9 @@ namespace
 
 			// hello now advertises this engine's PID so the MCP can verify it attached
 			// to the process it just spawned (and not a stale bridge on the same port).
-			char hello[256];
+			char hello[512];
 			snprintf( hello, sizeof( hello ),
-				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.8.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\",\"mapslot\"]}",
+				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.16.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\",\"mapslot\",\"rec\",\"clock\",\"walk\",\"frametime\",\"recvars\",\"recplayer\",\"rechost\",\"demo\"]}",
 				mcp_getpid() );
 			SendLine( hello );
 
@@ -350,6 +345,14 @@ namespace
 
 			if ( g_client == s ) g_client = MCP_INVALID_SOCKET;
 			mcp_close_socket( s );
+			{
+				std::lock_guard<std::mutex> lk( g_lock );
+				InboundMsg msg;
+				msg.isLost = true;
+				msg.isEvent = msg.isPause = false;
+				msg.pauseVal = msg.evtype = msg.subtype = msg.d1 = msg.d2 = 0;
+				g_inbound.push_back( msg );
+			}
 		}
 	}
 
@@ -439,8 +442,11 @@ void MCP_Bridge_Poll()
 			if ( !g_inbound.empty() ) { msg = g_inbound.front(); g_inbound.pop_front(); have = true; }
 		}
 		if ( !have ) break;
+		// The MCP drives `paused` directly so a defocused window keeps advancing tics.
 		if ( msg.isPause )
-			paused = msg.pauseVal;
+			MCP_Clock_SetPause( msg.pauseVal );
+		else if ( msg.isLost )
+			MCP_Clock_ClientLost();
 		else if ( msg.isEvent )
 			MCP_PostInputEvent( msg.evtype, msg.subtype, msg.d1, msg.d2 );
 		else

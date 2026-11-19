@@ -1,4 +1,5 @@
-/** move_to's closed-loop steering, behind a port so it runs against a simulated Doom kinematic model in tests and against the bridge in tools.ts. */
+/** move_to's host-mode steering behind a port (simulated in tests), plus the result mapping for engine mode, where mcp_steer.h steers. */
+import type { InputRow, InputStatus } from "../parsers/input.js";
 import { stallTracker } from "../sampler/stepping.js";
 
 export type Waypoint = { x: number; y: number } | { tid: number } | { class: string };
@@ -38,7 +39,7 @@ export interface MoveOptions {
   trail: boolean;
 }
 
-export type StopReason = "arrived" | "stuck" | "timeout" | "died" | "player_gone" | "target_gone" | "stalled";
+export type StopReason = "arrived" | "stuck" | "timeout" | "died" | "player_gone" | "target_gone" | "stalled" | "stopped" | "blocked";
 
 export interface MoveResult {
   reason: StopReason;
@@ -53,6 +54,76 @@ export interface MoveResult {
   speed: number;
   target?: { x: number; y: number; tid?: number; class?: string };
   trail?: Array<[number, number, number]>;
+  blocked?: Omit<TraceReply, "ok"> & { leg: number };
+}
+
+export interface TraceReply {
+  ok: boolean;
+  reason?: string;
+  x: number;
+  y: number;
+  z: number;
+  dist: number;
+  total: number;
+  line?: number;
+  blocker?: string;
+  rise?: number;
+  drop?: number;
+}
+
+export interface PrecheckPort {
+  resolve(w: { tid: number } | { class: string }): Promise<(TargetRead & { ref: string }) | null>;
+  trace(leg: { from?: { x: number; y: number }; to: { x: number; y: number }; actors: boolean }): Promise<TraceReply>;
+}
+
+/** Pull a stop point back by its stand-off, or skip a leg already within reach. */
+export function legEnd(from: { x: number; y: number }, point: { x: number; y: number }, standoff: number): { x: number; y: number } | null {
+  const distance = Math.hypot(point.x - from.x, point.y - from.y);
+  if (distance <= standoff) return null;
+  const share = 1 - standoff / distance;
+  return { x: from.x + (point.x - from.x) * share, y: from.y + (point.y - from.y) * share };
+}
+
+const MAX_MOVER_RADIUS = 32;
+
+/** A non-unique actor ref alone cannot clear a different actor halfway along the route. */
+function targetSelfBlock(trace: TraceReply, target: TargetRead & { ref: string }): boolean {
+  return trace.reason === "actor" && trace.blocker === target.ref &&
+    Math.hypot(trace.x - target.x, trace.y - target.y) <= (MAX_MOVER_RADIUS + target.radius) * Math.SQRT2 + MAX_MOVER_RADIUS;
+}
+
+/** Trace the entire route before walking; a refusal from the port propagates without movement. */
+export async function runPrecheck(
+  port: PrecheckPort,
+  waypoints: Waypoint[],
+  opts: { stops: boolean[]; standoff: number; actors: boolean },
+  start: PlayerRead,
+): Promise<{ clear: true } | { result: MoveResult }> {
+  let from = { x: start.x, y: start.y };
+  for (const [i, w] of waypoints.entries()) {
+    const result = (reason: StopReason, blocked?: MoveResult["blocked"]): { result: MoveResult } => ({
+      result: { reason, reached: i, waypoints: waypoints.length, tics: 0, x: start.x, y: start.y, z: start.z, speed: 0, ...(blocked ? { blocked } : {}) },
+    });
+    const target = "x" in w ? null : await port.resolve(w);
+    if (!("x" in w) && !target) return result("target_gone");
+    const point = "x" in w ? w : target!;
+    const to = "x" in w && opts.stops[i] ? legEnd(from, point, opts.standoff) : { x: point.x, y: point.y };
+    if (!to) continue;
+    const trace = await port.trace({ ...(i > 0 ? { from } : {}), to, actors: opts.actors });
+    if (!trace.ok && !(target && targetSelfBlock(trace, target))) {
+      const { ok, ...blocked } = trace;
+      return result("blocked", { leg: i + 1, ...blocked });
+    }
+    from = { x: trace.x, y: trace.y };
+  }
+  return { clear: true };
+}
+
+/** A map probe's block reason as text: `actor DoomImp#7`, `line 45`, `step (rise 32)`. */
+export function blockText(r: { reason?: unknown; blocker?: unknown; line?: unknown; rise?: unknown; drop?: unknown }): string {
+  const what = r.blocker ?? r.line;
+  const size = r.rise !== undefined ? ` (rise ${r.rise})` : r.drop !== undefined ? ` (drop ${r.drop})` : "";
+  return `${r.reason}${what !== undefined ? ` ${what}` : ""}${size}`;
 }
 
 /** Doom's default friction (0xE800 / 0x10000): the share of momentum kept per tic. */
@@ -299,8 +370,42 @@ async function walk(port: MovePort, waypoints: Waypoint[], opts: MoveOptions, st
   }
 }
 
+// The engine's disarm reasons that move_to names differently; the rest carry over.
+const ENGINE_REASONS: Record<string, StopReason> = { done: "arrived", level_change: "player_gone" };
+
+/** An engine-mode run as a move_to result, falling back to `start` (the player when armed) when no tic ran. */
+export function engineResult(
+  status: InputStatus,
+  start: InputRow,
+  rows: InputRow[],
+  waypoints: Waypoint[],
+  trail: boolean,
+): MoveResult {
+  const last = rows.at(-1) ?? start;
+  const reached = status.done ?? 0;
+  const w = waypoints[Math.min(reached, waypoints.length - 1)];
+  return {
+    reason: ENGINE_REASONS[status.reason] ?? (status.reason as StopReason),
+    reached,
+    waypoints: waypoints.length,
+    tics: status.consumed,
+    x: last.x,
+    y: last.y,
+    z: last.z,
+    speed: Math.hypot(last.momx, last.momy),
+    ...(status.dist !== undefined ? { distance: status.dist } : {}),
+    ...(status.target ? { target: { ...w, ...status.target } } : {}),
+    // A row's maptime is the tic its input was applied in; the position is read a tic later.
+    ...(trail ? { trail: [[start.maptime, start.x, start.y] as [number, number, number], ...rows.map((r) => [r.maptime + 1, r.x, r.y] as [number, number, number])] } : {}),
+  };
+}
+
 /** The one-line text reply, e.g. "arrived at waypoint 2/2 after 87 tic(s) at (1024.0, -320.5), 6.2 from target". */
 export function describeMove(r: MoveResult): string {
+  if (r.blocked) {
+    const b = r.blocked;
+    return `blocked at waypoint ${b.leg}/${r.waypoints} (precheck, nothing moved): ${blockText(b)} after ${b.dist.toFixed(1)} of ${b.total.toFixed(1)} at (${b.x.toFixed(1)}, ${b.y.toFixed(1)})`;
+  }
   const at = r.reason === "arrived" ? r.reached : r.reached + 1;
   const from = r.distance === undefined ? "" : `, ${r.distance.toFixed(1)} from target`;
   return `${r.reason} at waypoint ${at}/${r.waypoints} after ${r.tics} tic(s) at (${r.x.toFixed(1)}, ${r.y.toFixed(1)})${from}`;

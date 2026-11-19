@@ -43,6 +43,7 @@
 #include "textures/textures.h"
 #include "thingdef/thingdef.h"
 #include "r_data/renderstyle.h"
+#include "m_random.h"
 // 3.3-alpha (267400324) moved sector tags into FTagManager; ZA_3.2.1 still has sector_t::tag.
 #if __has_include("p_tags.h")
 #include "p_tags.h"
@@ -57,6 +58,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unordered_map>
 #include "mcp_bridge.h"
 
 static bool MCP_PrintState( const char *label, AActor *mo )
@@ -115,6 +117,40 @@ static void MCP_PrintInput( const char *tag, const usercmd_t &cmd, DWORD oldButt
 
 // Zandronum's fixed psprite slots as GZDoom layer numbers (PSP_WEAPON, PSP_FLASH, PSP_TARGET*).
 static const int MCP_PSP_LAYERS[NUMPSPRITES] = { 1, 1000, INT_MAX - 2, INT_MAX - 1, INT_MAX };
+
+struct MCPPspriteView { const void *object; const FState *state; int sprite; int frame; int tics; };
+static pspdef_t *MCP_WeaponLayer( player_t *p ) { return p->psprites[ps_weapon].state != NULL ? &p->psprites[ps_weapon] : NULL; }
+static MCPPspriteView MCP_PspriteView( const pspdef_t &p ) { return { NULL, p.state, p.sprite, p.frame, p.tics }; }
+
+// Shared by weapon sample fields and every layer's event row.
+static bool MCP_PspriteField( FString &v, const MCPPspriteView &p, const char *field )
+{
+	if ( p.state == NULL ) return false;
+	if ( !strcmp( field, "wstate" ) ) { FString label; return MCP_StateName( p.state, v, label ); }
+	if ( !strcmp( field, "wlabel" ) ) { FString id; return MCP_StateName( p.state, id, v ) && !v.IsEmpty(); }
+	if ( !strcmp( field, "wsprite" ) ) v = unsigned( p.sprite ) < sprites.Size() ? sprites[p.sprite].name : "----";
+	else if ( !strcmp( field, "wframe" ) ) v.Format( "%c", char( 'A' + p.frame ) );
+	else v.Format( "%d", p.tics );
+	return true;
+}
+
+static bool MCP_PlayerField( FString &v, AActor *a, const char *field )
+{
+	player_t *p = a->player;
+	if ( p == NULL || p->mo != a ) return false;
+	if ( !strcmp( field, "buttons" ) ) v.Format( "%u", unsigned( p->original_cmd.buttons ) );
+	else if ( !strcmp( field, "modbuttons" ) ) v.Format( "%u", unsigned( p->cmd.ucmd.buttons ) );
+	else if ( !strcmp( field, "wclass" ) ) { if ( p->ReadyWeapon == NULL ) return false; v = p->ReadyWeapon->GetClass()->TypeName.GetChars(); }
+	else if ( !strcmp( field, "pending" ) )
+	{
+		if ( p->PendingWeapon == WP_NOCHANGE ) return false;
+		v = p->PendingWeapon != NULL ? p->PendingWeapon->GetClass()->TypeName.GetChars() : "none";
+	}
+	else if ( !strcmp( field, "refire" ) ) v.Format( "%d", p->refire );
+	else if ( !strcmp( field, "wflags" ) ) v.Format( "%u", unsigned( p->WeaponState ) );
+	else { const pspdef_t *psp = MCP_WeaponLayer( p ); return psp != NULL && MCP_PspriteField( v, MCP_PspriteView( *psp ), field ); }
+	return true;
+}
 
 static void MCP_PrintPlayerWeapon( player_t *p )
 {
@@ -284,7 +320,7 @@ CCMD( mcp_status )
 	char line[512];
 	size_t n = (size_t)snprintf( line, sizeof( line ),
 		"%s paused=%d menu=%s console=%s gamestate=%s player=%s spectating=%d demo=%d automap=%d "
-		"chat=%d demorec=%d pending=%d maptime=%d acstemp=%d",
+		"chat=%d demorec=%d pending=%d maptime=%d acstemp=%d frozen=%d",
 		token, paused, menu, console, gs,
 		( mo != NULL ) ? ( dead ? "dead" : "alive" ) : "none",
 		( mo != NULL && p->bSpectating ) ? 1 : 0,
@@ -294,7 +330,8 @@ CCMD( mcp_status )
 		demorecording ? 1 : 0,
 		MCP_LoadPending() ? 1 : 0,
 		level.maptime,
-		MCP_RunAcsModules() );
+		MCP_RunAcsModules(),
+		MCP_ClockFrozen ? 1 : 0 );
 
 	// health/armor only mean something with a live player actor -- a menu or
 	// intermission (mo == NULL) reads as gamestate=<not level>, not falsely "dead".
@@ -359,7 +396,7 @@ CCMD( mcp_mark )
 
 	// Not over a pending game action, which it would drop, nor without a screen (a -host server never runs V_Init).
 	FString shot = "none";
-	if ( gameaction == ga_nothing && screen != NULL )
+	if ( ( MCP_ClockFrozen || gameaction == ga_nothing ) && screen != NULL )
 	{
 		const char *port = getenv( "ZANDRONUM_BRIDGE_PORT" );
 		char stamp[32] = "00000000-000000";
@@ -367,8 +404,16 @@ CCMD( mcp_mark )
 		struct tm *lt = localtime( &now );
 		if ( lt != NULL ) strftime( stamp, sizeof( stamp ), "%Y%m%d-%H%M%S", lt );
 		shot.Format( "mcp_mark_%d_%s_%d", ( port != NULL ) ? atoi( port ) : 0, stamp, n );
-		shotfile = shot;
-		gameaction = ga_screenshot;
+		// A frozen clock runs no tic to take ga_screenshot, so the clock captures it.
+		if ( MCP_ClockFrozen )
+		{
+			if ( !MCP_Clock_QueueShot( shot ) ) shot = "none";
+		}
+		else
+		{
+			shotfile = shot;
+			gameaction = ga_screenshot;
+		}
 	}
 	line.AppendFormat( " shot=%s note=", shot.GetChars() );
 	for ( int i = 1; i < argv.argc(); i++ )
@@ -435,7 +480,7 @@ static bool MCP_NumArg( FCommandLine &argv, const char *key, double &out )
 
 // The actor of a class (subclasses too) nearest to me, skipping me and owned items, or with no me
 // the first one found; NULL if none.
-static AActor *MCP_NearestOfClass( AActor *me, const PClass *type )
+AActor *MCP_NearestOfClass( AActor *me, const PClass *type )
 {
 	TThinkerIterator<AActor> it;
 	AActor *a, *best = NULL;
@@ -444,6 +489,21 @@ static AActor *MCP_NearestOfClass( AActor *me, const PClass *type )
 	{
 		if ( a == me || !a->IsKindOf( type ) || MCP_IsOwnedItem( a ) || MCP_IsHidden( a ) ) continue;
 		double d = ( me != NULL ) ? MCP_Dist2D( me, a ) : 0;
+		if ( best == NULL || d < bestDist ) { best = a; bestDist = d; }
+	}
+	return best;
+}
+
+// The actor with this TID nearest to me, skipping me; NULL if none.
+AActor *MCP_NearestWithTid( AActor *me, int tid )
+{
+	FActorIterator it( tid );
+	AActor *a, *best = NULL;
+	double bestDist = 0;
+	while ( ( a = it.Next() ) != NULL )
+	{
+		if ( a == me || MCP_IsHidden( a ) ) continue;
+		double d = MCP_Dist2D( me, a );
 		if ( best == NULL || d < bestDist ) { best = a; bestDist = d; }
 	}
 	return best;
@@ -515,12 +575,13 @@ CCMD( mcp_setview )
 	Printf( "%s\n", line.GetChars() );
 }
 
-// Clears what eats input and has no stock CCMD to close it: console, chat, automap.
+// Clears what eats input and has no stock CCMD to close it: console, chat, automap, a frozen clock.
 CCMD( mcp_unblock )
 {
 	C_HideConsole();
 	if ( CHAT_GetChatMode() != CHATMODE_NONE ) CHAT_SetChatMode( CHATMODE_NONE );
 	if ( automapactive ) AM_Stop();
+	MCP_Clock_Thaw();
 	Printf( "unblock ok\n" );
 }
 
@@ -581,14 +642,15 @@ static FString MCP_FlagLetters( AActor *a )
 	return f;
 }
 
-// --- The actor field table: findactors' keys in their pinned order (src/sampler/watch.ts FIELDS).
+// --- The actor field table: findactors' keys in their pinned order (src/sampler/watch.ts FIELDS),
+// then mcp_rec's own.
 
 // tid survives Destroy, and index is -1 except during a findactors tid= walk.
 struct MCPFieldCtx { AActor *me; int tid; int index; };
 struct MCPField
 {
 	const char *name;
-	char kind; // 'c' findactors, 't' findactors tid= only, 'd' detail=1 only
+	char kind; // 'c' findactors, 't' findactors tid= only, 'd' detail=1 only, 'r' mcp_rec only
 	bool ( *value )( FString &v, AActor *a, const MCPFieldCtx &c );
 };
 
@@ -652,6 +714,26 @@ static const MCPField MCP_FIELDS[] = {
 		v.Format( "%d", int( a->player - players ) );
 		return true;
 	} },
+	{ "state", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) {
+		FString label;
+		return MCP_StateName( a->state, v, label );
+	} },
+	{ "label", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) {
+		FString id;
+		return MCP_StateName( a->state, id, v ) && !v.IsEmpty();
+	} },
+	{ "tics", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { v.Format( "%d", a->tics ); return true; } },
+	{ "buttons", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "buttons" ); } },
+	{ "modbuttons", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "modbuttons" ); } },
+	{ "wclass", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wclass" ); } },
+	{ "pending", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "pending" ); } },
+	{ "refire", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "refire" ); } },
+	{ "wflags", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wflags" ); } },
+	{ "wstate", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wstate" ); } },
+	{ "wlabel", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wlabel" ); } },
+	{ "wsprite", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wsprite" ); } },
+	{ "wframe", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wframe" ); } },
+	{ "wtics", 'r', []( FString &v, AActor *a, const MCPFieldCtx & ) { return MCP_PlayerField( v, a, "wtics" ); } },
 };
 
 // The head every actor reply shares: class through pitch.
@@ -2222,4 +2304,758 @@ CCMD( mcp_tracemove )
 	line.AppendFormat( " x=%.1f y=%.1f z=%.1f dist=%.1f total=%.1f%s", FIXED2FLOAT( p->x ), FIXED2FLOAT( p->y ),
 		FIXED2FLOAT( p->z ), dist, total, b.extra.GetChars() );
 	Printf( "%s\n", line.GetChars() );
+}
+
+// --- mcp_rec: the per-tic recorder, which prints nothing while armed (rows go to a dump file), or
+// the host would take a row for the reply of whatever command is pending.
+
+static const int MCP_REC_MAX_WATCHES = 8;
+static const int MCP_REC_MAX_TRACKED = 512;
+static const unsigned MCP_REC_MAX_ROWS = 20000;
+static const int MCP_REC_MAX_TICS = 10500;
+static const unsigned MCP_REC_MAX_SCRIPTS = 32;
+static const unsigned MCP_REC_MAX_VARS = 32;
+
+bool MCP_RecArmed = false;
+
+// A watch's selectors, AND-ed: no class, tid 0 and player -1 each mean "any".
+struct MCPRecWatch { const PClass *type; int tid; int player; };
+// A matched actor: its id (0 past the tracked cap), the walk that last saw it, its last sample.
+struct MCPRecActor { int id; unsigned gen; FString last; };
+
+enum { MCP_REC_SPAWN = 1, MCP_REC_DESTROY = 2, MCP_REC_STATE = 4, MCP_REC_DAMAGE = 8, MCP_REC_DEATH = 16, MCP_REC_PSPRITE = 32 };
+static const struct { const char *name; int bit; } MCP_REC_EVENTS[] = {
+	{ "spawn", MCP_REC_SPAWN }, { "destroy", MCP_REC_DESTROY }, { "state", MCP_REC_STATE },
+	{ "damage", MCP_REC_DAMAGE }, { "death", MCP_REC_DEATH }, { "psprite", MCP_REC_PSPRITE },
+};
+static const int MCP_REC_DEFAULT_EVENTS = MCP_REC_SPAWN | MCP_REC_DESTROY | MCP_REC_DAMAGE | MCP_REC_DEATH;
+static const char *const MCP_REC_DEFAULT_FIELDS = "tid,hp,x,y,z,sprite,frame";
+// A state row's fields, after id=.
+static const char *const MCP_REC_STATE_FIELDS[] = { "state", "label", "sprite", "frame", "tics" };
+
+// Which watches a match tries: class-only ones match at spawn, tid and player ones at each tic end.
+enum { MCP_REC_CLASS_WATCHES = 1, MCP_REC_RESOLVED_WATCHES = 2, MCP_REC_ALL_WATCHES = 3 };
+
+// The setup, kept until clear, which go refuses once a failed line has marked it bad.
+static MCPRecWatch g_recWatches[MCP_REC_MAX_WATCHES];
+static int g_recNWatches = 0;
+static TArray<int> g_recFields; // MCP_FIELDS indices, in the order asked
+static bool g_recFieldsSet = false;
+static int g_recEvents = MCP_REC_DEFAULT_EVENTS;
+static bool g_recScripts = false, g_recAllScripts = false;
+static TArray<int> g_recScriptNums; // a named script as minus its FName, as ACS numbers it
+static bool g_recBad = false;
+struct MCPRecVar { MCPAcsRef ref; FString label; int last; };
+static TArray<MCPRecVar> g_recVars;
+
+// One recording: go starts it afresh, clear empties it.
+static bool g_recRun = false, g_recChanges = true;
+static int g_recTics = 0, g_recRan = 0, g_recEvery = 1, g_recStart = 0, g_recLast = 0;
+static int g_recNextId = 0, g_recNextSerial = 0, g_recLive = 0, g_recDropped = 0, g_recUntracked = 0;
+static unsigned g_recGen = 0;
+static const char *g_recReason = "-";
+static FString g_recMap;
+static TArray<FString> g_recRows;
+// Stored actor and script pointers are only ever map keys.
+static std::unordered_map<const AActor *, MCPRecActor> g_recIds;
+static std::unordered_map<const void *, int> g_recSerials;
+struct MCPRecPsprite { const void *object; const FState *state; };
+static std::unordered_map<long long, MCPRecPsprite> g_recPsprites;
+
+// Whether the game is still on the level the recording was armed on, as mcp_input checks it.
+static bool MCP_RecSameLevel()
+{
+	return gamestate == GS_LEVEL && level.maptime >= g_recLast && g_recMap.CompareNoCase( level.mapname ) == 0;
+}
+
+static void MCP_RecDisarm( const char *reason )
+{
+	MCP_RecArmed = false;
+	g_recReason = reason;
+	g_recIds.clear();
+	g_recSerials.clear();
+	g_recPsprites.clear();
+	g_recLive = 0;
+	// Run mode owns the pause, as step does: it ends paused however it ends, except around a demo.
+	if ( g_recRun && gamestate == GS_LEVEL && !demorecording && !demoplayback ) MCP_Clock_SetPause( 1 );
+}
+
+void MCP_Rec_ResetImpl() { MCP_RecDisarm( "map_reset" ); }
+
+// The one row writer: a level change disarms here first, so nothing from the next map is recorded.
+static bool MCP_RecWrite( const char *kind, const FString &body )
+{
+	if ( !MCP_RecSameLevel() )
+	{
+		MCP_RecDisarm( "level_change" );
+		return false;
+	}
+	if ( g_recRows.Size() >= MCP_REC_MAX_ROWS )
+	{
+		g_recDropped++;
+		return true;
+	}
+	FString row;
+	row.Format( "rec t=%d k=%s %s", level.maptime, kind, body.GetChars() );
+	g_recRows.Push( row );
+	return true;
+}
+
+static void MCP_RecReadVars( bool baseline )
+{
+	for ( unsigned i = 0; MCP_RecArmed && i < g_recVars.Size(); i++ )
+	{
+		if ( !MCP_RecSameLevel() ) { MCP_RecDisarm( "level_change" ); return; }
+		MCPRecVar &v = g_recVars[i];
+		int value;
+		if ( !MCP_AcsRefRead( v.ref, value ) ) { MCP_RecDisarm( "level_change" ); return; }
+		if ( !baseline && value == v.last ) continue;
+		FString body;
+		body.Format( "var=%u value=%d", i + 1, value );
+		if ( !baseline ) body.AppendFormat( " prev=%d", v.last );
+		body.AppendFormat( " name=%s", v.label.GetChars() );
+		v.last = value;
+		MCP_RecWrite( "var", body );
+	}
+}
+
+static MCPRecActor *MCP_RecFind( const AActor *a )
+{
+	auto it = g_recIds.find( a );
+	return it != g_recIds.end() ? &it->second : NULL;
+}
+
+static int MCP_RecIdOf( const AActor *a )
+{
+	const MCPRecActor *r = ( a != NULL ) ? MCP_RecFind( a ) : NULL;
+	return ( r != NULL ) ? r->id : 0;
+}
+
+static long long MCP_RecPspriteKey( int id, int layer ) { return ( (long long)id << 32 ) | (unsigned int)layer; }
+
+static void MCP_RecPsprite( int id, int layer, const MCPPspriteView &p )
+{
+	MCPRecPsprite &last = g_recPsprites[MCP_RecPspriteKey( id, layer )];
+	const bool changed = p.state != NULL ? last.state != p.state || last.object != p.object : last.state != NULL;
+	last = { p.object, p.state };
+	if ( !changed ) return;
+	FString body;
+	body.Format( "id=%d layer=%d", id, layer );
+	if ( p.state == NULL ) body += " wstate=none";
+	else for ( const char *f : { "wstate", "wlabel", "wsprite", "wframe", "wtics" } )
+	{
+		FString v;
+		if ( MCP_PspriteField( v, p, f ) ) body.AppendFormat( " %s=%s", f, v.GetChars() );
+	}
+	MCP_RecWrite( "psprite", body );
+}
+
+void MCP_Rec_PspriteSetImpl( AActor *body, const void *, int layer )
+{
+	if ( !( g_recEvents & MCP_REC_PSPRITE ) ) return;
+	const int id = MCP_RecIdOf( body );
+	if ( id <= 0 || body->player == NULL || body->player->mo != body || layer < 0 || layer >= NUMPSPRITES ) return;
+	MCP_RecPsprite( id, MCP_PSP_LAYERS[layer], MCP_PspriteView( body->player->psprites[layer] ) );
+}
+
+void MCP_Rec_PspriteClearImpl( AActor *body, int layer )
+{
+	if ( !( g_recEvents & MCP_REC_PSPRITE ) ) return;
+	const int id = MCP_RecIdOf( body );
+	if ( id <= 0 || body->player == NULL || body->player->mo != body || layer < 0 || layer >= NUMPSPRITES ) return;
+	MCP_RecPsprite( id, MCP_PSP_LAYERS[layer], { NULL, NULL, 0, 0, 0 } );
+}
+
+static void MCP_RecReconcilePsprites( AActor *a, int id )
+{
+	if ( !( g_recEvents & MCP_REC_PSPRITE ) || a->player == NULL || a->player->mo != a ) return;
+	for ( int i = 0; MCP_RecArmed && i < NUMPSPRITES; i++ )
+	{
+		auto it = g_recPsprites.find( MCP_RecPspriteKey( id, MCP_PSP_LAYERS[i] ) );
+		if ( it != g_recPsprites.end() && it->second.state != NULL && a->player->psprites[i].state == NULL )
+			MCP_RecPsprite( id, MCP_PSP_LAYERS[i], { NULL, NULL, 0, 0, 0 } );
+	}
+}
+
+// Forgets a's entry; its id, 0 when it had none.
+static int MCP_RecErase( const AActor *a )
+{
+	auto it = g_recIds.find( a );
+	if ( it == g_recIds.end() ) return 0;
+	const int id = it->second.id;
+	if ( id > 0 ) g_recLive--;
+	g_recIds.erase( it );
+	return id;
+}
+
+// Gives an unknown a an id and writes its first row (k=spawn or seen), counting it untracked past
+// the cap; NULL when the write disarmed.
+static MCPRecActor *MCP_RecTrack( AActor *a, const char *kind )
+{
+	MCPRecActor &r = g_recIds[a];
+	r.gen = g_recGen;
+	r.last = "";
+	if ( g_recLive >= MCP_REC_MAX_TRACKED )
+	{
+		r.id = 0;
+		g_recUntracked++;
+		return &r;
+	}
+	r.id = ++g_recNextId;
+	g_recLive++;
+	if ( ( g_recEvents & MCP_REC_PSPRITE ) && a->player != NULL && a->player->mo == a )
+		for ( int i = 0; i < NUMPSPRITES; i++ )
+			g_recPsprites[MCP_RecPspriteKey( r.id, MCP_PSP_LAYERS[i] )] = { NULL, a->player->psprites[i].state };
+	FString body;
+	body.Format( "id=%d class=%s tid=%d x=%.1f y=%.1f z=%.1f", r.id, a->GetClass()->TypeName.GetChars(), a->tid,
+		FIXED2FLOAT( a->x ), FIXED2FLOAT( a->y ), FIXED2FLOAT( a->z ) );
+	return ( MCP_RecWrite( kind, body ) && MCP_RecArmed ) ? &r : NULL;
+}
+
+static bool MCP_RecMatches( const MCPRecWatch &w, AActor *a )
+{
+	if ( w.type != NULL && !a->IsKindOf( w.type ) ) return false;
+	if ( w.tid != 0 && a->tid != w.tid ) return false;
+	return w.player < 0 || ( playeringame[w.player] && players[w.player].mo == a );
+}
+
+// Whether a matches one of the watches in `which`; a map-reset hidden actor never does.
+static bool MCP_RecWatched( AActor *a, int which )
+{
+	if ( MCP_IsHidden( a ) ) return false;
+	for ( int i = 0; i < g_recNWatches; i++ )
+	{
+		const MCPRecWatch &w = g_recWatches[i];
+		const int kind = ( w.tid == 0 && w.player < 0 ) ? MCP_REC_CLASS_WATCHES : MCP_REC_RESOLVED_WATCHES;
+		if ( ( which & kind ) && MCP_RecMatches( w, a ) ) return true;
+	}
+	return false;
+}
+
+// A sample of the asked fields, skipped with changes=1 when it equals the actor's last one.
+static void MCP_RecSample( AActor *a, MCPRecActor &r )
+{
+	const MCPFieldCtx c = { MCP_ConsoleBody(), a->tid, -1 };
+	FString body;
+	body.Format( "id=%d", r.id );
+	for ( unsigned i = 0; i < g_recFields.Size(); i++ ) MCP_AppendField( body, MCP_FIELDS[g_recFields[i]], a, c );
+	// Compare, not ==: this FString has no operator==, so == would compare the two char pointers.
+	if ( g_recChanges && body.Compare( r.last ) == 0 ) return;
+	r.last = body;
+	MCP_RecWrite( "sample", body );
+}
+
+// Walks every live actor: adopts new matches of the watches in `which` (a seen row), samples the
+// tracked ones when `sample`, and forgets entries it didn't visit, so no freed address keeps an id.
+static void MCP_RecWalk( bool sample, int which )
+{
+	g_recGen++;
+	TThinkerIterator<AActor> it;
+	AActor *a;
+	while ( MCP_RecArmed && ( a = it.Next() ) != NULL )
+	{
+		MCPRecActor *r = MCP_RecFind( a );
+		if ( r == NULL )
+		{
+			if ( !MCP_RecWatched( a, which ) ) continue;
+			if ( ( r = MCP_RecTrack( a, "seen" ) ) == NULL ) return;
+		}
+		r->gen = g_recGen;
+		if ( r->id > 0 ) MCP_RecReconcilePsprites( a, r->id );
+		if ( !MCP_RecArmed ) return;
+		// Owned inventory is tracked for its events, but rides its owner: no samples.
+		if ( sample && r->id > 0 && !MCP_IsOwnedItem( a ) ) MCP_RecSample( a, *r );
+	}
+	if ( !MCP_RecArmed ) return;
+	for ( auto i = g_recIds.begin(); i != g_recIds.end(); )
+	{
+		if ( i->second.gen == g_recGen ) { ++i; continue; }
+		if ( i->second.id > 0 ) g_recLive--;
+		i = g_recIds.erase( i );
+	}
+}
+
+// Runs right after P_Ticker's maptime++, so once per simulated tic, after everything in it.
+void MCP_Rec_TickImpl()
+{
+	// Exactly one tic since the last one: anything else is a load or a new map.
+	if ( level.maptime != g_recLast + 1 || gamestate != GS_LEVEL || g_recMap.CompareNoCase( level.mapname ) != 0 )
+	{
+		MCP_RecDisarm( "level_change" );
+		return;
+	}
+	g_recLast = level.maptime;
+	g_recRan++;
+	MCP_RecWalk( g_recRan % g_recEvery == 0, MCP_REC_RESOLVED_WATCHES );
+	MCP_RecReadVars( false );
+	// Pausing here (run mode) stops the very next tic, so exactly the tics asked ran.
+	if ( MCP_RecArmed && g_recRan >= g_recTics ) MCP_RecDisarm( "done" );
+}
+
+void MCP_Rec_SpawnImpl( AActor *actor )
+{
+	// Before any guard, so a reused address never inherits an old id.
+	MCP_RecErase( actor );
+	if ( MCP_RecWatched( actor, MCP_REC_CLASS_WATCHES ) )
+		MCP_RecTrack( actor, ( g_recEvents & MCP_REC_SPAWN ) ? "spawn" : "seen" );
+}
+
+void MCP_Rec_DestroyImpl( AActor *actor )
+{
+	// Before any guard, which also makes a second Destroy a no-op.
+	const int id = MCP_RecErase( actor );
+	if ( id <= 0 || !( g_recEvents & MCP_REC_DESTROY ) ) return;
+	FString body;
+	body.Format( "id=%d x=%.1f y=%.1f z=%.1f", id, FIXED2FLOAT( actor->x ), FIXED2FLOAT( actor->y ), FIXED2FLOAT( actor->z ) );
+	MCP_RecWrite( "destroy", body );
+}
+
+static int MCP_FieldIndex( const char *name )
+{
+	for ( size_t i = 0; i < countof( MCP_FIELDS ); i++ )
+		if ( MCP_FIELDS[i].kind != 't' && stricmp( MCP_FIELDS[i].name, name ) == 0 ) return int( i );
+	return -1;
+}
+
+void MCP_Rec_StateImpl( AActor *actor )
+{
+	// The bit first: every SetState of every actor lands here while armed.
+	if ( !( g_recEvents & MCP_REC_STATE ) ) return;
+	const int id = MCP_RecIdOf( actor );
+	if ( id <= 0 ) return;
+	static int fields[countof( MCP_REC_STATE_FIELDS )] = { -1 };
+	if ( fields[0] < 0 )
+		for ( size_t i = 0; i < countof( MCP_REC_STATE_FIELDS ); i++ ) fields[i] = MCP_FieldIndex( MCP_REC_STATE_FIELDS[i] );
+	const MCPFieldCtx c = { NULL, actor->tid, -1 };
+	FString body;
+	body.Format( "id=%d", id );
+	for ( int f : fields ) MCP_AppendField( body, MCP_FIELDS[f], actor, c );
+	MCP_RecWrite( "state", body );
+}
+
+// src= and inf= as actor refs, each with srcid=/infid= when tracked; left out when NULL.
+static void MCP_RecAppendCause( FString &body, AActor *source, AActor *inflictor )
+{
+	const struct { const char *key; AActor *a; } causes[] = { { "src", source }, { "inf", inflictor } };
+	for ( const auto &cause : causes )
+	{
+		if ( cause.a == NULL ) continue;
+		body.AppendFormat( " %s=%s", cause.key, MCP_ActorRef( cause.a ).GetChars() );
+		const int id = MCP_RecIdOf( cause.a );
+		if ( id > 0 ) body.AppendFormat( " %sid=%d", cause.key, id );
+	}
+}
+
+// After both health subtractions, so hp= is the target's health after the hit.
+void MCP_Rec_DamageImpl( AActor *target, AActor *inflictor, AActor *source, int damage, const FName &mod )
+{
+	if ( target == NULL || !( g_recEvents & MCP_REC_DAMAGE ) ) return;
+	const int id = MCP_RecIdOf( target );
+	if ( id <= 0 && MCP_RecIdOf( source ) <= 0 && MCP_RecIdOf( inflictor ) <= 0 ) return;
+	FString body;
+	body.Format( "id=%d", id );
+	if ( id <= 0 ) body.AppendFormat( " tgt=%s", MCP_ActorRef( target ).GetChars() );
+	body.AppendFormat( " amount=%d type=%s", damage, mod.GetChars() );
+	MCP_RecAppendCause( body, source, inflictor );
+	body.AppendFormat( " hp=%d", target->health );
+	MCP_RecWrite( "damage", body );
+}
+
+void MCP_Rec_DeathImpl( AActor *actor, AActor *source, AActor *inflictor )
+{
+	const int id = MCP_RecIdOf( actor );
+	if ( id <= 0 || !( g_recEvents & MCP_REC_DEATH ) ) return;
+	FString body;
+	body.Format( "id=%d", id );
+	MCP_RecAppendCause( body, source, inflictor );
+	body.AppendFormat( " hp=%d", actor->health );
+	MCP_RecWrite( "death", body );
+}
+
+static bool MCP_RecScriptWanted( int num )
+{
+	if ( !g_recScripts ) return false;
+	if ( g_recAllScripts ) return true;
+	for ( unsigned i = 0; i < g_recScriptNums.Size(); i++ )
+		if ( g_recScriptNums[i] == num ) return true;
+	return false;
+}
+
+// script=<n>, or for a named script script=-1 with name= last (a name may hold spaces).
+static void MCP_RecAppendScript( FString &body, int num, const FString &rest )
+{
+	body.AppendFormat( " script=%d%s", ( num < 0 ) ? -1 : num, rest.GetChars() );
+	if ( num < 0 ) body.AppendFormat( " name=%s", FName( ENamedName( -num ) ).GetChars() );
+}
+
+void MCP_Rec_ScriptStartImpl( const void *script, int num, const char *module, AActor *activator )
+{
+	// Before any guard, so a reused address never inherits an old serial.
+	g_recSerials.erase( script );
+	if ( !MCP_RecScriptWanted( num ) ) return;
+	const int serial = ++g_recNextSerial;
+	g_recSerials[script] = serial;
+	FString body, rest;
+	body.Format( "serial=%d", serial );
+	rest.Format( " module=%s act=%s", module, ( activator != NULL ) ? MCP_ActorRef( activator ).GetChars() : "none" );
+	MCP_RecAppendScript( body, num, rest );
+	MCP_RecWrite( "script_start", body );
+}
+
+void MCP_Rec_ScriptEndImpl( const void *script, int num )
+{
+	// Before any guard; an end with no recorded start reads serial=0.
+	int serial = 0;
+	auto it = g_recSerials.find( script );
+	if ( it != g_recSerials.end() )
+	{
+		serial = it->second;
+		g_recSerials.erase( it );
+	}
+	if ( !MCP_RecScriptWanted( num ) ) return;
+	FString body;
+	body.Format( "serial=%d", serial );
+	MCP_RecAppendScript( body, num, "" );
+	MCP_RecWrite( "script_end", body );
+}
+
+static void MCP_RecSetupError( const FString &why )
+{
+	g_recBad = true;
+	Printf( "error %s\n", why.GetChars() );
+}
+
+static void MCP_RecAddVar( FCommandLine &argv )
+{
+	if ( g_recVars.Size() >= MCP_REC_MAX_VARS )
+	{
+		FString err;
+		err.Format( "too many vars (max %u)", MCP_REC_MAX_VARS );
+		MCP_RecSetupError( err );
+		return;
+	}
+	MCPRecVar v;
+	FString err;
+	if ( !MCP_AcsRefParse( argv, 2, v.ref, v.label, err ) ) { MCP_RecSetupError( err ); return; }
+	v.last = 0;
+	g_recVars.Push( v );
+	Printf( "MCP_REC var n=%u\n", g_recVars.Size() );
+}
+
+// Calls fn on each item of a comma list, stopping at the first it refuses (an empty item is refused).
+template <class F> static bool MCP_EachItem( const char *list, F fn )
+{
+	for ( const char *p = list; ; )
+	{
+		const char *comma = strchr( p, ',' );
+		const FString item( p, ( comma != NULL ) ? size_t( comma - p ) : strlen( p ) );
+		if ( item.IsEmpty() || !fn( item ) ) return false;
+		if ( comma == NULL ) return true;
+		p = comma + 1;
+	}
+}
+
+// fields <a,b,...> into MCP_FIELDS indices; false names the unknown one in err.
+static bool MCP_RecParseFields( const char *list, TArray<int> &out, FString &err )
+{
+	out.Clear();
+	return MCP_EachItem( list, [&]( const FString &item ) {
+		const int i = MCP_FieldIndex( item.GetChars() );
+		if ( i >= 0 ) { out.Push( i ); return true; }
+		err.Format( "unknown field %s (known:", item.GetChars() );
+		for ( size_t k = 0; k < countof( MCP_FIELDS ); k++ )
+			if ( MCP_FIELDS[k].kind != 't' ) err.AppendFormat( "%s%s", k ? "," : " ", MCP_FIELDS[k].name );
+		err += ")";
+		return false;
+	} );
+}
+
+// watch [class=<Name>] [tid=<n>] [player=<n>]
+static void MCP_RecAddWatch( FCommandLine &argv )
+{
+	const char *cls = MCP_StrArg( argv, "class" ), *tid = MCP_StrArg( argv, "tid" ), *player = MCP_StrArg( argv, "player" );
+	MCPRecWatch w = { NULL, 0, -1 };
+	FString err;
+	if ( cls == NULL && tid == NULL && player == NULL ) err = "usage: mcp_rec watch [class=<name>] [tid=<n>] [player=<n>]";
+	else if ( g_recNWatches >= MCP_REC_MAX_WATCHES ) err.Format( "too many watches (max %d)", MCP_REC_MAX_WATCHES );
+	else if ( cls != NULL && ( w.type = PClass::FindClass( cls ) ) == NULL ) err.Format( "unknown class %s", cls );
+	else if ( cls != NULL && !w.type->IsDescendantOf( RUNTIME_CLASS( AActor ) ) ) err.Format( "not an actor class %s", cls );
+	else if ( tid != NULL && ( !MCP_ParseInt( tid, w.tid ) || w.tid < 1 ) ) err = "tid wants a number above 0";
+	else if ( player != NULL && ( !MCP_ParseInt( player, w.player ) || w.player < 0 || w.player >= MAXPLAYERS ) )
+		err.Format( "player wants 0..%d", MAXPLAYERS - 1 );
+	if ( !err.IsEmpty() ) { MCP_RecSetupError( err ); return; }
+	g_recWatches[g_recNWatches++] = w;
+	Printf( "MCP_REC watch n=%d\n", g_recNWatches );
+}
+
+static void MCP_RecSetEvents( const char *list )
+{
+	int mask = 0;
+	FString err;
+	const bool ok = stricmp( list, "none" ) == 0 || MCP_EachItem( list, [&]( const FString &item ) {
+		for ( const auto &e : MCP_REC_EVENTS )
+			if ( item.CompareNoCase( e.name ) == 0 ) { mask |= e.bit; return true; }
+		err.Format( "unknown event %s (known: ", item.GetChars() );
+		for ( size_t i = 0; i < countof( MCP_REC_EVENTS ); i++ ) err.AppendFormat( "%s%s", i ? "," : "", MCP_REC_EVENTS[i].name );
+		err += ")";
+		return false;
+	} );
+	if ( !ok ) { MCP_RecSetupError( err.IsEmpty() ? FString( "usage: mcp_rec events <a,b,...|none>" ) : err ); return; }
+	g_recEvents = mask;
+	int n = 0;
+	for ( const auto &e : MCP_REC_EVENTS ) n += ( mask & e.bit ) ? 1 : 0;
+	Printf( "MCP_REC events n=%d\n", n );
+}
+
+// scripts <all|a,b,...>: numbers above 0 and names.
+static void MCP_RecSetScripts( const char *list )
+{
+	g_recScriptNums.Clear();
+	g_recAllScripts = stricmp( list, "all" ) == 0;
+	FString err;
+	const bool ok = g_recAllScripts || MCP_EachItem( list, [&]( const FString &item ) {
+		int num;
+		if ( !MCP_ParseInt( item.GetChars(), num ) ) num = -int( FName( item.GetChars() ) );
+		else if ( num < 1 ) { err = "a script number is above 0"; return false; }
+		if ( g_recScriptNums.Size() >= MCP_REC_MAX_SCRIPTS ) { err.Format( "too many scripts (max %u)", MCP_REC_MAX_SCRIPTS ); return false; }
+		g_recScriptNums.Push( num );
+		return true;
+	} );
+	if ( !ok )
+	{
+		g_recScripts = false;
+		MCP_RecSetupError( err.IsEmpty() ? FString( "usage: mcp_rec scripts <all|a,b,...>" ) : err );
+		return;
+	}
+	g_recScripts = true;
+	if ( g_recAllScripts ) Printf( "MCP_REC scripts n=all\n" );
+	else Printf( "MCP_REC scripts n=%u\n", g_recScriptNums.Size() );
+}
+
+// key=N within lo..hi, else def when absent; false when given but not such a number.
+static bool MCP_RangeArg( FCommandLine &argv, const char *key, int def, int lo, int hi, int &out )
+{
+	const char *v = MCP_StrArg( argv, key );
+	out = def;
+	return v == NULL || ( MCP_ParseInt( v, out ) && out >= lo && out <= hi );
+}
+
+// go tics=<N> [run=1] [every=<n>] [changes=0|1]
+static void MCP_RecGo( FCommandLine &argv )
+{
+	int tics, run, every, changes;
+	if ( MCP_RecArmed ) { Printf( "error armed: mcp_rec stop first\n" ); return; }
+	if ( g_recBad ) { Printf( "error bad setup: a line failed, mcp_rec clear first\n" ); return; }
+	if ( g_recNWatches == 0 && !g_recScripts && g_recVars.Size() == 0 ) { Printf( "error nothing to record: add a watch, scripts or a var\n" ); return; }
+	if ( !MCP_RangeArg( argv, "tics", 0, 1, MCP_REC_MAX_TICS, tics ) || tics < 1 || !MCP_RangeArg( argv, "run", 0, 0, 1, run ) ||
+		!MCP_RangeArg( argv, "every", 1, 1, MCP_REC_MAX_TICS, every ) || !MCP_RangeArg( argv, "changes", 1, 0, 1, changes ) )
+	{
+		Printf( "error usage: mcp_rec go tics=<1-%d> [run=1] [every=<n>] [changes=0|1]\n", MCP_REC_MAX_TICS );
+		return;
+	}
+	if ( NETWORK_InClientMode() ) { Printf( "error netgame client: record on the server\n" ); return; }
+	if ( NETWORK_GetState() == NETSTATE_SERVER && run )
+	{
+		Printf( "error netgame server: run=1 needs a pause, which a server ignores; arm without run\n" );
+		return;
+	}
+	if ( demoplayback ) { Printf( "error demo playback\n" ); return; }
+	if ( gamestate != GS_LEVEL ) { Printf( "error not in a level\n" ); return; }
+	if ( run && demorecording && !MCP_ClockFrozen )
+	{
+		Printf( "error recording: a pause would desync the demo; freeze the clock first\n" );
+		return;
+	}
+	for ( unsigned i = 0; i < g_recVars.Size(); i++ )
+	{
+		int value;
+		if ( !MCP_AcsRefRead( g_recVars[i].ref, value ) ) { Printf( "error var %u stale: mcp_rec clear first\n", i + 1 ); return; }
+	}
+	FString err;
+	if ( !g_recFieldsSet ) MCP_RecParseFields( MCP_REC_DEFAULT_FIELDS, g_recFields, err );
+
+	g_recRows.Clear();
+	g_recIds.clear();
+	g_recSerials.clear();
+	g_recPsprites.clear();
+	g_recRan = g_recNextId = g_recNextSerial = g_recLive = g_recDropped = g_recUntracked = 0;
+	g_recTics = tics;
+	g_recRun = run != 0;
+	g_recEvery = every;
+	g_recChanges = changes != 0;
+	g_recReason = "-";
+	g_recStart = g_recLast = level.maptime;
+	g_recMap = level.mapname;
+	MCP_RecArmed = true;
+	// The baseline: every current match and its sample at this maptime.
+	MCP_RecWalk( true, MCP_REC_ALL_WATCHES );
+	MCP_RecReadVars( true );
+	// Unpaused on the game thread, so the first counted tic is the next one that runs.
+	if ( g_recRun && !MCP_ClockFrozen ) paused = 0;
+	Printf( "MCP_REC armed watches=%d tracked=%d vars=%u tics=%d maptime=%d\n", g_recNWatches, g_recNextId, g_recVars.Size(), tics, level.maptime );
+}
+
+// dump <path>: the file's name must start with mcp-rec-, so the CCMD is no general file writer.
+static void MCP_RecDump( FCommandLine &argv )
+{
+	if ( argv.argc() < 3 ) { Printf( "error usage: mcp_rec dump <path>\n" ); return; }
+	const char *path = argv[2], *name = path;
+	for ( const char *p = path; *p != '\0'; p++ )
+		if ( *p == '/' || *p == '\\' ) name = p + 1;
+	if ( strncmp( name, "mcp-rec-", 8 ) != 0 ) { Printf( "error dump writes only a file named mcp-rec-*\n" ); return; }
+	if ( MCP_RecArmed && !MCP_RecSameLevel() ) MCP_RecDisarm( "level_change" );
+	// The sample columns, for a reader that didn't arm the recording itself.
+	FString fields;
+	for ( unsigned i = 0; i < g_recFields.Size(); i++ ) fields.AppendFormat( "%s%s", i ? "," : "", MCP_FIELDS[g_recFields[i]].name );
+	FILE *f = fopen( path, "w" );
+	if ( f == NULL ) { Printf( "error cannot write %s\n", path ); return; }
+	fprintf( f, "MCP_RECFILE v=1 engine=zandronum map=%s start=%d ran=%d rows=%u dropped=%d fields=%s reason=%s\n",
+		g_recMap.IsEmpty() ? "-" : g_recMap.GetChars(), g_recStart, g_recRan, g_recRows.Size(), g_recDropped,
+		fields.IsEmpty() ? "-" : fields.GetChars(), g_recReason );
+	for ( unsigned i = 0; i < g_recRows.Size(); i++ ) fprintf( f, "%s\n", g_recRows[i].GetChars() );
+	const bool ok = ferror( f ) == 0;
+	if ( fclose( f ) != 0 || !ok ) { Printf( "error cannot write %s\n", path ); return; }
+	Printf( "MCP_REC wrote rows=%u dropped=%d\n", g_recRows.Size(), g_recDropped );
+}
+
+static void MCP_RecClear()
+{
+	g_recPsprites.clear();
+	g_recNWatches = 0;
+	g_recFields.Clear();
+	g_recFieldsSet = false;
+	g_recEvents = MCP_REC_DEFAULT_EVENTS;
+	g_recScripts = g_recAllScripts = false;
+	g_recScriptNums.Clear();
+	g_recBad = false;
+	g_recVars.Clear();
+	g_recRows.Clear();
+	g_recTics = g_recRan = g_recStart = g_recNextId = g_recDropped = g_recUntracked = 0;
+	g_recReason = "-";
+	g_recMap = "";
+	Printf( "MCP_REC cleared\n" );
+}
+
+// Unsafe: dump writes a file at the path it names, so menus and mod scripts can't run it.
+UNSAFE_CCMD( mcp_rec )
+{
+	const char *sub = ( argv.argc() >= 2 ) ? argv[1] : "";
+	const char *arg = ( argv.argc() >= 3 ) ? argv[2] : NULL;
+	const bool setup = stricmp( sub, "watch" ) == 0 || stricmp( sub, "fields" ) == 0 || stricmp( sub, "events" ) == 0 ||
+		stricmp( sub, "scripts" ) == 0 || stricmp( sub, "var" ) == 0;
+	// Not marked bad: the armed recording isn't the setup being edited.
+	if ( MCP_RecArmed && ( setup || stricmp( sub, "clear" ) == 0 ) ) { Printf( "error armed: mcp_rec stop first\n" ); return; }
+	if ( setup && arg == NULL ) { MCP_RecSetupError( FString( "usage: mcp_rec " ) + sub + " <...>" ); return; }
+
+	if ( stricmp( sub, "clear" ) == 0 ) MCP_RecClear();
+	else if ( stricmp( sub, "watch" ) == 0 ) MCP_RecAddWatch( argv );
+	else if ( stricmp( sub, "var" ) == 0 ) MCP_RecAddVar( argv );
+	else if ( stricmp( sub, "fields" ) == 0 )
+	{
+		FString err;
+		if ( !MCP_RecParseFields( arg, g_recFields, err ) )
+		{
+			MCP_RecSetupError( err.IsEmpty() ? FString( "usage: mcp_rec fields <a,b,...>" ) : err );
+			return;
+		}
+		g_recFieldsSet = true;
+		Printf( "MCP_REC fields n=%u\n", g_recFields.Size() );
+	}
+	else if ( stricmp( sub, "events" ) == 0 ) MCP_RecSetEvents( arg );
+	else if ( stricmp( sub, "scripts" ) == 0 ) MCP_RecSetScripts( arg );
+	else if ( stricmp( sub, "go" ) == 0 ) MCP_RecGo( argv );
+	else if ( stricmp( sub, "status" ) == 0 )
+	{
+		if ( MCP_RecArmed && !MCP_RecSameLevel() ) MCP_RecDisarm( "level_change" );
+		Printf( "MCP_REC active=%d ran=%d tics=%d rows=%u dropped=%d tracked=%d untracked=%d maptime=%d reason=%s\n",
+			MCP_RecArmed ? 1 : 0, g_recRan, g_recTics, g_recRows.Size(), g_recDropped, g_recNextId, g_recUntracked,
+			level.maptime, g_recReason );
+	}
+	else if ( stricmp( sub, "dump" ) == 0 ) MCP_RecDump( argv );
+	else if ( stricmp( sub, "stop" ) == 0 )
+	{
+		if ( !MCP_RecArmed ) { Printf( "MCP_REC idle\n" ); return; }
+		MCP_RecDisarm( "stopped" );
+		Printf( "MCP_REC stopped ran=%d\n", g_recRan );
+	}
+	else Printf( "error usage: mcp_rec clear|watch|fields|events|scripts|var|go|status|dump|stop\n" );
+}
+
+// --- mcp_checkpoint: a replay-stable digest of the playsim, for demo sync checks.
+enum { MCP_CP_POS, MCP_CP_VEL, MCP_CP_ANGLE, MCP_CP_HEALTH, MCP_CP_TICS, MCP_CP_STATE, MCP_CP_INV, MCP_CP_GROUPS };
+static const char *const MCP_CP_NAMES[MCP_CP_GROUPS] = { "pos", "vel", "angle", "health", "tics", "state", "inv" };
+static const DWORD MCP_FNV_BASIS = 2166136261u;
+
+static void MCP_Fnv( DWORD &h, const void *data, size_t size )
+{
+	for ( size_t i = 0; i < size; i++ ) h = ( h ^ static_cast<const BYTE *>( data )[i] ) * 16777619u;
+}
+template <class T> static void MCP_FnvValue( DWORD &h, const T &v ) { MCP_Fnv( h, &v, sizeof( v ) ); }
+static void MCP_FnvString( DWORD &h, const char *s ) { MCP_Fnv( h, s, strlen( s ) + 1 ); }
+
+// One actor's group hashes, by sprite name and frame rather than the load-order sprite index or the
+// state pointer and class, so a cosmetic replacement hashes the same.
+static void MCP_CheckpointGroups( AActor *a, DWORD g[MCP_CP_GROUPS], FString &sprite, FString &frame )
+{
+	for ( int i = 0; i < MCP_CP_GROUPS; i++ ) g[i] = MCP_FNV_BASIS;
+	MCP_FnvValue( g[MCP_CP_POS], a->x ); MCP_FnvValue( g[MCP_CP_POS], a->y ); MCP_FnvValue( g[MCP_CP_POS], a->z );
+	MCP_FnvValue( g[MCP_CP_VEL], a->velx ); MCP_FnvValue( g[MCP_CP_VEL], a->vely ); MCP_FnvValue( g[MCP_CP_VEL], a->velz );
+	MCP_FnvValue( g[MCP_CP_ANGLE], a->angle ); MCP_FnvValue( g[MCP_CP_ANGLE], a->pitch );
+	MCP_FnvValue( g[MCP_CP_HEALTH], a->health );
+	MCP_FnvValue( g[MCP_CP_TICS], a->tics );
+	static const int spriteField = MCP_FieldIndex( "sprite" ), frameField = MCP_FieldIndex( "frame" );
+	const MCPFieldCtx c = { NULL, 0, -1 };
+	if ( !MCP_FIELDS[spriteField].value( sprite, a, c ) || !MCP_FIELDS[frameField].value( frame, a, c ) )
+	{
+		sprite = "----";
+		frame = "-";
+	}
+	MCP_FnvString( g[MCP_CP_STATE], sprite );
+	MCP_FnvString( g[MCP_CP_STATE], frame );
+	for ( AInventory *item = a->Inventory; item != NULL; item = item->Inventory )
+	{
+		MCP_FnvString( g[MCP_CP_INV], item->GetClass()->TypeName.GetChars() );
+		MCP_FnvValue( g[MCP_CP_INV], item->Amount );
+	}
+}
+
+// mcp_checkpoint [rows]: read-only, so it works frozen, paused or live.
+CCMD( mcp_checkpoint )
+{
+	const bool rows = argv.argc() >= 2 && stricmp( argv[1], "rows" ) == 0;
+	if ( argv.argc() >= 2 && !rows ) { Printf( "error usage: mcp_checkpoint [rows]\n" ); return; }
+	// GL dynamic lights are animated by the renderer per frame, not by the sim.
+	static const PClass *dynLight = PClass::FindClass( "DynamicLight" );
+	DWORD total[MCP_CP_GROUPS], all = MCP_FNV_BASIS;
+	for ( int i = 0; i < MCP_CP_GROUPS; i++ ) total[i] = MCP_FNV_BASIS;
+	unsigned n = 0;
+	TArray<FString> rowLines;
+	TThinkerIterator<AActor> it;
+	for ( AActor *a; ( a = it.Next() ) != NULL; )
+	{
+		if ( ( dynLight != NULL && a->IsKindOf( dynLight ) ) || MCP_IsOwnedItem( a ) ) continue;
+		DWORD g[MCP_CP_GROUPS], h = MCP_FNV_BASIS;
+		FString sprite, frame;
+		MCP_CheckpointGroups( a, g, sprite, frame );
+		for ( int i = 0; i < MCP_CP_GROUPS; i++ )
+		{
+			MCP_FnvValue( total[i], g[i] );
+			MCP_FnvValue( h, g[i] );
+		}
+		MCP_FnvValue( all, h );
+		if ( rows )
+		{
+			FString &line = rowLines[rowLines.Push( FString() )];
+			line.Format( "MCP_CHECKPOINT_ROW i=%u class=%s h=%08x x=%08x y=%08x z=%08x vx=%08x vy=%08x vz=%08x angle=%08x pitch=%08x "
+				"health=%d tics=%d sprite=%s frame=%s", n, a->GetClass()->TypeName.GetChars(), h, DWORD( a->x ), DWORD( a->y ),
+				DWORD( a->z ), DWORD( a->velx ), DWORD( a->vely ), DWORD( a->velz ), DWORD( a->angle ), DWORD( a->pitch ),
+				a->health, a->tics, sprite.GetChars(), frame.GetChars() );
+		}
+		n++;
+	}
+	FString line;
+	line.Format( "MCP_CHECKPOINT maptime=%d actors=%u rng=%08x hash=%08x", level.maptime, n, DWORD( FRandom::StaticSumSeeds() ), all );
+	for ( int i = 0; i < MCP_CP_GROUPS; i++ ) line.AppendFormat( " %s=%08x", MCP_CP_NAMES[i], total[i] );
+	Printf( "%s\n", line.GetChars() );
+	for ( unsigned i = 0; i < rowLines.Size(); i++ ) Printf( "%s\n", rowLines[i].GetChars() );
 }

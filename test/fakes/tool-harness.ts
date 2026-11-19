@@ -52,7 +52,14 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
     },
     compileAcs: nope("compileAcs"),
     removeDir: nope("removeDir"),
+    mkdtemp: nope("mkdtemp"),
+    removeFile: nope("removeFile"),
     resolveMapSlot: nope("resolveMapSlot"),
+    mkdirp: nope("mkdirp"),
+    sha1Of: nope("sha1Of"),
+    gitRevOf: () => undefined,
+    writeFileAtomic: nope("writeFileAtomic"),
+    now: () => new Date("2026-11-09T12:00:00Z"),
     ...overrides,
   };
   return io;

@@ -1,0 +1,3 @@
+MCP_INPUT armed segs=1 tics=0 limit=350 maptime=256
+MCP_INPUT_SEG 1 maptime=256
+MCP_INPUT_END reason=done consumed=18 maptime=274

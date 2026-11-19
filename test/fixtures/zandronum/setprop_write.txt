@@ -1,1 +1,1 @@
-setprop prop=health old=60 new=50 class=DoomImp tid=269827475 hp=50 spawnhp=60 x=-800.0 y=828.0 z=8.0 angle=0.0 pitch=0.0 flags=mso name=DoomImp
+setprop prop=health old=60 new=50 class=DoomImp tid=568587182 hp=50 spawnhp=60 x=-800.0 y=828.0 z=8.0 angle=0.0 pitch=0.0 flags=mso name=DoomImp

@@ -1,5 +1,21 @@
 import path from "node:path";
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import {
   EngineExitedError,
   InstanceRegistry,
@@ -26,8 +42,9 @@ import { resolveMapSlot, type MapSlotRequest, type MapSlotResult } from "./acs/p
 import { collectAcsModulesAt, type AcsModule } from "./acs/collect.js";
 import { importsOf, parseProfile, profilesFor, type RunAcsProfile } from "./acs/profiles.js";
 import { readMapFromContainer, type MapData } from "./map/index.js";
-import { captureScreenshot } from "./screenshot/capture.js";
+import { captureScreenshot, readShot } from "./screenshot/capture.js";
 import type { BridgeClient } from "./bridge/transport.js";
+import type { PlayedDemo } from "./demo/play.js";
 import { envName, type EngineAdapter } from "./adapter.js";
 
 /** Everything the tools need from the environment, resolved once at startup. */
@@ -48,6 +65,8 @@ export interface ServerConfig {
   runAcsProfiles?: string[];
   /** The gamelog prefix launches use (`gamelogPrefix`); its dir holds earlier sessions' gamelogs. */
   gamelog?: string;
+  /** Where a bare `record` name lands: `<PREFIX>_DEMO_DIR`, else the exe's dir. */
+  demoDir?: string;
 }
 
 /** The server's config from `<PREFIX>_*` env vars, so MCP clients can pass it in their config. */
@@ -70,6 +89,7 @@ export function configFromEnv(engine: EngineAdapter, env: NodeJS.ProcessEnv): Se
     acc: get("ACC"),
     runAcsProfiles: profiles.length > 0 ? profiles : undefined,
     gamelog: gamelogPrefix(engine, exe, env),
+    demoDir: get("DEMO_DIR") ?? (exe && path.dirname(exe)),
   };
 }
 
@@ -86,6 +106,12 @@ export interface LaunchArgs {
   config?: "shared" | "isolated";
   /** false: return once spawned; the instance attaches on first use. */
   wait?: boolean;
+  /** The absolute `.lmp` path a `-record` launch writes, so tools know the instance records. */
+  record?: string;
+  /** The absolute savegame path a launch starts from (`-loadgame`). */
+  save?: string;
+  /** Pin `use_mouse` (`buildLaunchArgs`). */
+  mouse?: boolean;
 }
 
 /** What `relaunch_instance` reuses: the last launch's options and where it ran. */
@@ -94,6 +120,8 @@ export interface LastLaunch {
   port: number;
   logFile: string;
   enginePid?: number;
+  /** The bridge version its hello gave, once attached. */
+  bridge?: string;
 }
 
 /**
@@ -122,6 +150,8 @@ export interface ContextIo {
     dir: string,
     opts?: { name?: string; keep?: boolean },
   ) => Promise<{ base64: string; path: string }>;
+  /** Wait for a shot the engine was told to write elsewhere (`<dir>/<name>.png`) and read it; deleted unless `keep`. */
+  readShot: (dir: string, name: string, keep: boolean) => Promise<{ base64: string; path: string }>;
   findFreePort: (start: number) => Promise<number>;
   /** Whether host:port accepts a connection right now (one try). */
   portOpen: (host: string, port: number) => Promise<boolean>;
@@ -130,8 +160,50 @@ export interface ContextIo {
   launchIo: LaunchIo;
   compileAcs: (req: CompileRequest) => CompileResult;
   removeDir: (dir: string) => void;
+  /** A fresh temp dir named `prefix` plus a unique suffix (mkdtempSync). */
+  mkdtemp: (prefix: string) => string;
+  /** Delete a file; a missing one is no error. */
+  removeFile: (p: string) => void;
   /** The map-var tools' `sourceFile` lookup: two compiles in a temp dir it removes itself. */
-  resolveMapSlot: (req: MapSlotRequest) => MapSlotResult;
+  resolveMapSlot: (req: MapSlotRequest) => MapSlotResult[];
+  mkdirp: (dir: string) => void;
+  /** A file's sha1 and size, read in chunks. */
+  sha1Of: (p: string) => { sha1: string; bytes: number };
+  /** The git HEAD and dirtiness of the work tree holding `p`, or undefined outside one. */
+  gitRevOf: (p: string) => { rev: string; dirty: boolean } | undefined;
+  /** Write via a temp file and rename, so a reader never sees a half-written file. */
+  writeFileAtomic: (p: string, data: string | Buffer) => void;
+  now: () => Date;
+}
+
+function sha1File(p: string): { sha1: string; bytes: number } {
+  const hash = createHash("sha1");
+  const buf = Buffer.alloc(1 << 20);
+  const fd = openSync(p, "r");
+  let bytes = 0;
+  try {
+    for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0; bytes += n) hash.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return { sha1: hash.digest("hex"), bytes };
+}
+
+function gitRev(p: string): { rev: string; dirty: boolean } | undefined {
+  const dir = statSync(p).isDirectory() ? p : path.dirname(p);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+  try {
+    return { rev: git("rev-parse", "HEAD").trim(), dirty: git("status", "--porcelain").trim() !== "" };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeAtomic(p: string, data: string | Buffer): void {
+  const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, data, { flag: "wx" });
+  renameSync(tmp, p);
 }
 
 export const defaultContextIo: ContextIo = {
@@ -164,6 +236,7 @@ export const defaultContextIo: ContextIo = {
     return () => clearInterval(timer);
   },
   capture: (client, dir, opts) => captureScreenshot(client, { dir, ...opts }),
+  readShot: (dir, name, keep) => readShot({ dir, name, keep }),
   findFreePort: (start) => findFreePort(start),
   portOpen: (host, port) => tryConnect(host, port),
   hasBridge: (exe, marker) => hasBridge(exe, marker),
@@ -171,7 +244,14 @@ export const defaultContextIo: ContextIo = {
   launchIo: defaultLaunchIo,
   compileAcs: (req) => compileAcs(req),
   removeDir: (dir) => removeDir(dir),
+  mkdtemp: (prefix) => mkdtempSync(prefix),
+  removeFile: (p) => rmSync(p, { force: true }),
   resolveMapSlot: (req) => resolveMapSlot(req, { readFile: (p) => readFileSync(p), compile: defaultCompileDeps, removeDir }),
+  mkdirp: (dir) => void mkdirSync(dir, { recursive: true }),
+  sha1Of: sha1File,
+  gitRevOf: gitRev,
+  writeFileAtomic: writeAtomic,
+  now: () => new Date(),
 };
 
 /**
@@ -202,6 +282,7 @@ export class ServerContext {
   private readonly enginePids = new Map<number, number>();
   /** Each instance's last launch, kept past kill/reset/crash for `relaunch_instance`. */
   private readonly lastLaunch = new Map<number, LastLaunch>();
+  private readonly demos = new Map<number, PlayedDemo>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
   private readonly acsModules = new Map<string, { stamp: string; modules: AcsModule[] }>();
@@ -271,9 +352,24 @@ export class ServerContext {
     this.lastLaunch.delete(instance);
   }
 
+  /** Keep the bridge version an instance's hello gave, for its recording's sidecar. */
+  rememberBridge(instance: number, client: BridgeClient): void {
+    const last = this.lastLaunch.get(instance);
+    if (last && client.bridgeVersion !== undefined) last.bridge = client.bridgeVersion;
+  }
+
   /** The engine PID recorded for the instance, if any. */
   enginePidFor(instance: number): number | undefined {
     return this.enginePids.get(instance);
+  }
+
+  /** The demo `play_demo` last started on an instance, for `seek_demo`'s rewind. */
+  rememberDemo(instance: number, demo: PlayedDemo): void {
+    this.demos.set(instance, demo);
+  }
+
+  demoFor(instance: number): PlayedDemo | undefined {
+    return this.demos.get(instance);
   }
 
   // forgetInstance/forgetAll keep lastLaunch: relaunch must work after kill_instance and reset.
@@ -281,12 +377,14 @@ export class ServerContext {
     this.boundPorts.delete(instance);
     this.logFiles.delete(instance);
     this.enginePids.delete(instance);
+    this.demos.delete(instance);
   }
 
   forgetAll(): void {
     this.boundPorts.clear();
     this.logFiles.clear();
     this.enginePids.clear();
+    this.demos.clear();
   }
 
   /** Where an instance's engine console log lives, if it can be determined. */
@@ -360,6 +458,7 @@ export class ServerContext {
               `is gone and something else took its port. Run the "reset" tool, then relaunch.`,
           );
         }
+        this.rememberBridge(instance, client);
         return client;
       })
       .finally(() => this.attaching.delete(instance));

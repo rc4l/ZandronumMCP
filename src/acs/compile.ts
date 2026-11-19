@@ -214,6 +214,22 @@ export function consolePath(
   return { token: `"${s}"` };
 }
 
+/** `p`, a file in the temp dir `dir`, as a console token; refused with the TMPDIR advice when it can't be one. */
+export function tempPathToken(
+  p: string,
+  dir: string,
+  ansiPaths: boolean,
+  platform: NodeJS.Platform = process.platform,
+): { token: string } | { refused: string } {
+  const tok = consolePath(p, ansiPaths, platform);
+  if ("token" in tok) return tok;
+  return {
+    refused:
+      `temp dir ${JSON.stringify(dir)} can't be passed as a console token: ${tok.refused}. ` +
+      "Set TMPDIR (TEMP on Windows) in the MCP server's env to an existing folder without that; plain ASCII is safest.",
+  };
+}
+
 /** Run a located compiler on `main` in `cwd`: a `-i` per include dir, then zt-bcc's lib/ when they don't reach it. */
 function runCompiler(
   compiler: AcsCompiler,
@@ -246,16 +262,8 @@ export function compileFile(req: FileCompileRequest, deps: CompileDeps = default
 export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompileDeps): CompileResult {
   const dir = deps.mkdtemp(path.join(tmpdir(), "mcp-runacs-"));
   const object = path.join(dir, "snippet.o");
-  const tok = consolePath(object, req.engine.ansiPaths, deps.platform);
-  if ("refused" in tok) {
-    return {
-      ok: false,
-      dir,
-      diagnostics:
-        `temp dir ${JSON.stringify(dir)} can't be passed as a console token: ${tok.refused}. ` +
-        "Set TMPDIR (TEMP on Windows) in the MCP server's env to an existing folder without that; plain ASCII is safest.",
-    };
-  }
+  const tok = tempPathToken(object, dir, req.engine.ansiPaths, deps.platform);
+  if ("refused" in tok) return { ok: false, dir, diagnostics: tok.refused };
   const found = locate(req, deps, "run_acs");
   if ("missing" in found) return { ok: false, dir, diagnostics: found.missing };
   let main = "snippet.acs";

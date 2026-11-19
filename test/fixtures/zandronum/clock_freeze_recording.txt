@@ -1,0 +1,1 @@
+MCP_CLOCK frozen=1 gametic=64317 maptime=576 restore=1 jobs=1

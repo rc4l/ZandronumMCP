@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureScreenshot, screenshotName, type CaptureIo } from "../src/screenshot/capture.js";
+import { captureScreenshot, readShot, screenshotName, type CaptureIo } from "../src/screenshot/capture.js";
 import { CAPTURE_TAG, captureTag } from "../src/screenshot/tag.js";
 import type { BridgeClient } from "../src/bridge/transport.js";
 import { norm } from "./fakes/paths.js";
@@ -128,6 +128,15 @@ describe("captureScreenshot", () => {
     const shot = await captureScreenshot(client, { dir: "/d", name: "k", keep: true }, io);
     expect(shot.base64).toBe(Buffer.from("NEW").toString("base64"));
     expect(unlinked).toEqual([norm("/d/k.png")]);
+  });
+
+  it("reads a shot something else issued, keeping it when asked", async () => {
+    const dir = freshDir();
+    const path = join(dir, "issued.png");
+    writeFileSync(path, Buffer.from("FROZEN"));
+    const shot = await readShot({ dir, name: "issued", keep: true });
+    expect(shot).toEqual({ name: "issued", path, base64: Buffer.from("FROZEN").toString("base64") });
+    expect(existsSync(path)).toBe(true);
   });
 
   it("reads then deletes a real file via the default IO", async () => {

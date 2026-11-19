@@ -201,6 +201,12 @@ export interface LaunchOptions {
   extraArgs?: string[];
   /** Engine config file (-config). See configPathFor. */
   config?: string;
+  /** Absolute `.lmp` path for `-record`. */
+  record?: string;
+  /** Savegame path for `-loadgame`. */
+  save?: string;
+  /** Pin `use_mouse`; defaults to on for a recording (a human plays the take), else left as the config has it. */
+  mouse?: boolean;
 }
 
 /** Where engine args carry `flag` (`-config`, `+name`, `-host`; case-insensitive), or -1. */
@@ -233,12 +239,16 @@ export function buildLaunchArgs(
   if (o.iwad && !hasArg(o.extraArgs, "-iwad")) args.push("-iwad", o.iwad);
   if (o.files?.length) args.push("-file", ...o.files);
   if (o.skill !== undefined) args.push("-skill", String(o.skill));
+  if (o.save) args.push(...engine.loadSaveArgs(o.save, o.extraArgs));
+  if (o.record) args.push("-record", o.record);
   // All +set pins precede +map, since +args run in argv order and a map launch would otherwise load with the saved values.
   //
   // Always pin the video mode so an agent-driven instance never inherits the
   // saved fullscreen cvar (it's CVAR_ARCHIVE) and takes over the user's
   // screen. Windowed unless fullscreen is explicitly requested.
   args.push("+set", engine.fullscreenCvar, o.fullscreen ? "1" : "0");
+  // use_mouse only on request: `mouse`, and on by default for a recording, which a human plays.
+  if (o.mouse !== undefined || o.record !== undefined) args.push("+set", "use_mouse", o.mouse === false ? "0" : "1");
   if (o.width !== undefined) args.push("+set", "vid_defwidth", String(o.width));
   if (o.height !== undefined) args.push("+set", "vid_defheight", String(o.height));
   args.push(...engine.launchPins(o, env));

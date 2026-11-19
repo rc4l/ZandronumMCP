@@ -115,7 +115,9 @@ function callProblem(port: Pick<ScenarioPort<unknown>, "shape" | "refusal">, ste
   if (!("instance" in shape)) return "takes no instance; call it on its own";
   if ("instance" in step.args) return "instance is the scenario's; drop it from args";
   const parsed = parseArgs(shape, { ...step.args, instance });
-  return "error" in parsed ? parsed.error : undefined;
+  if ("error" in parsed) return parsed.error;
+  // A tool whose output arg picks inline images (frame_sweep) can't return them from a scenario.
+  return parsed.args.output === "image" ? `output "image" replies with inline images; pass output: "file"` : undefined;
 }
 
 /** Every call step's problem, one line each naming the step (i, or i.j in a repeat) and its tool. */

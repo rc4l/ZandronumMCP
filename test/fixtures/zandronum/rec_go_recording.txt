@@ -1,0 +1,6 @@
+MCP_REC cleared
+MCP_REC watch n=1
+error recording: a pause would desync the demo; freeze the clock first
+MCP_CLOCK frozen=0 gametic=609 maptime=609 frac=1/1 interp=1 jobs=0 steps=0 shots=0 reason=- frametime=0 framems=0 armed=0
+MCP_CLOCK frozen=1 gametic=609 maptime=609 restore=0 jobs=1
+MCP_CLOCK frozen=1 gametic=610 maptime=610 frac=1/1 interp=1 jobs=0 steps=1 shots=0 reason=done frametime=0 framems=0 armed=0

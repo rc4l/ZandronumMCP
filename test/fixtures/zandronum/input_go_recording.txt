@@ -1,0 +1,3 @@
+MCP_INPUT cleared
+MCP_INPUT seg 1 total=3
+error recording: a pause would desync the demo; freeze the clock first

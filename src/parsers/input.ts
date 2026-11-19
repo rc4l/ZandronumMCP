@@ -8,8 +8,24 @@ export interface InputStatus {
   total: number;
   seg: number;
   maptime: number;
-  /** done, level_change, stopped, or "-" while armed or before any run. */
+  /** done, level_change, stopped, stuck, timeout, died, target_gone, or "-" while armed or before any run. */
   reason: string;
+  /** Entries completed; absent on bridges without walk entries, like the fields below. */
+  done?: number;
+  /** Tics the run may consume. */
+  limit?: number;
+  /** 1 where go would refuse as a netgame. */
+  net?: boolean;
+  /** The last walk's distance to its target's centre, and the target. */
+  dist?: number;
+  target?: { x: number; y: number };
+}
+
+const optNumber = (v: unknown) => (v === undefined || v === "-" ? undefined : Number(v));
+
+function optPoint(v: unknown): { x: number; y: number } | undefined {
+  const m = /^(-?[\d.]+),(-?[\d.]+)$/.exec(String(v));
+  return m ? { x: Number(m[1]), y: Number(m[2]) } : undefined;
 }
 
 /** The `MCP_INPUT active=...` status line, or undefined when the reply has none. */
@@ -20,13 +36,25 @@ export function parseInputStatus(lines: string[]): InputStatus | undefined {
     active: row.active === 1,
     ...kvNumbers(row, ["consumed", "total", "seg", "maptime"]),
     reason: String(row.reason),
+    ...(row.done !== undefined ? { done: Number(row.done) } : {}),
+    ...(row.limit !== undefined ? { limit: Number(row.limit) } : {}),
+    ...(row.net !== undefined ? { net: row.net === 1 } : {}),
+    ...(optNumber(row.dist) !== undefined ? { dist: optNumber(row.dist) } : {}),
+    ...(optPoint(row.target) ? { target: optPoint(row.target) } : {}),
   };
 }
 
 /** The `MCP_INPUT armed ...` line `go` prints, or undefined when it refused. */
-export function parseInputArmed(lines: string[]): { segs: number; tics: number; maptime: number } | undefined {
+export function parseInputArmed(lines: string[]): { segs: number; tics: number; limit?: number; maptime: number } | undefined {
   const row = parseKvLines(lines, "MCP_INPUT armed")[0];
-  return row && { segs: Number(row.segs), tics: Number(row.tics), maptime: Number(row.maptime) };
+  return (
+    row && {
+      segs: Number(row.segs),
+      tics: Number(row.tics),
+      ...(row.limit !== undefined ? { limit: Number(row.limit) } : {}),
+      maptime: Number(row.maptime),
+    }
+  );
 }
 
 const ROW_NUMBERS = ["maptime", "seg", "x", "y", "z", "angle", "pitch", "momx", "momy", "momz", "health"] as const;

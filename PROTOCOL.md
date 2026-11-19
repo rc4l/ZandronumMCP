@@ -18,7 +18,7 @@ The single source of truth for the wire contract between the **engine bridge**
 `hello` — sent once, immediately on connect. `caps` lists what the bridge
 supports so the client can degrade gracefully:
 ```json
-{"v":1,"t":"hello","engine":"<id>","bridge":"<version>","pid":12345,"caps":["cmd","event","time","status","input","runscript","spawnfind","runacsname","mapslot"]}
+{"v":1,"t":"hello","engine":"<id>","bridge":"<version>","pid":12345,"caps":["cmd","event","time","status","input","runscript","spawnfind","runacsname","mapslot","rec","clock","walk","frametime","recvars","recplayer","rechost","demo"]}
 ```
 
 `engine` is the engine adapter's `id` (`zandronum`); `bridge` is that
@@ -36,7 +36,19 @@ takes `find=`; a bridge without it ignores the key, so `summon_at` refuses
 `findSpot` there instead of sending it), `runacsname` (`mcp_runacs` takes
 `name=1`; without it `run_acs` sends a string script bare and refuses a name
 made of digits, which an older overlay would run as a number), `mapslot` (the
-`mcp_mapslot` CCMD under ACS; without it the map-var tools refuse `sourceFile`).
+`mcp_mapslot` CCMD under ACS; without it the map-var tools refuse `sourceFile`),
+`rec` (the `mcp_rec` CCMD under Per-tic recorder, which `record` and
+`record_read` need), `clock` (the `mcp_clock` CCMD under Frozen clock, which
+`freeze_time` and `frame_sweep` need, and the `frozen` status field; without it
+the host never treats time as frozen), `walk` (`mcp_input walk` entries and the
+`go` limits under Scripted input, which `move_to`'s engine mode needs; without
+it `move_to` steers from the host), `recvars` (`mcp_rec var` samples ACS variables),
+`recplayer` (player input/weapon fields and opt-in psprite events), `rechost`
+(passive authoritative server recording; clients still refused),
+`frametime` (`mcp_clock frametime` holds
+render-time sources per tic while frozen; `freeze_time frameTime: true` requires it),
+`demo` (`mcp_clock freeze demo`, the frozen clock holding an offline demo, and
+`mcp_checkpoint` under Frozen clock).
 
 `out` — one line of console output, streamed asynchronously:
 ```json
@@ -60,7 +72,8 @@ Fire-and-forget; the engine sends no reply. Menus read GUI key events
 `setpause` — set the engine's master pause flag directly (requires the `time`
 cap). Fire-and-forget; no reply. `paused` is `1` to pause, `0` to resume.
 A single-player game can force-pause on window defocus, so the MCP drives the
-flag itself to keep a backgrounded instance ticking:
+flag itself to keep a backgrounded instance ticking. While the clock is frozen
+it sets the pause the thaw restores instead, so `paused` stays 0:
 ```json
 {"v":1,"t":"setpause","paused":0}
 ```
@@ -81,8 +94,9 @@ as the correlator instead of `echo <sentinel>` — the same sentinel value, but 
 CCMD echoes it back as the leading token of a single line also carrying the
 engine's state (`<sentinel> paused=0 menu=off console=up gamestate=level
 player=alive spectating=0 demo=0 automap=0 chat=0 demorec=0 pending=0 maptime=35
-acstemp=0 health=100 armor=0 cheats=0`, with `health`/`armor`/`cheats`/`menuclass`
-present only when there's a live player actor / an open menu). `pending` comes before `maptime`, and an overlay
+acstemp=0 frozen=0 health=100 armor=0 cheats=0`, with `health`/`armor`/`cheats`/`menuclass`
+present only when there's a live player actor / an open menu, and `frozen` only
+on a bridge with the `clock` cap). `pending` comes before `maptime`, and an overlay
 may also send the optional `pauseext` after it. The host acts on `pending` and
 `pauseext` only when present, so a line without them reads as no pending load and no
 focus-loss pause.
@@ -101,6 +115,7 @@ focus-loss pause.
 | `maptime` | integer | tics run on the current map; `ensure_live`/`step_until`/`move_to` watch it move |
 | `pauseext` | `0`, `1` | Optional, from an overlay whose engine has a separate focus-loss pause: while set no tic runs, so queued CCMDs and a pending load wait; `mcp_unblock` clears it |
 | `acstemp` | integer | `run_acs` snippet modules loaded in this level; `save_game` refuses while nonzero |
+| `frozen` | `0`, `1` | the `mcp_clock` frozen clock is held (Frozen clock below). A blocker in the engine-state note; tools that need tics to run by themselves refuse while it is `1`. the bridge's `setpause` leaves `paused` at 0 while frozen (it sets the value the thaw restores instead) |
 | `health` / `armor` | integers | console player's health and armor amount |
 | `cheats` | integer | console player's `cheats` bits (`CF_GODMODE`, `CF_NOTARGET`, ...), read by `set_cheat` |
 | `menuclass` | class name | the open menu's class |
@@ -250,8 +265,8 @@ a hidden zero scalar's slot.
 |---|---|---|
 | `dumphud` | none | `MCP_HUD`, then the last frame's `text <x> <y> <text>`, `image <x> <y> <patch>` and `msg <layer> <left> <top> <tics> <text>` lines. A status bar that draws glyph by glyph adds no `text` lines (its glyphs are filtered as font characters); console notify lines appear as `text` while shown. `image` names are cut to 8 characters |
 | `dumprenderer` | none | `MCP_RENDERER`, then `key=value` lines: `renderer`, screen and view rect, `statusbar_y`, and render cvars, `gl_vendor`, `gl_shadermodel`, `gl_maxtexsize` (OpenGL only), `vid_renderer` and `fullscreen` among them; `renderer` is `opengl` or `software`, and `st_scale`, `hud_scale` are bools |
-| `mcp_unblock` | none | `unblock ok`. Closes the console, chat and automap |
-| `mcp_mark` | `[<note>...]` (a playtest marker, meant for a key bind) | one `MCP_MARK n= tic= maptime= map= [x= y= z= angle=] [round=] [wave=] shot=<name\|none> note=<rest of line>` line. `note=` takes the rest of the line, as `name=` does elsewhere. `n` counts marks in this process; `tic` is `gametic` (runs while paused), `maptime` freezes while paused; the position is the console player's body, left out without one, as always on a `-host` server (its console player slot 0 is a client's). `round=` is the result of the ACS script the `mcp_mark_round` cvar names (number, else a script name; archived), run synchronously like `ACS_ExecuteWithResult`, so it must not delay; `round=none` when no such script is loaded, no `round=` with the cvar empty, outside a level or on a client. `wave=` is the invasion wave, only with invasion on. `shot=` names the screenshot it queues, `mcp_mark_<bridge port>_<YYYYMMDD-HHMMSS>_<n>`, written as `<name>.png` to the engine's working dir and kept; `none` when another game action is pending, and always on a `-host` server, which has no screen. The line reaches the gamelog, the bridge log and, mid-command, that command's reply. The shot is taken a tic later (`ga_screenshot`, serviced while paused too) |
+| `mcp_unblock` | none | `unblock ok`. Closes the console, chat and automap, and thaws a frozen clock (as `mcp_clock thaw`, printing nothing more) |
+| `mcp_mark` | `[<note>...]` (a playtest marker, meant for a key bind) | one `MCP_MARK n= tic= maptime= map= [x= y= z= angle=] [round=] [wave=] shot=<name\|none> note=<rest of line>` line. `note=` takes the rest of the line, as `name=` does elsewhere. `n` counts marks in this process; `tic` is `gametic` (runs while paused), `maptime` freezes while paused; the position is the console player's body, left out without one, as always on a `-host` server (its console player slot 0 is a client's). `round=` is the result of the ACS script the `mcp_mark_round` cvar names (number, else a script name; archived), run synchronously like `ACS_ExecuteWithResult`, so it must not delay; `round=none` when no such script is loaded, no `round=` with the cvar empty, outside a level or on a client. `wave=` is the invasion wave, only with invasion on. `shot=` names the screenshot it queues, `mcp_mark_<bridge port>_<YYYYMMDD-HHMMSS>_<n>`, written as `<name>.png` to the engine's working dir and kept; `none` when another game action is pending, and always on a `-host` server, which has no screen. The shot is taken a tic later (`ga_screenshot`, serviced while paused too). While the clock is frozen no tic runs to take it, so it is queued as an `mcp_clock` capture of the held frame instead (`none` when that refuses: outside a level, no display, a full queue). The line reaches the gamelog, the bridge log and, mid-command, that command's reply |
 
 ### Map probes
 
@@ -280,26 +295,285 @@ opening is lower than the probe), `slope` (a steep slope), plus `floor`, `step`,
 
 ### Scripted input
 
-`mcp_input` holds one timeline: a list of segments, each one input held for N
-tics. While it is armed the engine replaces the console player's input every
-tic, inside the game ticker right after the tic's real input was copied in, for
-exactly the tics scheduled, counting only tics that ran (`maptime` moved).
-Offline only. Limits: 64 segments, 2100 tics in all.
+`mcp_input` holds one timeline: a list of entries. A segment holds one input
+for N tics; a walk steers the player to a target every tic until it is there
+(the law is `engine-bridge/overlay/mcp_steer.h`). While
+it is armed the engine replaces the console player's input every tic, inside the
+game ticker on the tic's net input before a recording demo writes it (so the
+demo holds the injected input), counting only tics that ran (`maptime` moved).
+The tic runs a copy: the net input is left as it was, so once the timeline
+ends the next tic carries the player's own input, not the last injected one.
+A playing demo's input is never replaced: an armed timeline disarms `demo` on
+the first playback tic. Offline only. Limits: 64 entries, 2100 segment tics
+in all, and the `go` tic limit (at most 2100).
+
+A walk entry is judged only at a tic's start, from the player's position and
+velocity then: an entry already satisfied completes without consuming a tic, and
+the next one steers that same tic. A stop entry completes when the velocity is
+exactly 0 and the aim point within 0.05 units (after 3 settle tics, within 0.5);
+a `pass` entry once the aim point is within this tic's step; a moving target
+(a `tid` actor that moved last tic) once the aim point is within 0.5 units and
+the relative speed under 1. The aim point is the target pulled back toward the
+player by `standoff`, measured between bounding boxes plus a 1-unit gap for a
+solid actor. `tid:N` is the nearest actor with that TID other than the player,
+re-resolved every tic; one that vanishes while its box overlaps the player's
+(a pickup taken) completes the entry. `class:Name` is the nearest of that class
+(subclasses too) when the entry starts, aimed at its position then and not followed.
 
 | Form | Reply |
 |------|-------|
 | `clear` | `MCP_INPUT cleared`; `error armed...` while armed |
 | `seg <tics> <buttons\|-> <fwd> <side> <up> <angle\|-> <turn> <pitch\|->` | `MCP_INPUT seg <n> total=<tics>`, or `error ...`, which marks the timeline bad until the next `clear`; `error armed...` while armed. `buttons` is a comma list of names (`attack`, `altattack`, `use`, `jump`, `crouch`, `reload`, `zoom`, `speed`, `strafe`, `turn180`, `user1`-`user4`); an unknown one fails with the known list. `fwd`/`side`/`up` are raw ticcmd units (run: 12800 / 10240; up: 768). `angle` is an absolute heading in degrees held for the segment, `turn` degrees per tic (exclusive with `angle`), `pitch` an absolute view pitch (negative looks up) |
-| `go <0\|1>` | `MCP_INPUT armed segs=<n> tics=<t> maptime=<m>` and the game is unpaused; `1` pauses it again on every disarm. `error ...` when empty, bad, armed, on a server or a client (an offline game with bots runs), in demo playback, outside a level or with no player |
-| `status` | `MCP_INPUT active=<0\|1> consumed=<n> total=<t> seg=<i> maptime=<m> reason=<done\|level_change\|stopped\|->`. A segment timeline whose last tic ran is `done` at the next read (`status`, `trail`, `stop`) or tic, so a pause right after it still reads done |
+| `walk <pt:x,y\|tid:N\|class:Name> <standoff> <pass 0\|1> <speed> <buttons\|->` | `MCP_INPUT walk <n>`, or `error ...`, which marks the timeline bad like `seg`. `speed` in (0, 1] caps the thrust (1 = running); `buttons` are held throughout |
+| `go <0\|1> [<maxtics> [<stucktics>]]` | `MCP_INPUT armed segs=<n> tics=<t> limit=<l> maptime=<m>` and the game is unpaused; `1` pauses it again on every disarm. On a frozen clock the game stays unpaused and `1` sets the pause the thaw restores instead; while a demo records or plays no disarm pauses (a paused tic desyncs it), and `go 1` refuses while a demo records unfrozen (`error recording: a pause would desync the demo; freeze the clock first`). `maxtics` defaults to the segment total with no walk entry, else 2100, and is capped at 2100; reaching it with entries left disarms `timeout`. `stucktics` (default 35): closest approach must improve by more than 1 unit to reset the timer, or more than 8 after a blocked step; otherwise the walk disarms `stuck` after that many tics. `error ...` when empty, bad, armed, on a server or a client (an offline game with bots runs), in demo playback, outside a level, with no player or a bad number |
+| `status` | `MCP_INPUT active=<0\|1> consumed=<n> total=<t> seg=<i> maptime=<m> reason=<done\|level_change\|stopped\|stuck\|timeout\|died\|target_gone\|demo\|-> done=<entries completed> limit=<l> net=<0\|1> dist=<d\|-> target=<x,y\|->`. `net=1` where `go` would refuse as a netgame. `dist` is the last walk's distance to its target's centre, `target` that target's position. `died`: a walk found the player dead; segments don't stop for it. A segment timeline whose last tic ran is `done` at the next read (`status`, `trail`, `stop`) or tic, so a pause right after it still reads done |
 | `trail [<from>\|ends]` | `MCP_INPUT_TRAIL`, then `start maptime= seg=0 x= y= z= angle= pitch= momx= momy= momz= health= buttons=` (the player when armed; only from index 0) and one `tic ...` row with the same fields per consumed tic from index `from`: the player after that tic, `maptime` being the tic its input was applied in. `ends` prints only each segment's last row |
 | `stop` | `MCP_INPUT stopped consumed=<n>` (reason `stopped`, or `done` when the last tic had already run), or `MCP_INPUT idle` when nothing is armed |
 
 The engine writes `MCP_INPUT_SEG <n> maptime=<m>` when a segment's first tic is
-applied and `MCP_INPUT_END reason=<r> consumed=<n> maptime=<m>` on every disarm.
+applied or a walk starts and `MCP_INPUT_END reason=<r> consumed=<n> maptime=<m>` on every disarm.
 Both go to the bridge logfile and the engine's own gamelog only (not the
 console, the notify area or the socket), so the host can split the bridge log
 per segment. While armed, the injected buttons also carry the direction bits a
 held key would set (`BT_FORWARD`/`BT_BACK`, `BT_MOVERIGHT`/`BT_MOVELEFT`,
 `BT_MOVEUP`/`BT_MOVEDOWN` from the axes' signs, `BT_LEFT`/`BT_RIGHT` from
 `turn`), so ACS `GetPlayerInput` reads them as it would real keys.
+
+### Per-tic recorder
+
+`mcp_rec` records chosen actors and events tic by tic into a buffer, and writes
+it to a file on request. Its hooks sit in the playsim: the tic's end (right
+after `maptime` is incremented, so once per simulated tic, after everything in
+it), each spawn, `Destroy`, `SetState`, damage (after the health subtractions),
+`Die`, and a script's start and normal end. Nothing is printed while armed: a
+row only goes to the buffer, never the console, the gamelog or the bridge log.
+A server may record too, passively and authoritatively (`rechost`);
+clients are refused. Limits: 8 watches, 32 variables,
+512 tracked actors at once (`untracked=`
+counts the matches past that), 20000 rows (`dropped=` counts the rows past
+that), 10500 tics.
+
+A watch matches an actor by class (subclasses too), tid and player (that
+player's body), AND-ed; watches are OR-ed. A watch with only a class tries at
+arm and at each spawn, on the spawn's own tic; one with a tid or a player at arm
+and at each tic end. A matched actor gets an id (from 1, per recording) and a
+`spawn` row (a spawn, with the `spawn` event on) or a `seen` row. Events are
+recorded for tracked actors, `damage` also when its source or inflictor is
+tracked. Owned inventory is tracked but never sampled, and a map-reset hidden
+actor never matches.
+
+| Form | Reply |
+|------|-------|
+| `clear` | `MCP_REC cleared`: the setup and the buffer emptied |
+| `watch [class=<name>] [tid=<n>] [player=<n>]` | `MCP_REC watch n=<count>`, or `error ...` (no selector, more than 8, `unknown class <name>`, `not an actor class <name>`, a tid below 1, a player outside 0-63), which marks the setup bad until the next `clear` |
+| `fields <a,b,...>` | `MCP_REC fields n=<count>`, or `error unknown field <x> (known: ...)`, which marks it bad. The names are `findactors`' keys plus `state` (the state's `<Owner>.<index>`), `label` (its label, as `dumpactor`'s `stateid` prints it), `tics` (tics left in it) and the player fields below; default `tid,hp,x,y,z,sprite,frame` |
+| `events <a,b,...\|none>` | `MCP_REC events n=<count>` of `spawn`, `destroy`, `state`, `damage`, `death`, `psprite` (default all but `state` and `psprite`), or `error unknown event ...`, which marks it bad |
+| `scripts <all\|a,b,...>` | `MCP_REC scripts n=<count\|all>`: start and end rows for these scripts, each a number above 0 or else a name (at most 32; a list holding a name with spaces is sent as one quoted argument), or `error ...`, which marks it bad |
+| `var map=<name>\|world=<n>\|global=<n>\|slot=<s> [index=<k>] [label=<text>]` | `MCP_REC var n=<count>`; max 32, needs `recvars`; slot form also requires the `mcp_mapslot` digest tokens |
+| `go tics=<1-10500> [run=1] [every=<n>] [changes=0\|1]` | `MCP_REC armed watches=<n> tracked=<n> vars=<n> tics=<N> maptime=<m>`, after actor and variable baselines at the current maptime. Each `go` empties the buffer. `run=1` unpauses, and the tic hook pauses again on the Nth tic, so exactly N tics run (a run that ends at an intermission is left unpaused; on a frozen clock it sets the pause the thaw restores; never while a demo records or plays, and `run=1` refuses while a demo records unfrozen with `error recording: ...` as `mcp_input go 1` does); without it pause is untouched and the recording ends when N tics have run or on `stop`. `every=<n>` and `changes=1` thin actor samples only. `error ...` when armed, bad, with no watch/script/variable, on a bad argument, in demo playback, outside a level, on a client, or with `run=1` on a server |
+| `status` | `MCP_REC active=<0\|1> ran=<n> tics=<N> rows=<n> dropped=<n> tracked=<n> untracked=<n> maptime=<m> reason=<done\|stopped\|level_change\|map_reset\|->`; `tracked` counts the ids given; Zandronum's `map_reset` ends before round teardown and retains the buffer |
+| `dump <path>` | writes the file, then `MCP_REC wrote rows=<n> dropped=<n>`, or `error cannot write <path>`. The file name must start with `mcp-rec-` (else `error dump writes only a file named mcp-rec-*`), so the CCMD is no general file writer. `mcp_rec` is an unsafe command, like `mcp_clock`: menus and mod scripts can't run it |
+| `stop` | `MCP_REC stopped ran=<n>`, which re-pauses a `run=1` recording; `MCP_REC idle` when nothing is armed |
+
+`clear`, `watch`, `fields`, `events`, `scripts` and `var` refuse while armed (`error
+armed: mcp_rec stop first`) without marking the setup bad. The host sends the
+whole setup in one line (`mcp_rec stop; mcp_rec clear; mcp_rec watch ...;
+mcp_rec fields ...; mcp_rec events ...; [mcp_rec scripts ...;] mcp_rec go
+...[; <command>]`), so a typo arms nothing and a command after `go` runs
+before any tic. Var lines follow scripts and precede `go`. A setup or `go`
+failure does not stop the command following it on that console line: the
+command still runs, with nothing armed. Host validation, missing-capability
+and probe-resolution refusals happen before sending this schedule.
+
+Each `var` line has exactly one selector. `map` looks up an exported name;
+`index` selects an array element and is refused for a scalar or past its bound.
+World indices are 0-255 and globals 0-63; with `index` these select a sparse
+ACS world/global array element (an absent element reads 0). A probe-resolved
+slot uses `v=1 code=<len> first=<fourcc> md5=<hex>` as `mcp_mapslot` does,
+with `label=<expression>` supplied by the host. The module and slot are
+rechecked at `go` and each read; a stale setup refuses `go`, and a failed
+read disarms with `level_change`. A baseline is followed by changed tic-end
+values only, independently of `every` and `changes`. A var at `t=M` is the
+value in that tic-end state; a script started at `t=M` first shows its write
+at `t=M+1` or later. A set and reset within one tic or between tic ends is
+not observable. Var rows share the 20,000-row buffer with all other kinds.
+
+The recorder-only player fields require `recplayer` and are absent unless
+the tracked actor is the player's current body (not a voodoo doll):
+
+| Fields | Value |
+|--------|-------|
+| `buttons`, `modbuttons` | raw and mod-modified button bitsets for the tic, decimal in the file |
+| `wclass`, `pending`, `refire`, `wflags` | ready weapon class; pending weapon class (`none` for no weapon, absent for no change); refire count; weapon flags, decimal |
+| `wstate`, `wlabel`, `wsprite`, `wframe`, `wtics` | weapon layer's state id, label, drawn sprite/frame and tics left; absent when that layer is missing |
+
+Host field groups `input` and `weaponstate` expand to those groups in order,
+deduplicated; the engine accepts only atomic fields. The host decodes button
+and weapon-flag cells as names joined by `+`, or `-` for zero. The opt-in
+`psprite` event records every tracked player layer's state changes, including
+zero-tic chains, but deduplicates repeated entries of the same state and layer
+object. Its `w*` keys describe the layer named by `layer`, not necessarily the
+weapon layer. Bypassed removals reconcile at tic end as `wstate=none`; a
+Zandronum removal and same-state re-entry within one tic is invisible. A
+two-state idle loop still emits events: use weapon samples to thin those.
+
+A level change ends the recording with `reason=level_change`, checked in the
+one row writer, the tic hook, `status` and `dump` before anything is written:
+not in a level, a maptime below the last one seen, or another map name. The
+tic hook also wants a maptime exactly one past the last. So the old map's
+teardown and the new map's spawns and OPEN scripts are not recorded; the buffer
+stays readable. Not detected: a save loaded, or the same map reloaded, at the
+armed maptime with no tic in between (arming at maptime 0 and restarting the map
+before a tic runs).
+
+The file starts with `MCP_RECFILE v=1 engine=<id> map=<map\|-> start=<maptime>
+ran=<n> rows=<n> dropped=<n> fields=<a,b,...\|-> reason=<...>` (`fields` lists
+the sample keys in the order asked), then one `rec t=<maptime> k=<kind> ...`
+line per row, in the order written:
+
+| Kind | Keys after `k=` |
+|------|-----------------|
+| `seen`, `spawn` | `id= class= tid= x= y= z=` |
+| `sample` | `id=`, then the fields in the order asked, each left out when it has no value, as in `findactors` |
+| `destroy` | `id= x= y= z=` |
+| `state` | `id= [state=] [label=] [sprite= frame=] tics=` |
+| `damage` | `id=` (0 for an untracked target, then `tgt=<ref>`), `amount= type= [src=<ref> [srcid=]] [inf=<ref> [infid=]] hp=` (`hp` after the hit; `srcid`/`infid` for a tracked source or inflictor). A non-lethal hit's row comes before the `Pain` state row it causes |
+| `death` | `id= [src=<ref> [srcid=]] [inf=<ref> [infid=]] hp=` |
+| `script_start` | `serial= script=<n\|-1> module=<name> act=<ref\|none> [name=]`: a named script prints `script=-1` and its name last, as `name=` takes the rest of the line |
+| `script_end` | `serial= script=<n\|-1> [name=]`; `serial=0` when its start wasn't recorded |
+| `var` | `var=<1-based selector index> value=<n> [prev=<n>] name=<label>`; a baseline and then changed tic-end values, with `name` last |
+| `psprite` | `id= layer=<GZDoom layer number> wstate=<Owner.index\|none> [wlabel= wsprite= wframe= wtics=]`; the weapon-column keys show the layer named here |
+
+`t` is `level.maptime` when the row was written: a sample at `t=M` is the state
+`mcp_status maptime=M` describes, and an event at `t=M` happened during the tic
+from M to M+1, or between tics (a console command). A `<ref>` is `player<n>` or
+`<class>#<tid>`.
+
+What the hooks don't see: a spawn's tid, special and args are set after the
+spawn hook; damage that is vetoed or fully absorbed returns before the damage
+hook, and health written directly (`P_GiveBody`, ACS, `mcp_setprop`, poison)
+skips it (the `hp` sample shows it); weapon psprites need the separate opt-in
+`psprite` event, not the actor `state` event; a suspended script resumed by `P_GetScriptGoing` makes no start row,
+and scripts a map reset or level exit kills make no end row. Zandronum event
+scripts can start and end outside `P_Ticker`, inside `P_DamageMobj` or a game
+mode's ticker; their rows carry the surrounding tic's maptime.
+
+### Frozen clock
+
+`mcp_clock` holds the game's tic clock at a virtual (tic, frac) pair with the
+sim unpaused, so the main loop keeps redrawing one frame through the normal
+interpolation code and only queued jobs run tics. By default only the tic clock
+and frac freeze. The opt-in `frametime 1` also holds animated textures, warps,
+sky scroll, shader timers and the fps counter per tic; these advance with frozen
+steps. The displayed fps value is not meaningful while held. Offline only
+(`clock` cap, plus `frametime` for the render-time hold).
+
+A job queue (at most 256 jobs) runs once per frame, right after the frame is
+drawn. A `step <n>` job lets one tic through per frame until n tics have run. A
+`shot` job sets the frac to k/N, renders 3 more frames at it (so a read after
+the buffer swap returns a frame at that frac), then writes `<name>.png` to the
+engine's working dir, as `screenshot <name>` does, without a game action and
+without the `Captured` console line (a held frame never ages notify lines, so
+it would show in every later frame). `mcp_clock` is an unsafe command: menus
+and mod scripts can't run it. The
+frac goes back to 1/1, the tic's end state, after each step tic and each shot,
+so outside a shot a frozen frame looks like a paused one without the PAUSE
+banner. While frozen with nothing queued the engine sleeps about 10 ms a frame.
+Mouse look still turns the held view: the engine's `D_PostEvent` applies it to
+the view directly whenever `paused` is 0, outside any tic (`use_mouse 0`, e.g.
+`launch_instance` `mouse: false`, keeps it still).
+Stock Zandronum's focus-loss pause (`paused` -1) is cleared every frozen frame
+and never restored by `thaw`, so an unfocused window keeps stepping (a focus
+loss landing inside a step tic still ends that one job `paused`; the next step
+runs). A client
+disconnect thaws the clock and disarms `freeze demo` (logging `MCP_CLOCK
+frozen=0: the MCP client disconnected`), since nobody is left to step it.
+
+| Form | Reply |
+|------|-------|
+| `freeze` | `MCP_CLOCK frozen=1 gametic=<n> maptime=<m> restore=<paused> jobs=1`: remembers `paused`, sets it to 0, holds the clock at the current tic and queues one step, so that live tic leaves interpolation on. `error ...` on a netgame (server or client), in client-demo playback (`error client demo playback`), with `singletics`, outside a level, with a game action pending, or with a menu or console open. An offline demo can be frozen. Already frozen: the `status` line |
+| `freeze demo` | `MCP_CLOCK armed=demo frozen=0`: arms a freeze that engages once an offline demo has run its first tic, so `mcp_clock freeze demo; playdemo X` (or `...; load S; playdemo X`) holds it from the start. Allowed with a game action pending and with the console open; the arm refusals are `freeze`'s first three. While armed each frame runs one tic at most. Engaging remembers `paused` as `freeze` does, queues no step, and writes `MCP_CLOCK frozen=1 maptime=<m> restore=<paused> jobs=0 armed=demo` to the bridge logfile and the gamelog only (a notify line never ages while frozen). It lands after exactly one demo tic: `maptime` 1 for a map-started demo, the save's `maptime` plus 1 for a save-started one. `thaw`, `stop`, `mcp_unblock` and a level load without a demo disarm. Already frozen: the `status` line |
+| `thaw` | `MCP_CLOCK frozen=0 maptime=<m> paused=<n> [restore_skipped=demo]`: time resumes from the held tic with no catch-up and `paused` gets the remembered value back, except while a demo records or plays, where it is set to 0 and the reply carries `restore_skipped=demo` (a paused recorded tic is simulated on replay; a paused playback tic reads a ticcmd that never runs); releases any frame-time hold; queued jobs end as `stopped`. `MCP_CLOCK frozen=0` when not frozen |
+| `frametime <0\|1>` | `MCP_CLOCK frametime=<0\|1> framems=<ms>`: toggle the frame-time hold without thawing; `error not frozen` outside a freeze |
+| `step <n>` | `MCP_CLOCK queued jobs=<count>`; `error not frozen`, `error paused`, `error menu or console open`, `error not in a level`, `error queue full`, or a usage error for n below 1 |
+| `shot <name> [<k> <N>]` | `MCP_CLOCK queued jobs=<count>`, a capture at frac k/N (default 1/1, 0 <= k <= N); `error not frozen`, `error not in a level`, `error no display` (`-nodraw`, no screen), `error queue full`, and for k < N with interpolation off and no step queued ahead `error interpolation off (<nointerp>)` |
+| `stop` | `MCP_CLOCK stopped dropped=<count>`: drops the queue (`reason=stopped` when anything was dropped). A tic already let through this frame still runs, uncounted |
+| `status` | `MCP_CLOCK frozen=<0\|1> gametic=<n> maptime=<m> frac=<k>/<N> interp=<0\|1> [nointerp=<cl_capfps\|r_NoInterpolate>] jobs=<count> steps=<n> shots=<n> reason=<r> frametime=<0\|1> framems=<ms> armed=<0\|demo>` |
+
+`interp=1` needs `r_NoInterpolate` clear (a tic has run since the last paused
+one) and `cl_capfps 0`. `steps` counts the tics that moved `maptime` and
+`shots` the captures written, both since the freeze, so the host waits for
+target counts. `steps` includes the freeze's own tic (it reads 1 once `freeze`
+settles): wait on deltas, not absolute values. A failed PNG write still counts
+as a shot, so the host deletes a stale file of the same name before queueing.
+
+The frame-time hold is tic-quantized, not frac-dependent. Each source anchors
+its first held read, then advances by `(virtualTic - anchorTic) * 1000 / 35`
+integer milliseconds. Repeated fractions of one tic therefore have identical
+animated surfaces, but the end of tic T and the start of tic T+1 may differ on
+those surfaces. A per-source offset preserves continuity when the hold is
+disabled or thawed, without a wall-time catch-up. Without the hold, animated
+textures and renderer timers keep real time. Zandronum software warps already
+hold with the tic clock but do not advance with frozen steps; OpenGL warps
+continue animating. The explicit hold advances both with steps. Menus, console,
+chat, wipes, networking, mod-side real-time
+APIs and frame-rate limiting retain their real clocks.
+
+`reason` is `-` while jobs are queued or none has run since the freeze, `done`
+when the queue drained, else why the queue was dropped:
+
+| Reason | When |
+|--------|------|
+| `stopped` | `stop`, or `thaw` with jobs queued |
+| `paused` | a step tic ran without moving `maptime` (`gametic` moves on paused tics: a `pause` net command, a menu a human opened) |
+| `level_change` | after a step tic the game left `GS_LEVEL`, a level or save load was pending at the tic's start, or `maptime` moved by anything but 0 or 1 (a hub return or a save load restores its own); also when the game leaves `GS_LEVEL` with jobs queued |
+| `stalled` | a step tic was let through but `gametic` didn't move for 1 s |
+| `nointerp` | a k < N shot reached the head of the queue with interpolation off |
+| `demo_end` | a step tic read the end of a demo that played while frozen. That tic counts in `steps`; the next step (the console return) ends `level_change`, not `demo_end` |
+
+The clock stays frozen after every reason, so nothing runs unasked. Two traps:
+
+- **A pause that lands while frozen** (`run_command "pause"` then a step)
+  leaves `paused=1`: that step ends `paused` and every later `step` refuses
+  `error paused`. Thaw, then freeze again: the thaw restores the pre-freeze
+  pause and the new freeze clears it.
+- **A map change through an intermission** (`changemap` on DOOM2 MAP01) parks
+  the frozen clock on the intermission. The tic running the net command is a
+  normal step, the next ends `level_change`, and from then on `step` refuses
+  `not in a level` until a thaw lets the intermission run. A `map` command has
+  no intermission but also takes two tics: the first runs on the old map and
+  counts, the next loads the new one and ends `level_change`, and from then on
+  steps run on the new map.
+
+While frozen, the bridge's `setpause` and `mcp_unblock` and `mcp_mark` go
+through the clock (their rows above), and `mcp_setview` snaps the view, so every
+frame of a sweep shows the new angle. Input events still reach the engine's event
+queue but are only processed when a step tic runs.
+
+Notify lines age only with tics too. Game messages and game-code `Log()` output
+stay in the top-left of every frozen frame until `con_notifytime` worth of step
+tics have run (105 at the default 3 s). Bridge replies do not enter this area.
+Comparisons spanning different game messages still need to mask their strip.
+
+#### Checkpoints
+
+`mcp_checkpoint [rows]` digests the playsim for demo sync checks (`demo` cap).
+Read-only and safe, so it works frozen, paused or live:
+
+```
+MCP_CHECKPOINT maptime=<m> actors=<n> rng=<08x> hash=<08x> pos=<08x> vel=<08x> angle=<08x> health=<08x> tics=<08x> state=<08x> inv=<08x>
+MCP_CHECKPOINT_ROW i=<n> class=<name> h=<08x> x=<hex> y=<hex> z=<hex> vx=<hex> vy=<hex> vz=<hex> angle=<hex> pitch=<hex> health=<d> tics=<d> sprite=<4 chars> frame=<letter>
+```
+
+It covers every actor thinker in iterator order (stable across replays of one
+demo), skipping `DynamicLight` (animated by the renderer) and owned inventory.
+Each group is an FNV-1a hash over raw values: `pos` (x, y, z), `vel`, `angle`
+(angle, pitch), `health`, `tics`, `state` (the sprite name and frame letter, not
+the sprite index, state or class, so a cosmetic replacement hashes the same)
+and `inv` (each actor's owned inventory as class name and amount: armor, ammo,
+weapons). `rng` is the sum of every RNG's seed, `hash` covers every group of
+every actor. There is no `gametic`, which depends on when the demo started;
+every field compares as is. With `rows`, one `MCP_CHECKPOINT_ROW` per actor
+follows, with `h` the actor's own hash over its groups, so the first differing
+row names the actor (`----` and `-` when it has no sprite). Values print as
+their raw bits in hex: `x`..`pitch` are 32-bit fixed point and BAM, as `%08x`.

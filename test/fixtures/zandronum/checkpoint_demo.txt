@@ -1,0 +1,1 @@
+MCP_CHECKPOINT maptime=1 actors=44 rng=2693cf3b hash=5453dfa9 pos=a0514d10 vel=15062e75 angle=e12a8aba health=9dd9cb9f tics=4ead5f13 state=c83bcba9 inv=cfd22d10

@@ -1,0 +1,216 @@
+MCP_RECFILE v=1 engine=zandronum map=MAP01 start=391 ran=70 rows=215 dropped=0 fields=tid,hp,x,y,z,sprite,frame reason=done
+rec t=391 k=seen id=1 class=DoomPlayer tid=0 x=-800.0 y=700.0 z=8.0
+rec t=391 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=A
+rec t=391 k=seen id=2 class=DoomImp tid=77 x=-800.0 y=956.0 z=8.0
+rec t=391 k=sample id=2 tid=77 hp=60 x=-800.0 y=956.0 z=8.0 sprite=TROO frame=A
+rec t=391 k=var var=1 value=0 name=world[5]
+rec t=391 k=script_start serial=1 script=-1 module=MCPCONF act=player0 name=ConfHud
+rec t=391 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=391 k=state id=1 state=DoomPlayer.6 label=Melee sprite=PLAY frame=F tics=6
+rec t=391 k=script_end serial=1 script=-1 name=ConfHud
+rec t=392 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=F
+rec t=396 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=397 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=E
+rec t=397 k=state id=2 state=DoomImp.1 label=Spawn+1 sprite=TROO frame=B tics=10
+rec t=398 k=sample id=2 tid=77 hp=60 x=-800.0 y=956.0 z=8.0 sprite=TROO frame=B
+rec t=399 k=spawn id=3 class=Rocket tid=0 x=-800.0 y=700.0 z=40.0
+rec t=399 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=400 k=sample id=3 tid=0 hp=1000 x=-800.0 y=730.0 z=38.5 sprite=MISL frame=A
+rec t=400 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=401 k=sample id=3 tid=0 hp=1000 x=-800.0 y=749.9 z=37.5 sprite=MISL frame=A
+rec t=401 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=402 k=sample id=3 tid=0 hp=1000 x=-800.0 y=769.9 z=36.5 sprite=MISL frame=A
+rec t=402 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=403 k=sample id=3 tid=0 hp=1000 x=-800.0 y=789.9 z=35.4 sprite=MISL frame=A
+rec t=403 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=404 k=sample id=3 tid=0 hp=1000 x=-800.0 y=809.9 z=34.4 sprite=MISL frame=A
+rec t=404 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=405 k=sample id=3 tid=0 hp=1000 x=-800.0 y=829.8 z=33.4 sprite=MISL frame=A
+rec t=405 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=406 k=sample id=3 tid=0 hp=1000 x=-800.0 y=849.8 z=32.4 sprite=MISL frame=A
+rec t=406 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=407 k=sample id=3 tid=0 hp=1000 x=-800.0 y=869.8 z=31.4 sprite=MISL frame=A
+rec t=407 k=state id=2 state=DoomImp.0 label=Spawn sprite=TROO frame=A tics=10
+rec t=407 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=408 k=sample id=2 tid=77 hp=60 x=-800.0 y=956.0 z=8.0 sprite=TROO frame=A
+rec t=408 k=sample id=3 tid=0 hp=1000 x=-800.0 y=889.8 z=30.4 sprite=MISL frame=A
+rec t=408 k=state id=1 state=DoomPlayer.0 label=Spawn sprite=PLAY frame=A tics=-1
+rec t=408 k=state id=3 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=409 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=A
+rec t=409 k=sample id=3 tid=0 hp=1000 x=-800.0 y=909.7 z=29.4 sprite=MISL frame=A
+rec t=409 k=damage id=2 amount=20 type=Fire src=player0 srcid=1 inf=Rocket#0 infid=3 hp=40
+rec t=409 k=state id=2 state=DoomImp.13 label=Pain sprite=TROO frame=H tics=2
+rec t=409 k=state id=3 state=Rocket.1 label=Death sprite=MISL frame=B tics=8
+rec t=409 k=damage id=2 amount=111 type=Fire src=player0 srcid=1 inf=Rocket#0 infid=3 hp=-71
+rec t=409 k=death id=2 src=player0 srcid=1 inf=Rocket#0 infid=3 hp=-71
+rec t=409 k=state id=2 state=DoomImp.20 label=Death.Extreme sprite=TROO frame=N tics=5
+rec t=410 k=sample id=2 tid=77 hp=-71 x=-800.0 y=956.0 z=8.0 sprite=TROO frame=N
+rec t=410 k=sample id=3 tid=0 hp=1000 x=-800.0 y=919.7 z=29.4 sprite=MISL frame=B
+rec t=411 k=sample id=2 tid=77 hp=-71 x=-800.0 y=972.9 z=8.0 sprite=TROO frame=N
+rec t=411 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=411 k=state id=1 state=DoomPlayer.6 label=Melee sprite=PLAY frame=F tics=6
+rec t=412 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=F
+rec t=412 k=sample id=2 tid=77 hp=-71 x=-800.0 y=988.3 z=8.0 sprite=TROO frame=N
+rec t=413 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1002.2 z=8.0 sprite=TROO frame=N
+rec t=414 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1014.8 z=8.0 sprite=TROO frame=N
+rec t=414 k=state id=2 state=DoomImp.21 label=Death.Extreme+1 sprite=TROO frame=O tics=5
+rec t=414 k=state id=3 state=Rocket.2 label=Death+1 sprite=MISL frame=C tics=6
+rec t=415 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1026.2 z=8.0 sprite=TROO frame=O
+rec t=415 k=sample id=3 tid=0 hp=1000 x=-800.0 y=919.7 z=29.4 sprite=MISL frame=C
+rec t=416 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1036.6 z=8.0 sprite=TROO frame=O
+rec t=416 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=417 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=E
+rec t=417 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1045.9 z=8.0 sprite=TROO frame=O
+rec t=418 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1054.4 z=8.0 sprite=TROO frame=O
+rec t=419 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1062.1 z=8.0 sprite=TROO frame=O
+rec t=419 k=spawn id=4 class=Rocket tid=0 x=-800.0 y=700.0 z=40.0
+rec t=419 k=state id=2 state=DoomImp.22 label=Death.Extreme+2 sprite=TROO frame=P tics=5
+rec t=419 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=420 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1069.1 z=8.0 sprite=TROO frame=P
+rec t=420 k=sample id=4 tid=0 hp=1000 x=-800.0 y=730.0 z=38.5 sprite=MISL frame=A
+rec t=420 k=state id=3 state=Rocket.3 label=Death+2 sprite=MISL frame=D tics=4
+rec t=420 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=421 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1075.5 z=8.0 sprite=TROO frame=P
+rec t=421 k=sample id=3 tid=0 hp=1000 x=-800.0 y=919.7 z=29.4 sprite=MISL frame=D
+rec t=421 k=sample id=4 tid=0 hp=1000 x=-800.0 y=749.9 z=37.5 sprite=MISL frame=A
+rec t=421 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=422 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1081.2 z=8.0 sprite=TROO frame=P
+rec t=422 k=sample id=4 tid=0 hp=1000 x=-800.0 y=769.9 z=36.5 sprite=MISL frame=A
+rec t=422 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=423 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1086.4 z=8.0 sprite=TROO frame=P
+rec t=423 k=sample id=4 tid=0 hp=1000 x=-800.0 y=789.9 z=35.4 sprite=MISL frame=A
+rec t=423 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=424 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1091.1 z=8.0 sprite=TROO frame=P
+rec t=424 k=sample id=4 tid=0 hp=1000 x=-800.0 y=809.9 z=34.4 sprite=MISL frame=A
+rec t=424 k=state id=2 state=DoomImp.23 label=Death.Extreme+3 sprite=TROO frame=Q tics=5
+rec t=424 k=destroy id=3 x=-800.0 y=919.7 z=29.4
+rec t=424 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=425 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1095.4 z=8.0 sprite=TROO frame=Q
+rec t=425 k=sample id=4 tid=0 hp=1000 x=-800.0 y=829.8 z=33.4 sprite=MISL frame=A
+rec t=425 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=426 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1099.2 z=8.0 sprite=TROO frame=Q
+rec t=426 k=sample id=4 tid=0 hp=1000 x=-800.0 y=849.8 z=32.4 sprite=MISL frame=A
+rec t=426 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=427 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1102.7 z=8.0 sprite=TROO frame=Q
+rec t=427 k=sample id=4 tid=0 hp=1000 x=-800.0 y=869.8 z=31.4 sprite=MISL frame=A
+rec t=427 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=428 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1105.9 z=8.0 sprite=TROO frame=Q
+rec t=428 k=sample id=4 tid=0 hp=1000 x=-800.0 y=889.8 z=30.4 sprite=MISL frame=A
+rec t=428 k=state id=1 state=DoomPlayer.0 label=Spawn sprite=PLAY frame=A tics=-1
+rec t=428 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=429 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=A
+rec t=429 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1108.8 z=8.0 sprite=TROO frame=Q
+rec t=429 k=sample id=4 tid=0 hp=1000 x=-800.0 y=909.7 z=29.4 sprite=MISL frame=A
+rec t=429 k=state id=2 state=DoomImp.24 label=Death.Extreme+4 sprite=TROO frame=R tics=5
+rec t=429 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=430 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1111.4 z=8.0 sprite=TROO frame=R
+rec t=430 k=sample id=4 tid=0 hp=1000 x=-800.0 y=929.7 z=28.4 sprite=MISL frame=A
+rec t=430 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=431 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1113.8 z=8.0 sprite=TROO frame=R
+rec t=431 k=sample id=4 tid=0 hp=1000 x=-800.0 y=949.7 z=27.3 sprite=MISL frame=A
+rec t=431 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=431 k=state id=1 state=DoomPlayer.6 label=Melee sprite=PLAY frame=F tics=6
+rec t=431 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=432 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=F
+rec t=432 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1115.9 z=8.0 sprite=TROO frame=R
+rec t=432 k=sample id=4 tid=0 hp=1000 x=-800.0 y=969.7 z=26.3 sprite=MISL frame=A
+rec t=432 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=433 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1117.9 z=8.0 sprite=TROO frame=R
+rec t=433 k=sample id=4 tid=0 hp=1000 x=-800.0 y=989.6 z=25.3 sprite=MISL frame=A
+rec t=433 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=434 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1119.6 z=8.0 sprite=TROO frame=R
+rec t=434 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1009.6 z=24.3 sprite=MISL frame=A
+rec t=434 k=state id=2 state=DoomImp.25 label=Death.Extreme+5 sprite=TROO frame=S tics=5
+rec t=434 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=435 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1121.2 z=8.0 sprite=TROO frame=S
+rec t=435 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1029.6 z=23.3 sprite=MISL frame=A
+rec t=435 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=436 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1122.7 z=8.0 sprite=TROO frame=S
+rec t=436 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1049.6 z=22.3 sprite=MISL frame=A
+rec t=436 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=436 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=437 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=E
+rec t=437 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1124.0 z=8.0 sprite=TROO frame=S
+rec t=437 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1069.5 z=21.3 sprite=MISL frame=A
+rec t=437 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=438 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1125.1 z=8.0 sprite=TROO frame=S
+rec t=438 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1089.5 z=20.3 sprite=MISL frame=A
+rec t=438 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=439 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1126.2 z=8.0 sprite=TROO frame=S
+rec t=439 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1109.5 z=19.3 sprite=MISL frame=A
+rec t=439 k=spawn id=5 class=Rocket tid=0 x=-800.0 y=700.0 z=40.0
+rec t=439 k=state id=2 state=DoomImp.26 label=Death.Extreme+6 sprite=TROO frame=T tics=5
+rec t=439 k=state id=4 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=439 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=440 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1127.2 z=8.0 sprite=TROO frame=T
+rec t=440 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1129.4 z=18.2 sprite=MISL frame=A
+rec t=440 k=sample id=5 tid=0 hp=1000 x=-800.0 y=730.0 z=38.5 sprite=MISL frame=A
+rec t=440 k=state id=4 state=Rocket.1 label=Death sprite=MISL frame=B tics=8
+rec t=440 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=441 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1128.1 z=8.0 sprite=TROO frame=T
+rec t=441 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1139.4 z=18.2 sprite=MISL frame=B
+rec t=441 k=sample id=5 tid=0 hp=1000 x=-800.0 y=749.9 z=37.5 sprite=MISL frame=A
+rec t=441 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=442 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1128.9 z=8.0 sprite=TROO frame=T
+rec t=442 k=sample id=5 tid=0 hp=1000 x=-800.0 y=769.9 z=36.5 sprite=MISL frame=A
+rec t=442 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=443 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1129.6 z=8.0 sprite=TROO frame=T
+rec t=443 k=sample id=5 tid=0 hp=1000 x=-800.0 y=789.9 z=35.4 sprite=MISL frame=A
+rec t=443 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=444 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1130.3 z=8.0 sprite=TROO frame=T
+rec t=444 k=sample id=5 tid=0 hp=1000 x=-800.0 y=809.9 z=34.4 sprite=MISL frame=A
+rec t=444 k=state id=2 state=DoomImp.27 label=Death.Extreme+7 sprite=TROO frame=U tics=-1
+rec t=444 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=445 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1130.9 z=8.0 sprite=TROO frame=U
+rec t=445 k=sample id=5 tid=0 hp=1000 x=-800.0 y=829.8 z=33.4 sprite=MISL frame=A
+rec t=445 k=state id=4 state=Rocket.2 label=Death+1 sprite=MISL frame=C tics=6
+rec t=445 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=446 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1131.4 z=8.0 sprite=TROO frame=U
+rec t=446 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1139.4 z=18.2 sprite=MISL frame=C
+rec t=446 k=sample id=5 tid=0 hp=1000 x=-800.0 y=849.8 z=32.4 sprite=MISL frame=A
+rec t=446 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=447 k=sample id=2 tid=77 hp=-71 x=-800.0 y=1131.9 z=8.0 sprite=TROO frame=U
+rec t=447 k=sample id=5 tid=0 hp=1000 x=-800.0 y=869.8 z=31.4 sprite=MISL frame=A
+rec t=447 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=448 k=sample id=5 tid=0 hp=1000 x=-800.0 y=889.8 z=30.4 sprite=MISL frame=A
+rec t=448 k=state id=1 state=DoomPlayer.0 label=Spawn sprite=PLAY frame=A tics=-1
+rec t=448 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=449 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=A
+rec t=449 k=sample id=5 tid=0 hp=1000 x=-800.0 y=909.7 z=29.4 sprite=MISL frame=A
+rec t=449 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=450 k=sample id=5 tid=0 hp=1000 x=-800.0 y=929.7 z=28.4 sprite=MISL frame=A
+rec t=450 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=451 k=sample id=5 tid=0 hp=1000 x=-800.0 y=949.7 z=27.3 sprite=MISL frame=A
+rec t=451 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=451 k=state id=1 state=DoomPlayer.6 label=Melee sprite=PLAY frame=F tics=6
+rec t=451 k=state id=4 state=Rocket.3 label=Death+2 sprite=MISL frame=D tics=4
+rec t=451 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=452 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=F
+rec t=452 k=sample id=4 tid=0 hp=1000 x=-800.0 y=1139.4 z=18.2 sprite=MISL frame=D
+rec t=452 k=sample id=5 tid=0 hp=1000 x=-800.0 y=969.7 z=26.3 sprite=MISL frame=A
+rec t=452 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=453 k=sample id=5 tid=0 hp=1000 x=-800.0 y=989.6 z=25.3 sprite=MISL frame=A
+rec t=453 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=454 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1009.6 z=24.3 sprite=MISL frame=A
+rec t=454 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=455 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1029.6 z=23.3 sprite=MISL frame=A
+rec t=455 k=destroy id=4 x=-800.0 y=1139.4 z=18.2
+rec t=455 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=456 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1049.6 z=22.3 sprite=MISL frame=A
+rec t=456 k=state id=1 state=DoomPlayer.5 label=Missile sprite=PLAY frame=E tics=12
+rec t=456 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=457 k=sample id=1 tid=0 hp=100 x=-800.0 y=700.0 z=8.0 sprite=PLAY frame=E
+rec t=457 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1069.5 z=21.3 sprite=MISL frame=A
+rec t=457 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=458 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1089.5 z=20.3 sprite=MISL frame=A
+rec t=458 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=459 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1109.5 z=19.3 sprite=MISL frame=A
+rec t=459 k=spawn id=6 class=Rocket tid=0 x=-800.0 y=700.0 z=40.0
+rec t=459 k=state id=5 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=459 k=state id=6 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=460 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1129.4 z=18.2 sprite=MISL frame=A
+rec t=460 k=sample id=6 tid=0 hp=1000 x=-800.0 y=730.0 z=38.5 sprite=MISL frame=A
+rec t=460 k=state id=5 state=Rocket.1 label=Death sprite=MISL frame=B tics=8
+rec t=460 k=state id=6 state=Rocket.0 label=Spawn sprite=MISL frame=A tics=1
+rec t=461 k=sample id=5 tid=0 hp=1000 x=-800.0 y=1139.4 z=18.2 sprite=MISL frame=B
+rec t=461 k=sample id=6 tid=0 hp=1000 x=-800.0 y=749.9 z=37.5 sprite=MISL frame=A

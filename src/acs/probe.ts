@@ -183,7 +183,7 @@ export interface MapSlotRequest {
   /** The module's main source file. */
   sourceFile: string;
   /** Checked against PROBE_EXPR before anything is written. */
-  expr: string;
+  exprs: string[];
   /** `<PREFIX>_BCC`; unset searches PATH. */
   exe?: string;
   /** After the source file's own dir. */
@@ -246,10 +246,14 @@ function noMatch(plain: Buffer, deployed: AcsModule[]): string {
 }
 
 /** Both builds compile a same-named copy of the main file in one temp dir, so path-dependent bytes agree and the mod stays untouched. */
-export function resolveMapSlot(req: MapSlotRequest, io: ProbeIo): MapSlotResult {
-  const refuse = (guard: string, refused: string) => ({ guard, refused });
-  if (!PROBE_EXPR.test(req.expr)) {
-    return refuse("expression", `${JSON.stringify(req.expr)} isn't a name followed by constant [index] and .member parts`);
+export function resolveMapSlot(req: MapSlotRequest, io: ProbeIo): MapSlotResult[] {
+  if (req.exprs.length === 0) return [];
+  const refuse = (guard: string, refused: string): MapSlotResult[] => req.exprs.map(() => ({
+    guard, refused: req.exprs.length === 1 ? refused : `${req.exprs.join(", ")}: ${refused}`,
+  }));
+  const invalid = req.exprs.find((expr) => !PROBE_EXPR.test(expr));
+  if (invalid !== undefined) {
+    return refuse("expression", `${JSON.stringify(invalid)} isn't a name followed by constant [index] and .member parts`);
   }
   let source: Buffer;
   try {
@@ -276,31 +280,32 @@ export function resolveMapSlot(req: MapSlotRequest, io: ProbeIo): MapSlotResult 
     if (!module) return refuse("deployed", noMatch(plain, req.deployed));
     const digest = imageDigest(plain);
     if ("refused" in digest) return refuse("digest", `${module.name} can't be matched in the engine: ${digest.refused}`);
-    const b = build(Buffer.concat([source, Buffer.from(probeSource([req.expr]), "latin1")]), "probe.o");
-    if (!b.ok) return refuse("compile", `the probe build failed (is ${req.expr} a map variable ${main} can see?):\n${b.diagnostics}`);
+    const b = build(Buffer.concat([source, Buffer.from(probeSource(req.exprs), "latin1")]), "probe.o");
+    if (!b.ok) return refuse("compile", `the probe build failed (is ${req.exprs.join(", ")} a map variable ${main} can see?):\n${b.diagnostics}`);
     const seen = new Set(outputLines(a.output));
     const added = outputLines(b.output).filter((l) => !seen.has(l));
     if (added.length > 0) return refuse("diagnostics", `the probe build printed what build A didn't:\n${added.join("\n")}`);
     const probe = io.readFile(b.object);
-    const found = probeAddresses(probe, 1);
+    const found = probeAddresses(probe, req.exprs.length);
     if ("refused" in found) return refuse("probe", found.refused);
     const { addrs, table } = found;
     const neutral = checkNeutral(plain, probe, Math.min(...addrs));
     if (neutral) return refuse("neutrality", `the probe moved the module's layout: ${neutral}`);
-    const [slot] = decodeProbes(probe, table, addrs);
-    if ("refused" in slot) return refuse("decode", slot.refused);
-    // The digest proves the importing module, not that the import bound when it loaded.
-    const imported = importedSlots(plain).get(slot.slot);
-    if (imported !== undefined) {
-      return refuse(
-        "import",
-        `${imported} is imported from a library: slot ${slot.slot} of ${module.name} is that library's var only if the library loaded and has the name. ` +
+    const imports = importedSlots(plain);
+    const sizes = arraySizes(plain);
+    return decodeProbes(probe, table, addrs).map((slot) => {
+      if ("refused" in slot) return { guard: "decode", refused: slot.refused };
+      // The digest proves the importing module, not that the import bound when it loaded.
+      const imported = imports.get(slot.slot);
+      if (imported !== undefined) return {
+        guard: "import",
+        refused: `${imported} is imported from a library: slot ${slot.slot} of ${module.name} is that library's var only if the library loaded and has the name. ` +
           "Pass that library's source, or use its exported name without sourceFile",
-      );
-    }
-    const bounds = checkBounds(slot, arraySizes(plain));
-    if (bounds) return refuse("bounds", bounds);
-    return { ...slot, digest, module };
+      };
+      const bounds = checkBounds(slot, sizes);
+      if (bounds) return { guard: "bounds", refused: bounds };
+      return { ...slot, digest, module };
+    });
   } finally {
     io.removeDir(dir);
   }
