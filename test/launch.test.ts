@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import net from "node:net";
 import {
@@ -12,6 +13,9 @@ import {
   findFreePort,
   deriveBasePort,
   configPathFor,
+  isolatedConfigPathFor,
+  userTempDir,
+  argValue,
   hasArg,
   DEFAULT_BASE_PORT,
   PORT_STRIDE,
@@ -30,6 +34,7 @@ const T: EngineAdapter = {
   fullscreenCvar: "fs",
   launchPins: (_o, env) => ["+set", "pin", env.PIN ?? "0"],
   launchEnv: (base, platform) => (platform === "linux" && base.POS ? { WIN_POS: base.POS } : {}),
+  gamelogDefault: (exe) => `${exe}.gamelog`,
 };
 
 describe("resolveEngineExe", () => {
@@ -126,6 +131,16 @@ describe("buildLaunchEnv", () => {
   it("lets the launching environment win over an engine extra", () => {
     const env = buildLaunchEnv(T, "/games/eng", 7777, { WIN_POS: "0,0", POS: "1920,0" }, "linux");
     expect(env.WIN_POS).toBe("0,0");
+  });
+
+  it("defaults the gamelog from the engine", () => {
+    const env = buildLaunchEnv(T, "/games/eng/eng", 7777, {}, "linux");
+    expect(env.ENG_BRIDGE_GAMELOG).toBe("/games/eng/eng.gamelog");
+  });
+
+  it("respects an existing gamelog", () => {
+    const env = buildLaunchEnv(T, "/games/eng/eng", 7777, { ENG_BRIDGE_GAMELOG: "/custom/prefix" }, "linux");
+    expect(env.ENG_BRIDGE_GAMELOG).toBe("/custom/prefix");
   });
 });
 
@@ -230,7 +245,7 @@ describe("resolveScreenshotDir", () => {
 
 describe("waitForPort", () => {
   it("resolves once connect succeeds", async () => {
-    await expect(waitForPort("h", 1, 5, 1, async () => true)).resolves.toBeUndefined();
+    await expect(waitForPort("h", 1, { attempts: 5, intervalMs: 1, connect: async () => true })).resolves.toBeUndefined();
   });
 
   it("retries then throws when the port never opens", async () => {
@@ -239,8 +254,24 @@ describe("waitForPort", () => {
       calls += 1;
       return false;
     };
-    await expect(waitForPort("h", 1, 3, 1, connect, async () => {})).rejects.toThrow(/never opened/);
+    await expect(
+      waitForPort("h", 1, { attempts: 3, intervalMs: 1, connect, sleep: async () => {} }),
+    ).rejects.toThrow(/never opened/);
     expect(calls).toBe(3);
+  });
+
+  it("stops polling once its signal is aborted", async () => {
+    const polling = new AbortController();
+    let calls = 0;
+    const connect = async () => {
+      calls += 1;
+      if (calls === 2) polling.abort();
+      return false;
+    };
+    await expect(
+      waitForPort("h", 1, { attempts: 60, intervalMs: 1, connect, sleep: async () => {}, signal: polling.signal }),
+    ).rejects.toThrow(/stopped waiting for bridge port h:1/);
+    expect(calls).toBe(2);
   });
 
   it("works against a real port that opens slightly late (default connect/sleep)", async () => {
@@ -254,7 +285,7 @@ describe("waitForPort", () => {
       void probe;
     });
     setTimeout(() => server.listen(port, "127.0.0.1"), 60);
-    await waitForPort("127.0.0.1", port, 30, 25);
+    await waitForPort("127.0.0.1", port, { attempts: 30, intervalMs: 25 });
     expect(await tryConnect("127.0.0.1", port)).toBe(true);
     await new Promise<void>((r) => server.close(() => r()));
   });
@@ -318,6 +349,22 @@ describe("configPathFor", () => {
   });
 });
 
+describe("isolatedConfigPathFor", () => {
+  it("sits beside the shared ini, keyed by bridge port", () => {
+    expect(isolatedConfigPathFor(T, join("/c", "mine.ini"), 7781)).toBe(join("/c", "eng-mcp-7781.ini"));
+  });
+});
+
+describe("userTempDir", () => {
+  it("keys the dir by uid where there is one, so users sharing a temp dir don't collide", () => {
+    expect(userTempDir("eng-mcp", "/tmp", { getuid: () => 1000 })).toBe(join("/tmp", "eng-mcp-1000"));
+    expect(userTempDir("eng-mcp", "C:\\Temp", {})).toBe(join("C:\\Temp", "eng-mcp"));
+  });
+  it("defaults to the OS temp dir and this process", () => {
+    expect(userTempDir("eng-mcp")).toBe(userTempDir("eng-mcp", tmpdir(), process));
+  });
+});
+
 describe("buildLaunchArgs config", () => {
   it("passes -config first so later flags win", () => {
     expect(buildLaunchArgs({ config: "/b/z.ini", iwad: "d2.wad" }, T, {}).slice(0, 4)).toEqual([
@@ -339,6 +386,15 @@ describe("buildLaunchArgs config", () => {
     const args = buildLaunchArgs({ [key]: ours, extraArgs: [flag, theirs] }, T, {});
     expect(args.includes(ours)).toBe(false);
     expect(args.slice(-2)).toEqual([flag, theirs]);
+  });
+
+  it("finds the value after a flag in any case, as a whole arg only", () => {
+    expect(argValue(["-nosound", "-Config", "/t/a.ini"], "-config")).toBe("/t/a.ini");
+    expect(argValue(["-connect", "127.0.0.1", "+NAME", "client_a"], "+name")).toBe("client_a");
+    expect(argValue(["-config"], "-config")).toBeUndefined();
+    expect(argValue(["-nosound"], "-config")).toBeUndefined();
+    expect(argValue(undefined, "+name")).toBeUndefined();
+    expect(argValue(["+name", "-hostile"], "-host")).toBeUndefined();
   });
 
   it("spots a flag in any case, even with no value after it", () => {

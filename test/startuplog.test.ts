@@ -1,12 +1,6 @@
 import { describe, it, expect } from "vitest";
-import {
-  parseStartupErrors,
-  tailLines,
-  crashLogPath,
-  readLogWindow,
-  crashReportPid,
-  crashReportText,
-} from "../src/process/startuplog.js";
+import { parseStartupErrors, tailLines, crashLogPath, crashReportPid, crashReportText, readLogWindow } from "../src/process/startuplog.js";
+import { stderrLogPath, stderrSection, startupFailureText } from "../src/process/startuplog.js";
 
 const SAMPLE = [
   "Resolving GL extensions",
@@ -59,6 +53,187 @@ describe("crashLogPath", () => {
   });
 });
 
+describe("stderrLogPath", () => {
+  it("derives <log>.stderr beside the console log", () => {
+    expect(stderrLogPath("/x/mcp-bridge-7777.log")).toBe("/x/mcp-bridge-7777.log.stderr");
+  });
+});
+
+describe("stderrSection", () => {
+  it("keeps the last 20 non-empty lines under a header", () => {
+    const text = Array.from({ length: 25 }, (_, i) => `e${i}`).join("\n\n");
+    const lines = Array.from({ length: 20 }, (_, i) => `e${i + 5}`);
+    expect(stderrSection(text)).toBe(`Engine stderr:\n${lines.join("\n")}`);
+  });
+
+  it("is undefined for missing or blank stderr", () => {
+    expect(stderrSection()).toBeUndefined();
+    expect(stderrSection("\n  \n")).toBeUndefined();
+  });
+});
+
+describe("startupFailureText", () => {
+  const HINT = "No compile errors found in the engine log. It may have crashed, or the bridge build is stale.";
+
+  it("a timeout with nothing captured keeps the stale-build hint", () => {
+    expect(startupFailureText({ instance: 1, message: "bridge port h:1 never opened" })).toBe(
+      `Instance 1 failed to come up: bridge port h:1 never opened.\n\n${HINT}`,
+    );
+  });
+
+  it("a timeout with log errors shows them and drops the hint", () => {
+    expect(startupFailureText({ instance: 2, message: "timeout", logText: SAMPLE, stderrText: "" })).toBe(
+      [
+        "Instance 2 failed to come up: timeout.",
+        [
+          "Engine log shows:",
+          'Script error, "DECORATE" line 12:',
+          "Expected '}' but got 'Foo'",
+          "Execution could not continue.",
+          "2 errors while parsing DECORATE scripts",
+        ].join("\n"),
+      ].join("\n\n"),
+    );
+  });
+
+  it("a timeout with a quiet log shows its last 10 lines, then the hint", () => {
+    const log = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");
+    const tail = Array.from({ length: 10 }, (_, i) => `line ${i + 5}`).join("\n");
+    expect(startupFailureText({ instance: 1, message: "timeout", logText: log })).toBe(
+      `Instance 1 failed to come up: timeout.\n\nEngine log tail:\n${tail}\n\n${HINT}`,
+    );
+  });
+
+  it("a timeout with stderr chatter still shows the log tail and the hint", () => {
+    expect(
+      startupFailureText({
+        instance: 1,
+        message: "timeout",
+        logText: "all quiet\n",
+        stderrText: "ALSA lib pcm.c: Unknown PCM default\n",
+      }),
+    ).toBe(
+      [
+        "Instance 1 failed to come up: timeout.",
+        "Engine stderr:\nALSA lib pcm.c: Unknown PCM default",
+        "Engine log tail:\nall quiet",
+        HINT,
+      ].join("\n\n"),
+    );
+  });
+
+  it("an exit code shows stderr, then the log errors", () => {
+    expect(
+      startupFailureText({
+        instance: 1,
+        message: "engine exited during startup (exit code 255)",
+        exit: { code: 255, signal: null },
+        logText: "ok\nScript error, bad syntax\n",
+        stderrText: "Execution could not continue.\n\n1 errors while parsing DECORATE scripts\n",
+      }),
+    ).toBe(
+      [
+        "Instance 1 failed to come up: engine exited during startup (exit code 255).",
+        "Engine stderr:\nExecution could not continue.\n1 errors while parsing DECORATE scripts",
+        "Engine log shows:\nScript error, bad syntax",
+      ].join("\n\n"),
+    );
+  });
+
+  it("a stderr-only exit skips the log tail and the hint", () => {
+    expect(
+      startupFailureText({
+        instance: 1,
+        message: "engine exited during startup (exit code 255)",
+        exit: { code: 255, signal: null },
+        logText: "all quiet\n",
+        stderrText: "Cannot find uzdoom.pk3\n",
+      }),
+    ).toBe(
+      "Instance 1 failed to come up: engine exited during startup (exit code 255).\n\nEngine stderr:\nCannot find uzdoom.pk3",
+    );
+  });
+
+  it("a signal exit points at get_crash", () => {
+    expect(
+      startupFailureText({
+        instance: 3,
+        message: "engine exited during startup (signal SIGSEGV)",
+        exit: { code: null, signal: "SIGSEGV" },
+        logText: "Init game engine.\n",
+      }),
+    ).toBe(
+      [
+        "Instance 3 failed to come up: engine exited during startup (signal SIGSEGV).",
+        "Engine log tail:\nInit game engine.",
+        "Call get_crash for the backtrace.",
+      ].join("\n\n"),
+    );
+  });
+
+  it("a spawn failure is just the message", () => {
+    expect(
+      startupFailureText({
+        instance: 1,
+        message: "engine exited during startup (could not start: spawn /x ENOENT)",
+        exit: { code: null, signal: null, error: "spawn /x ENOENT" },
+      }),
+    ).toBe("Instance 1 failed to come up: engine exited during startup (could not start: spawn /x ENOENT).");
+  });
+});
+
+describe("crashReportPid", () => {
+  it("reads the pid line from either platform's report, or undefined", () => {
+    expect(crashReportPid("=== MCP ENGINE CRASH ===\nsignal: 11 SIGSEGV\nfault_addr: 0x8\npid: 31337\n\nbacktrace:\n")).toBe(31337);
+    expect(crashReportPid("code: 0xc0000005\r\npid: 7\r\n")).toBe(7);
+    expect(crashReportPid("no pid here\n#0 pid: 5 in a frame")).toBeUndefined();
+  });
+});
+
+describe("crashReportText", () => {
+  const withPid = "signal: 11 SIGSEGV\npid: 99\n\nbacktrace:\n#0 R_DrawColumn";
+  const written = "written 2026-09-22T06:10:00.000Z";
+  const reply = (report: string, enginePid: number | undefined) =>
+    crashReportText({
+      instance: 2,
+      crashFile: "/x/inst2.log.crash",
+      report,
+      enginePid,
+      written: new Date("2026-09-22T06:10:00Z"),
+    });
+
+  it("returns the report verbatim when its pid is this engine's", () => {
+    expect(reply(withPid, 99)).toEqual({ text: withPid, noCrash: false });
+  });
+
+  it("names another engine's report without returning it", () => {
+    expect(reply(withPid, 4242)).toEqual({
+      text:
+        "No crash recorded for instance 2 (PID 4242). /x/inst2.log.crash holds " +
+        `another engine's crash (PID 99, ${written}), not this one's.`,
+      noCrash: true,
+    });
+  });
+
+  it("marks the report unverified when the engine PID is unknown", () => {
+    expect(reply(withPid, undefined)).toEqual({
+      text:
+        "Unverified: this instance's engine PID is unknown, " +
+        `so this may be another engine's crash (${written}).\n\n${withPid}`,
+      noCrash: false,
+    });
+  });
+
+  it("marks the report unverified when it has no pid line", () => {
+    expect(reply("SIGSEGV\n#0 x", 4242)).toEqual({
+      text:
+        "Unverified: the report has no pid line, " +
+        `so this may be another engine's crash (${written}).\n\nSIGSEGV\n#0 x`,
+      noCrash: false,
+    });
+  });
+});
+
 describe("readLogWindow", () => {
   const LOG = ["one", "__MCPDONE_1__", "Degreelessness Mode ON", "", "two", "partial"].join("\n");
 
@@ -99,52 +274,39 @@ describe("readLogWindow", () => {
   it("throws on an invalid pattern", () => {
     expect(() => readLogWindow(LOG, { pattern: "(", maxLines: 5 })).toThrow();
   });
-});
 
-describe("crashReportPid", () => {
-  it("reads the pid line from either platform's report, or undefined", () => {
-    const posix =
-      "=== MCP ENGINE CRASH ===\nsignal: 11 SIGSEGV\nfault_addr: 0x8\npid: 31337\n\nbacktrace:\n";
-    expect(crashReportPid(posix)).toBe(31337);
-    expect(crashReportPid("code: 0xc0000005\r\npid: 7\r\n")).toBe(7);
-    expect(crashReportPid("no pid here\n#0 pid: 5 in a frame")).toBeUndefined();
+  it("drops lines matching a case-insensitive exclude", () => {
+    expect(readLogWindow(LOG, { exclude: "DEGREE", maxLines: 10 }).lines).toEqual([
+      { line: 1, text: "one" },
+      { line: 5, text: "two" },
+    ]);
   });
-});
 
-describe("crashReportText", () => {
-  const withPid = "signal: 11 SIGSEGV\npid: 99\n\nbacktrace:\n#0 R_DrawColumn";
-  const written = "written 2026-09-22T06:10:00.000Z";
-  const reply = (report: string, enginePid: number | undefined) =>
-    crashReportText({
-      instance: 2,
-      crashFile: "/x/inst2.log.crash",
-      report,
-      enginePid,
-      written: new Date("2026-09-22T06:10:00Z"),
+  it("applies exclude after pattern", () => {
+    expect(readLogWindow(LOG, { pattern: "o", exclude: "^two$", maxLines: 10 }).lines).toEqual([
+      { line: 1, text: "one" },
+      { line: 3, text: "Degreelessness Mode ON" },
+    ]);
+  });
+
+  it("counts excluded lines out of the cap, so a capped forward read still resumes right", () => {
+    const log = ["a1", "skip", "a2", "skip", "a3", ""].join("\n");
+    expect(readLogWindow(log, { exclude: "skip", sinceLine: 0, maxLines: 2 })).toEqual({
+      lines: [
+        { line: 1, text: "a1" },
+        { line: 3, text: "a2" },
+      ],
+      nextLine: 3,
+      omitted: 1,
     });
-
-  it("returns the report verbatim when its pid is this engine's", () => {
-    expect(reply(withPid, 99)).toBe(withPid);
+    expect(readLogWindow(log, { exclude: "skip", sinceLine: 3, maxLines: 2 })).toEqual({
+      lines: [{ line: 5, text: "a3" }],
+      nextLine: 5,
+      omitted: 0,
+    });
   });
 
-  it("names another engine's report without returning it", () => {
-    expect(reply(withPid, 4242)).toBe(
-      "No crash recorded for instance 2 (PID 4242). /x/inst2.log.crash holds " +
-        `another engine's crash (PID 99, ${written}), not this one's.`,
-    );
-  });
-
-  it("marks the report unverified when the engine PID is unknown", () => {
-    expect(reply(withPid, undefined)).toBe(
-      "Unverified: this instance's engine PID is unknown, " +
-        `so this may be another engine's crash (${written}).\n\n${withPid}`,
-    );
-  });
-
-  it("marks the report unverified when it has no pid line", () => {
-    expect(reply("SIGSEGV\n#0 x", 4242)).toBe(
-      "Unverified: the report has no pid line, " +
-        `so this may be another engine's crash (${written}).\n\nSIGSEGV\n#0 x`,
-    );
+  it("throws on an invalid exclude", () => {
+    expect(() => readLogWindow(LOG, { exclude: "[", maxLines: 5 })).toThrow();
   });
 });

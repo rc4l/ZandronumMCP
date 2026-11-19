@@ -21,9 +21,9 @@ const DEFINE_RE = /^\s*#(?:lib)?define\s+(\w+)\s+(-?\d+)\b/;
 const SCRIPT_RE = /^\s*script\s+("[^"]*"|-?\d+|[A-Za-z_]\w*)\s*([A-Za-z_]\w*)?/i;
 const FUNCTION_RE = /^\s*function\s+\w+\s+([A-Za-z_]\w*)\s*\(/i;
 
-function baseName(path: string): string {
-  const parts = path.split(/[/\\]/);
-  return parts[parts.length - 1];
+/** The last segment of a `/` or `\\` path. */
+export function baseName(path: string): string {
+  return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 }
 
 /** Parse `#define` / `#libdefine NAME <int>` lines into a name→number map. */

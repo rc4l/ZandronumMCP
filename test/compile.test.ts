@@ -99,6 +99,31 @@ describe("compileAcs", () => {
     expect(calls[0].args).toEqual(["snippet.acs", at("snippet.o")]);
   });
 
+  const PRELUDE = { text: "#pragma raw define on\n#define A 1\n", origin: ["/p.json (rawDefines)", "/h.acs:3"] };
+  const PRELUDE_WRAP = (name: string) => `#library "${name}"\n#include "mcpdefs.acs"\n#include "snippet.acs"\n`;
+
+  it("with a prelude, wraps a plain snippet under either compiler: library, then mcpdefs.acs, then the snippet", () => {
+    for (const compiler of ["bcc", "acc"] as const) {
+      const { deps, written, calls } = fakeDeps(BCC);
+      compileAcs({ engine, compiler, exe: "/opt/bcc", source: "script 1 (void) {}", prelude: PRELUDE }, deps);
+      expect(written.get(at("snippet.acs"))).toBe("script 1 (void) {}");
+      expect(written.get(at("mcpdefs.acs"))).toBe(PRELUDE.text);
+      expect(written.get(at("wrap.acs"))).toBe(PRELUDE_WRAP("mcpsnip"));
+      expect(calls[0].args).toEqual(["wrap.acs", at("snippet.o")]);
+    }
+  });
+
+  it("with a prelude, a #library snippet names the wrapper and its own #library line goes blank, keeping line numbers", () => {
+    for (const compiler of ["bcc", "acc"] as const) {
+      const { deps, written, calls } = fakeDeps(BCC);
+      const source = '// mine\n  #Library "mylib" // the lib\n#import "osacs.acs"\nscript 1 (void) {}';
+      compileAcs({ engine, compiler, exe: "/opt/bcc", source, prelude: PRELUDE }, deps);
+      expect(written.get(at("snippet.acs"))).toBe('// mine\n\n#import "osacs.acs"\nscript 1 (void) {}');
+      expect(written.get(at("wrap.acs"))).toBe(PRELUDE_WRAP("mylib"));
+      expect(calls[0].args).toEqual(["wrap.acs", at("snippet.o")]);
+    }
+  });
+
   it("refuses a temp dir that can't travel as one console token, naming why and the remedy", () => {
     const { deps, calls } = fakeDeps({ ...BCC, dir: "/tmp/semi;colon" });
     const res = compileAcs({ engine, compiler: "bcc", exe: "/opt/bcc", source: "x" }, deps);
@@ -263,6 +288,32 @@ describe("compileAcs", () => {
     const twice = { stderr: "snippet.acs:2:9: error: #including zcommon.acs file multiple times\n" };
     expect(compileAcs({ engine, compiler: "bcc", exe: "/opt/bcc", source: "x" }, fakeDeps({ ...BCC, fail: twice }).deps)).toMatchObject({
       diagnostics: "snippet.acs:2:9: error: #including zcommon.acs file multiple times",
+    });
+  });
+
+  it("points prelude errors at the profile or defineFile line they came from, keeping the column", () => {
+    const origin = ["/p.json (rawDefines)", "/os/osdefs.acs:12", "/os/osdefs.acs:64", "/tmp/bad.acs:1"];
+    const prelude = { text: "x\n", origin };
+    const run = (compiler: "bcc" | "acc", fail: object) =>
+      compileAcs({ engine, compiler, exe: "/opt/bcc", source: "x", prelude }, fakeDeps({ ...BCC, fail }).deps);
+    // zt-bcc's verbatim lines: a bad define body, a redefinition pair, and an absolute main file.
+    expect(run("bcc", { stderr: "mcpdefs.acs:4:9: error: invalid digit in decimal literal\nIn file #included from wrap.acs:2:\n" })).toMatchObject({
+      diagnostics: "/tmp/bad.acs:1:9: error: invalid digit in decimal literal\nIn file #included from wrap.acs:2:",
+    });
+    expect(
+      run("bcc", { stderr: "mcpdefs.acs:3:8: error: macro `X` redefined\nmcpdefs.acs:2:8: macro previously defined here\nIn file #included from wrap.acs:2:\n" }),
+    ).toMatchObject({
+      diagnostics: "/os/osdefs.acs:64:8: error: macro `X` redefined\n/os/osdefs.acs:12:8: macro previously defined here\nIn file #included from wrap.acs:2:",
+    });
+    expect(run("bcc", { stderr: "/tmp/mcp-runacs-x/mcpdefs.acs:2:8: error: x\nsnippet.acs:2:8: error: y\n" })).toMatchObject({
+      diagnostics: "/os/osdefs.acs:12:8: error: x\nsnippet.acs:2:8: error: y",
+    });
+    // acc's two forms, relative and absolute; a line past the prelude stays as it is.
+    expect(run("acc", { stdout: 'ACC\n**** ERROR ****\nLine 4 in file "mcpdefs.acs" ...\nmcpdefs.acs:4: Invalid identifier.\n> #define 9B\n' })).toMatchObject({
+      diagnostics: "**** ERROR ****\n/tmp/bad.acs:1 ...\n/tmp/bad.acs:1: Invalid identifier.\n> #define 9B",
+    });
+    expect(run("acc", { stdout: '**** ERROR ****\nLine 1 in file "C:\\tmp\\x\\mcpdefs.acs" ...\nC:\\tmp\\x\\mcpdefs.acs:1: Invalid directive.\nmcpdefs.acs:9: z\n' })).toMatchObject({
+      diagnostics: "**** ERROR ****\n/p.json (rawDefines) ...\n/p.json (rawDefines): Invalid directive.\nmcpdefs.acs:9: z",
     });
   });
 

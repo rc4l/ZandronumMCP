@@ -46,8 +46,8 @@ export function isCorrelatorLine(line: string): boolean {
 /**
  * Drop another request's correlator replies (lines that START with a sentinel,
  * e.g. a timed-out status probe answering late) from one output message; undefined
- * when nothing else is left. A sentinel merely quoted mid-line stays: `dumphud`
- * echoes on-screen notify text, which can show earlier status lines.
+ * when nothing else is left. Mid-line quotes stay, including notify text from
+ * a hand-typed status command, which does not use bridge dispatch filtering.
  */
 export function stripForeignSentinels(text: string, sentinel: string): string | undefined {
   const lines = text.split("\n");

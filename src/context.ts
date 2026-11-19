@@ -4,16 +4,18 @@ import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from 
 import {
   deriveBasePort,
   findFreePort,
+  gamelogPrefix,
   resolveEngineExe,
   resolveScreenshotDir,
 } from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
+import { crashLogPath } from "./process/startuplog.js";
 import { buildIndex, type AcsIndex } from "./acs/symbols.js";
 import { compileAcs, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
+import { importsOf, parseProfile, profilesFor, type RunAcsProfile } from "./acs/profiles.js";
 import { readMapFromContainer, type MapData } from "./map/index.js";
 import { captureScreenshot } from "./screenshot/capture.js";
-import { crashLogPath } from "./process/startuplog.js";
 import type { BridgeClient } from "./bridge/transport.js";
 import { envName, type EngineAdapter } from "./adapter.js";
 
@@ -31,6 +33,10 @@ export interface ServerConfig {
   /** `run_acs` compilers; default to `zt-bcc`/`bcc` or `acc` on PATH. */
   bcc?: string;
   acc?: string;
+  /** `run_acs` profile files (`<PREFIX>_RUNACS_PROFILES`, `path.delimiter`-separated). */
+  runAcsProfiles?: string[];
+  /** The gamelog prefix launches use (`gamelogPrefix`); its dir holds earlier sessions' gamelogs. */
+  gamelog?: string;
 }
 
 /** The server's config from `<PREFIX>_*` env vars, so MCP clients can pass it in their config. */
@@ -39,6 +45,7 @@ export function configFromEnv(engine: EngineAdapter, env: NodeJS.ProcessEnv): Se
   // Accept either the macOS .app bundle or the binary directly.
   const raw = get("EXE");
   const exe = raw ? resolveEngineExe(raw, engine) : undefined;
+  const profiles = (get("RUNACS_PROFILES") ?? "").split(path.delimiter).map((p) => p.trim()).filter(Boolean);
   return {
     host: get("BRIDGE_HOST") ?? "127.0.0.1",
     // Derived from the engine path unless pinned, so separate checkouts don't all fight over 7777.
@@ -50,7 +57,30 @@ export function configFromEnv(engine: EngineAdapter, env: NodeJS.ProcessEnv): Se
     saveDir: engine.resolveSaveDir(env, exe),
     bcc: get("BCC"),
     acc: get("ACC"),
+    runAcsProfiles: profiles.length > 0 ? profiles : undefined,
+    gamelog: gamelogPrefix(engine, exe, env),
   };
+}
+
+/** `launch_instance`'s tool-level options, `iwad` already resolved. */
+export interface LaunchArgs {
+  iwad?: string;
+  files?: string[];
+  map?: string;
+  skill?: number;
+  fullscreen?: boolean;
+  width?: number;
+  height?: number;
+  extraArgs?: string[];
+  config?: "shared" | "isolated";
+}
+
+/** What `relaunch_instance` reuses: the last launch's options and where it ran. */
+export interface LastLaunch {
+  args: LaunchArgs;
+  port: number;
+  logFile: string;
+  enginePid?: number;
 }
 
 /**
@@ -138,6 +168,8 @@ export class ServerContext {
   private readonly attaching = new Map<number, Promise<BridgeClient>>();
   /** Engine PID per instance (the launched child's, or an attached bridge's): checked on re-attach and matched against a get_crash report. */
   private readonly enginePids = new Map<number, number>();
+  /** Each instance's last launch, kept past kill/reset/crash for `relaunch_instance`. */
+  private readonly lastLaunch = new Map<number, LastLaunch>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
 
@@ -168,6 +200,11 @@ export class ServerContext {
     return this.boundPorts.has(instance);
   }
 
+  /** Every instance number this session has claimed, ascending. */
+  boundInstances(): number[] {
+    return [...this.boundPorts.keys()].sort((a, b) => a - b);
+  }
+
   /** Claim an instance number for a port, without a launch behind it. */
   bind(instance: number, port: number): void {
     this.boundPorts.set(instance, port);
@@ -182,7 +219,23 @@ export class ServerContext {
 
   /** Record which process is this instance's engine. */
   rememberEngine(instance: number, pid: number | undefined): void {
-    if (pid !== undefined) this.enginePids.set(instance, pid);
+    if (pid === undefined) return;
+    this.enginePids.set(instance, pid);
+    const last = this.lastLaunch.get(instance);
+    if (last) last.enginePid = pid;
+  }
+
+  /** Store a launch's options before its spawn, so a launch that never came up stays relaunchable. */
+  rememberLaunchArgs(instance: number, args: LaunchArgs, port: number, logFile: string): void {
+    this.lastLaunch.set(instance, { args, port, logFile });
+  }
+
+  launchArgsFor(instance: number): LastLaunch | undefined {
+    return this.lastLaunch.get(instance);
+  }
+
+  forgetLaunchArgs(instance: number): void {
+    this.lastLaunch.delete(instance);
   }
 
   /** The engine PID recorded for the instance, if any. */
@@ -190,6 +243,7 @@ export class ServerContext {
     return this.enginePids.get(instance);
   }
 
+  // forgetInstance/forgetAll keep lastLaunch: relaunch must work after kill_instance and reset.
   forgetInstance(instance: number): void {
     this.boundPorts.delete(instance);
     this.logFiles.delete(instance);
@@ -211,12 +265,6 @@ export class ServerContext {
       : undefined;
   }
 
-  /** An instance's engine console log text, or undefined when there is none to read. */
-  readLog(instance: number): string | undefined {
-    const logFile = this.logPathFor(instance);
-    return logFile && this.io.existsSync(logFile) ? this.io.readTextSync(logFile) : undefined;
-  }
-
   /** An instance's crash report and its file's mtime, or undefined when there is none. */
   readCrash(instance: number): { file: string; report: string; written: Date } | undefined {
     const logFile = this.logPathFor(instance);
@@ -224,6 +272,12 @@ export class ServerContext {
     return file && this.io.existsSync(file)
       ? { file, report: this.io.readTextSync(file), written: this.io.mtimeOf(file) }
       : undefined;
+  }
+
+  /** An instance's engine console log text, or undefined when there is none to read. */
+  readLog(instance: number): string | undefined {
+    const logFile = this.logPathFor(instance);
+    return logFile && this.io.existsSync(logFile) ? this.io.readTextSync(logFile) : undefined;
   }
 
   /**
@@ -325,6 +379,27 @@ export class ServerContext {
     const index = buildIndex(files);
     this.acsIndexes.set(src, { stamp, index });
     return index;
+  }
+
+  /** The `run_acs` profiles a snippet's `#import`s select, reread every call so an edit needs no reconnect. */
+  runAcsProfiles(source: string): RunAcsProfile[] {
+    const files = this.config.runAcsProfiles;
+    if (!files || importsOf(source).length === 0) return [];
+    const env = this.env("RUNACS_PROFILES");
+    const profiles = files.map((file) => {
+      let text: string;
+      try {
+        text = this.io.readTextSync(file);
+      } catch (e) {
+        throw new Error(`can't read run_acs profile ${file} (listed in ${env}): ${(e as Error).message}`);
+      }
+      try {
+        return parseProfile(text, file);
+      } catch (e) {
+        throw new Error(`${(e as Error).message} (listed in ${env})`);
+      }
+    });
+    return profilesFor(source, profiles);
   }
 
   /** Where savegames live: explicit arg, else the configured dir. */

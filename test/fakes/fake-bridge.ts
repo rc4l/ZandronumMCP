@@ -52,7 +52,7 @@ export class FakeBridge {
   private probesToSwallow = 0;
   private readonly rawHandlers: Array<{ match: string; messages: Record<string, unknown>[] }> = [];
   private readonly swallowed: string[] = [];
-  private readonly commandHooks: Array<{ match: string; run: () => void }> = [];
+  private readonly commandHooks: Array<{ match: string; run: (command: string) => void }> = [];
   /** Every message the client sent — lets tests assert fire-and-forget sends. */
   readonly received: Array<{ t?: string; text?: string }> = [];
   private readonly swallowCommands: boolean;
@@ -106,7 +106,7 @@ export class FakeBridge {
   /** Run `run` whenever a command containing `match` arrives, before the reply
    *  is built, so a test can model a command's side effect (e.g. a cheat
    *  toggling the status snapshot). */
-  onCommand(match: string, run: () => void): this {
+  onCommand(match: string, run: (command: string) => void): this {
     this.commandHooks.push({ match, run });
     return this;
   }
@@ -213,7 +213,7 @@ export class FakeBridge {
       this.probesToSwallow--;
       return;
     }
-    for (const h of this.commandHooks) if (command.includes(h.match)) h.run();
+    for (const h of this.commandHooks) if (command.includes(h.match)) h.run(command);
 
     const raw = this.rawHandlers.find((h) => command.includes(h.match));
     const handler = raw ? undefined : this.handlers.find((h) => command.includes(h.match));

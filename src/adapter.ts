@@ -21,6 +21,8 @@ export interface EngineAdapter {
   launchPins: (o: LaunchOptions, env: NodeJS.ProcessEnv) => string[];
   /** Extra child env; a key the launching environment already sets wins. */
   launchEnv: (base: NodeJS.ProcessEnv, platform: NodeJS.Platform) => NodeJS.ProcessEnv;
+  /** Default `<PREFIX>_BRIDGE_GAMELOG` for a launch of `exe`. */
+  gamelogDefault: (exe: string) => string;
   /** Default savegame dir, resolved once at startup; undefined when none can be determined. */
   resolveSaveDir: (env: NodeJS.ProcessEnv, exe: string | undefined) => string | undefined;
   /** Metadata from one savegame file's bytes. */
@@ -33,8 +35,24 @@ export interface EngineAdapter {
   consoleBar?: RegExp;
   /** The engine opens files with ANSI `fopen` on Windows, so a non-ASCII path can't reach it. */
   ansiPaths: boolean;
+  /** LAN roles and their pause caveats; undefined for an engine with no netgame support here. */
+  netgame?: NetgameCaps;
   notes: EngineNotes;
   e2e: EngineE2e;
+}
+
+/** How an instance's launch args mark its netgame role, and what that role means for pausing. */
+export interface NetgameCaps {
+  /** The launch flag that makes an instance the server, e.g. "-host". */
+  hostFlag: string;
+  /** The launch flag that makes an instance a client, e.g. "-connect". */
+  clientFlag: string;
+  /** The console command a client sends to leave spectating; undefined when clients enter as players. */
+  joinCommand?: string;
+  /** step and stepTics leave a client running, since a paused client stalls; unset where step acts on the whole net. */
+  stepLeavesClientRunning?: boolean;
+  /** The caveat set_pause/step/step_until add on each role. */
+  pauseNotes: { server: string; client: string };
 }
 
 /** What `scripts/e2e-smoke.mjs` can expect of a real build of this engine. */
@@ -53,10 +71,14 @@ export interface EngineNotes {
   runCommand: string;
   /** What list_actor_classes lists, e.g. "DECORATE/actor". */
   actorClasses: string;
+  /** Lumps relaunch_instance picks up edits to, e.g. "DECORATE/MAPINFO". */
+  reloadLumps: string;
   /** When summon_at still spawns, after "even while". */
   summonAtWhile: string;
   /** Why summon_at refuses, after "The spawn is refused, reporting why, ". */
   summonAtRefusals: string;
+  /** Closes set_actor_prop's description: where it is refused. */
+  setActorProp: string;
   /** run_acs net-mode and unload caveats, before "save_game refuses". */
   runAcs: string;
   /** Appended to screenshot_file's description; "" for none. */
