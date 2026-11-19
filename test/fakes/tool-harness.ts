@@ -4,6 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ServerContext, type ContextIo, type ServerConfig } from "../../src/context.js";
 import { registerTools } from "../../src/tools.js";
 import { InstanceRegistry } from "../../src/process/registry.js";
+import { engine } from "../../src/engine.js";
+import type { EngineAdapter } from "../../src/adapter.js";
 
 /**
  * Boots the real tool layer against an in-memory MCP transport, so tests drive
@@ -21,8 +23,11 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
     readFileSync: nope("readFileSync"),
     readTextSync: nope("readTextSync"),
     readdirSync: nope("readdirSync"),
+    isDirSync: () => false,
     stampOf: () => "stamp",
+    mtimeOf: nope("mtimeOf"),
     sleep: () => Promise.resolve(), // tests never wait on real time
+    alive: () => true,
     // One deterministic tick instead of a real interval, so progress reporting
     // is exercised without the clock.
     every: (_ms, fn) => {
@@ -38,6 +43,8 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
       spawn: nope("spawn"),
       waitForPort: () => Promise.resolve(),
       clearQuarantine: () => {},
+      ensureDir: () => {},
+      seedConfig: () => {},
     },
     compileAcs: nope("compileAcs"),
     removeDir: nope("removeDir"),
@@ -49,6 +56,8 @@ export interface HarnessOptions {
   config?: Partial<ServerConfig>;
   io?: Partial<ContextIo>;
   registry?: InstanceRegistry;
+  /** Defaults to this repo's adapter; pass a variant to cover the other side of an engine difference. */
+  engine?: EngineAdapter;
 }
 
 export interface Harness {
@@ -111,7 +120,8 @@ export async function startHarness(opts: HarnessOptions = {}): Promise<Harness> 
     screenshotDir: "/shots",
     ...opts.config,
   };
-  const ctx = new ServerContext(config, stubIo(opts.io), opts.registry ?? new InstanceRegistry());
+  const eng = opts.engine ?? engine;
+  const ctx = new ServerContext(eng, config, stubIo(opts.io), opts.registry ?? new InstanceRegistry(eng));
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerTools(server, ctx);
 

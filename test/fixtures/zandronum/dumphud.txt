@@ -1,0 +1,12 @@
+MCP_HUD
+image 19 496 MEDIA0
+text 43 483 100
+text 67 483 /
+text 75 483 100
+text 726 483 50
+text 742 483 /
+text 750 483 200
+image 787 496 CLIPA0
+text 341 122 conformance hud
+image 331 4 M_PAUSE
+msg 0 0.500 0.250 14 conformance hud

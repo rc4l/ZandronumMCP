@@ -38,15 +38,20 @@ export function lineContainsSentinel(line: string, sentinel: string): boolean {
   return line.includes(sentinel);
 }
 
+/** Whether a line is a correlator reply: it starts with a sentinel (an echo or `mcp_status` reply). */
+export function isCorrelatorLine(line: string): boolean {
+  return line.trimStart().startsWith(SENTINEL_PREFIX);
+}
+
 /**
  * Drop another request's correlator replies (lines that START with a sentinel,
  * e.g. a timed-out status probe answering late) from one output message; undefined
- * when nothing else is left. A sentinel merely quoted mid-line stays: `dumphud`
- * echoes on-screen notify text, which can show earlier status lines.
+ * when nothing else is left. Mid-line quotes stay, including notify text from
+ * a hand-typed status command, which does not use bridge dispatch filtering.
  */
 export function stripForeignSentinels(text: string, sentinel: string): string | undefined {
   const lines = text.split("\n");
-  const kept = lines.filter((l) => !l.trimStart().startsWith(SENTINEL_PREFIX) || l.includes(sentinel));
+  const kept = lines.filter((l) => !isCorrelatorLine(l) || l.includes(sentinel));
   if (kept.length === lines.length) return text;
   const rest = kept.join("\n");
   return rest.trim() ? rest : undefined;

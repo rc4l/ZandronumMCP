@@ -2,6 +2,8 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { accessSync, constants, existsSync, mkdtempSync, realpathSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { envName, type EngineAdapter } from "../adapter.js";
+import type { Prelude } from "./profiles.js";
 
 /** Host-side compile of a `run_acs` snippet into a temp dir the engine can read. */
 
@@ -9,10 +11,13 @@ export type AcsCompiler = "bcc" | "acc";
 
 export interface CompileRequest {
   compiler: AcsCompiler;
-  /** Configured executable (ZANDRONUM_BCC/ZANDRONUM_ACC); unset searches PATH. */
+  /** Configured executable (<PREFIX>_BCC/<PREFIX>_ACC); unset searches PATH. */
   exe?: string;
   source: string;
   includeDirs?: string[];
+  /** Defines compiled ahead of the snippet as `mcpdefs.acs`; `origin[i]` is where line i+1 came from. */
+  prelude?: Prelude;
+  engine: Pick<EngineAdapter, "envPrefix" | "ansiPaths">;
 }
 
 /** `token` is `object` as a console token; a failure names the executable that ran, if one was found. */
@@ -33,6 +38,7 @@ export interface CompileDeps {
   /** Canonical path (symlinks resolved), or `p` itself if that fails. */
   realpath: (p: string) => string;
   exists: (p: string) => boolean;
+  platform: NodeJS.Platform;
 }
 
 /** Executable suffixes to try; execFile won't run a .cmd/.bat wrapper. */
@@ -85,12 +91,17 @@ export const defaultCompileDeps: CompileDeps = {
     }
   },
   exists: (p) => existsSync(p),
+  platform: process.platform,
 };
 
 const LIBRARY = /^\s*#library\b/im;
+const LIBRARY_NAME = /^[^\S\r\n]*#library[^\S\r\n]+"([^"]+)".*$/im;
+// bcc's `mcpdefs.acs:N:C:` and acc's `mcpdefs.acs:N:`, either with a directory in front.
+const PRELUDE_REF = /^(?:.*[\\/])?mcpdefs\.acs:(\d+)(?=:)/gm;
+// acc's `Line N in file "mcpdefs.acs"`.
+const ACC_PRELUDE_REF = /Line (\d+) in file "(?:[^"]*[\\/])?mcpdefs\.acs"/g;
 // zt-bcc's and acc's own wording for a missing zcommon.acs.
 const NO_ZCOMMON = /failed to load file: "zcommon\.acs"|Couldn't find include file "zcommon\.acs"/;
-const ENV: Record<AcsCompiler, string> = { bcc: "ZANDRONUM_BCC", acc: "ZANDRONUM_ACC" };
 // zt-bcc first: Debian's `bcc` package is Bruce's C compiler, also installed as `bcc`.
 const DEFAULT_NAMES: Record<AcsCompiler, string[]> = { bcc: ["zt-bcc", "bcc"], acc: ["acc"] };
 const HOME: Record<AcsCompiler, string> = {
@@ -100,7 +111,7 @@ const HOME: Record<AcsCompiler, string> = {
 
 /** The executable to run and its resolved file, or why there is none. */
 function locate(req: CompileRequest, deps: CompileDeps): { exe: string; real: string } | { missing: string } {
-  const env = ENV[req.compiler];
+  const env = envName(req.engine, req.compiler.toUpperCase());
   const exeOnly = deps.exeExts.includes(".exe") ? " Only .exe files run, not .cmd/.bat wrappers." : "";
   if (req.exe !== undefined) {
     // A bare name is looked up on PATH, as execFile would; anything else is a path.
@@ -135,8 +146,14 @@ function bccLibDir(real: string, includeDirs: string[], deps: CompileDeps): stri
   return [path.join(dir, "lib"), path.join(dir, "..", "lib")].find(has);
 }
 
+/** `text` with each prelude line reference replaced by where that line came from. */
+function rewritePreludeRefs(text: string, origin: string[]): string {
+  const at = (n: string, whole: string) => origin[Number(n) - 1] ?? whole;
+  return text.replace(PRELUDE_REF, (whole, n: string) => at(n, whole)).replace(ACC_PRELUDE_REF, (whole, n: string) => at(n, whole));
+}
+
 /** The compiler's own words from an execFileSync failure, minus acc's banner. */
-function diagnosticsOf(err: unknown, compiler: AcsCompiler, exe: string): string {
+function diagnosticsOf(err: unknown, compiler: AcsCompiler, exe: string, prelude?: Prelude): string {
   const e = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string; message?: string };
   if (e.code === "ENOENT") return `couldn't start ${exe} (ENOENT: a broken link or a missing script interpreter?)`;
   let out = `${e.stdout ?? ""}${e.stderr ?? ""}`.trim() || String(e.message);
@@ -147,20 +164,24 @@ function diagnosticsOf(err: unknown, compiler: AcsCompiler, exe: string): string
     const auto = compiler === "bcc" ? ", or keep lib/ next to or one folder above the zt-bcc binary, where it's found automatically" : "";
     out += `\n(zcommon.acs is in ${where}: pass that folder in includeDirs${auto})`;
   }
-  return out;
+  return prelude ? rewritePreludeRefs(out, prelude.origin) : out;
 }
 
 /**
  * `p` as one console token, or why not: a bare token ends at a byte <= 0x20 (UTF-8 too, where char is signed) and
  * expands a leading `$`, a quoted one reads `\"` `\\` `\c` as escapes, and Windows gets `/` separators and no
- * non-ASCII (ANSI fopen).
+ * non-ASCII for an `ansiPaths` engine (ANSI fopen).
  */
-export function consolePath(p: string, platform: NodeJS.Platform = process.platform): { token: string } | { refused: string } {
+export function consolePath(
+  p: string,
+  ansiPaths: boolean,
+  platform: NodeJS.Platform = process.platform,
+): { token: string } | { refused: string } {
   const s = platform === "win32" ? p.replaceAll("\\", "/") : p;
   // Control characters other than tab don't survive the bridge's JSON text decoding.
   const bad = /[";\x00-\x08\x0a-\x1f]/.exec(s);
   if (bad) return { refused: `it contains ${JSON.stringify(bad[0])}` };
-  const wide = platform === "win32" ? /[^\x00-\x7f]/u.exec(s) : null;
+  const wide = platform === "win32" && ansiPaths ? /[^\x00-\x7f]/u.exec(s) : null;
   if (wide) return { refused: `the engine can't open a non-ASCII path (${JSON.stringify(wide[0])}) on Windows` };
   if (!/[^\x21-\x7e]|^\$/.test(s)) return { token: s };
   if (s.includes("\\")) return { refused: "it needs quoting and has a \\, which the console reads as an escape" };
@@ -171,7 +192,7 @@ export function consolePath(p: string, platform: NodeJS.Platform = process.platf
 export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompileDeps): CompileResult {
   const dir = deps.mkdtemp(path.join(tmpdir(), "mcp-runacs-"));
   const object = path.join(dir, "snippet.o");
-  const tok = consolePath(object);
+  const tok = consolePath(object, req.engine.ansiPaths, deps.platform);
   if ("refused" in tok) {
     return {
       ok: false,
@@ -183,13 +204,22 @@ export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompi
   }
   const found = locate(req, deps);
   if ("missing" in found) return { ok: false, dir, diagnostics: found.missing };
-  deps.writeFile(path.join(dir, "snippet.acs"), req.source);
   let main = "snippet.acs";
-  // A non-library object's string indices are untagged, so as module N > 0 its `Log(s:"...")` reads module 0's
-  // strings (live-confirmed); the wrapper `#include`s the snippet, which keeps its line numbers in diagnostics.
-  if (!LIBRARY.test(req.source)) {
+  if (req.prelude) {
+    // acc wants #library first, so a library snippet lends the wrapper its name and its own line goes blank.
+    const named = LIBRARY_NAME.exec(req.source);
     main = "wrap.acs";
-    deps.writeFile(path.join(dir, main), '#library "mcpsnip"\n#include "snippet.acs"\n');
+    deps.writeFile(path.join(dir, "snippet.acs"), named ? req.source.replace(LIBRARY_NAME, "") : req.source);
+    deps.writeFile(path.join(dir, "mcpdefs.acs"), req.prelude.text);
+    deps.writeFile(path.join(dir, main), `#library "${named?.[1] ?? "mcpsnip"}"\n#include "mcpdefs.acs"\n#include "snippet.acs"\n`);
+  } else {
+    deps.writeFile(path.join(dir, "snippet.acs"), req.source);
+    // A non-library object's string indices are untagged, so as module N > 0 its `Log(s:"...")` reads module 0's
+    // strings (live-confirmed); the wrapper `#include`s the snippet, which keeps its line numbers in diagnostics.
+    if (!LIBRARY.test(req.source)) {
+      main = "wrap.acs";
+      deps.writeFile(path.join(dir, main), '#library "mcpsnip"\n#include "snippet.acs"\n');
+    }
   }
   // Resolved against the server's cwd, not the temp dir the compiler runs in.
   const dirs = (req.includeDirs ?? []).map((d) => path.resolve(d));
@@ -198,7 +228,7 @@ export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompi
   try {
     deps.exec(found.exe, [...dirs.flatMap((d) => ["-i", d]), main, object], dir);
   } catch (err) {
-    return { ok: false, dir, diagnostics: diagnosticsOf(err, req.compiler, found.exe), exe: found.exe };
+    return { ok: false, dir, diagnostics: diagnosticsOf(err, req.compiler, found.exe, req.prelude), exe: found.exe };
   }
   return { ok: true, dir, object, token: tok.token };
 }

@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { parseWad } from "../src/map/wad.js";
 import { findMapLumps } from "../src/map/locate.js";
 import { parseSectors, parseLinedefs, parseSidedefs, parseVertexes } from "../src/map/binary.js";
-import { parseTextmap } from "../src/map/udmf.js";
-import { readMap, readMapFromContainer } from "../src/map/index.js";
+import { parseTextmap, parseMoreIds } from "../src/map/udmf.js";
+import { readMap, readMapFromContainer, sectorTags } from "../src/map/index.js";
 import {
   buildWad,
   buildZip,
@@ -126,6 +126,29 @@ describe("parseTextmap", () => {
     const all = [...map.vertices, ...map.linedefs, ...map.sidedefs, ...map.sectors, ...map.things];
     expect(all.some((e) => "ignored" in e)).toBe(false); // 'foobar' dropped
     expect(parseTextmap("sector { x = 1; }").namespace).toBe("");
+  });
+});
+
+describe("sector tags", () => {
+  it("reads moreids the way the engine's tag scan does", () => {
+    const cases: [unknown, number[]][] = [
+      [undefined, []],
+      ["", []],
+      ["5", [5]],
+      ["  5   7 -3 ", [5, 7, -3]],
+      ["5 0 7", [5, 7]], // zero is not a tag
+      ["5 x 7", [5]], // scanning stops at the first non-number
+      [9, [9]], // an unquoted value still counts
+    ];
+    const bad = cases.filter(([raw, want]) => JSON.stringify(parseMoreIds(raw)) !== JSON.stringify(want));
+    expect(bad).toEqual([]);
+  });
+
+  it("combines binary tag, UDMF id and moreids", () => {
+    expect(sectorTags({ tag: 3 })).toEqual([3]);
+    const [udmf] = parseTextmap('sector { id = 1; moreids = "5 6"; }').sectors;
+    expect(sectorTags(udmf)).toEqual([1, 5, 6]);
+    expect(sectorTags({})).toEqual([]);
   });
 });
 

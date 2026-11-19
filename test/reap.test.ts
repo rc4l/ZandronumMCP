@@ -17,16 +17,22 @@ describe("parsePsPids", () => {
     "  503 /Apps/zandronum-mcp-hooks -iwad doom2.wad -file x.pk3",
     "",
   ].join("\n");
+  // Not a fixture pid: in a sandbox PID namespace the real process.pid can be 503.
+  const self = 1;
 
   it("returns pids whose command line contains the needle", () => {
-    expect(parsePsPids(ps, "zandronum-mcp-hooks")).toEqual([501, 503]);
+    expect(parsePsPids(ps, "zandronum-mcp-hooks", self)).toEqual([501, 503]);
   });
 
   it("returns nothing when the needle is absent", () => {
-    expect(parsePsPids(ps, "gzdoom")).toEqual([]);
+    expect(parsePsPids(ps, "gzdoom", self)).toEqual([]);
   });
 
-  it("never returns the MCP server's own pid", () => {
+  it("drops the given self pid", () => {
+    expect(parsePsPids(ps, "zandronum-mcp-hooks", 503)).toEqual([501]);
+  });
+
+  it("defaults self to the MCP server's own pid", () => {
     const line = `${process.pid} /Apps/zandronum-mcp-hooks -iwad x`;
     expect(parsePsPids(line, "zandronum-mcp-hooks")).toEqual([]);
   });
@@ -175,7 +181,9 @@ describe("readPpid", () => {
       }),
     ).toBeUndefined();
   });
-  it("exercises the real default runner without throwing", () => {
-    expect(() => readPpid(process.pid)).not.toThrow();
+  it("runs the real default ps runner (or reads undefined without ps)", () => {
+    // Pinned to linux so the default runner runs on Windows too; a missing or failing ps reads as undefined.
+    const viaPs = readPpid(process.pid, "linux");
+    expect(viaPs === undefined || viaPs === process.ppid).toBe(true);
   });
 });

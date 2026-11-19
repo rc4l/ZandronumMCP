@@ -1,9 +1,103 @@
-import { matchLines, parseKvLines, type KvRecord } from "./lines.js";
+import { firstError, hasHeader, matchLines, parseKv, parseKvLines, type KvRecord } from "./lines.js";
 
 export interface DecorateState {
   sprite: string;
   frame: string;
   tics: number;
+  /** `<OwnerClass>.<index>`, the state's owner and its offset in that class's states. */
+  id?: string;
+  /** Nearest own label at or before the state: `Fire` at the label, `Fire+3` past it. */
+  label?: string;
+}
+
+/** Bit names in bit order; an unnamed set bit reads `bit<N>`. */
+export function bitNames(value: number, names: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < 32; i++) {
+    if ((value >>> i) & 1) out.push(names[i] ?? `bit${i}`);
+  }
+  return out;
+}
+
+/** BT_* in d_event.h, identical in both engines up to BT_USER4; BT_RUN is UZDoom's. */
+export const BUTTON_NAMES = [
+  "attack", "use", "jump", "crouch", "turn180", "altattack", "reload", "zoom",
+  "speed", "strafe", "moveright", "moveleft", "back", "forward", "right", "left",
+  "lookup", "lookdown", "moveup", "movedown", "showscores", "user1", "user2", "user3",
+  "user4", "run",
+] as const;
+
+/** WF_* in d_player.h; WF_USER1OK..WF_USER4OK are UZDoom's. */
+export const WEAPON_FLAG_NAMES = [
+  "weaponready", "weaponbobbing", "weaponreadyalt", "weaponswitchok", "disableswitch",
+  "weaponreloadok", "weaponzoomok", "refireswitchok", "user1ok", "user2ok", "user3ok", "user4ok",
+] as const;
+
+/** One tic's usercmd: raw (`GetPlayerInput` INPUT_*) or after mods (MODINPUT_*). */
+export interface InputCmd {
+  buttons: string[];
+  oldButtons: string[];
+  forward: number;
+  side: number;
+  up: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+}
+
+/** One active psprite layer; known GZDoom layer numbers are named. */
+export interface Psprite {
+  layer: "weapon" | "flash" | "strifehands" | number;
+  sprite: string;
+  frame: string;
+  tics: number;
+  x: number;
+  y: number;
+  id?: string;
+  label?: string;
+}
+
+export interface PlayerWeaponState {
+  input: InputCmd | null;
+  modInput: InputCmd | null;
+  refire: number | null;
+  weaponFlags: string[];
+  /** null: no change pending; "none": switching to no weapon; else the class. */
+  pendingWeapon: string | null;
+  psprites: Psprite[];
+}
+
+const LAYER_NAMES: Record<number, Psprite["layer"]> = { 1: "weapon", 1000: "flash", [-1]: "strifehands" };
+
+/** Player-line keys holding names, kept strings even when numeric-looking. */
+const NAME_KEYS = ["sprite", "frame", "id", "label", "pending"];
+
+function parseInput(kv: KvRecord): InputCmd {
+  return {
+    buttons: bitNames(Number(kv.buttons), BUTTON_NAMES),
+    oldButtons: bitNames(Number(kv.oldbuttons), BUTTON_NAMES),
+    forward: Number(kv.forward),
+    side: Number(kv.side),
+    up: Number(kv.up),
+    yaw: Number(kv.yaw),
+    pitch: Number(kv.pitch),
+    roll: Number(kv.roll),
+  };
+}
+
+function parsePsprite(kv: KvRecord): Psprite {
+  const layer = Number(kv.layer);
+  const out: Psprite = {
+    layer: LAYER_NAMES[layer] ?? layer,
+    sprite: String(kv.sprite),
+    frame: String(kv.frame),
+    tics: Number(kv.tics),
+    x: Number(kv.x),
+    y: Number(kv.y),
+  };
+  if (kv.id !== undefined) out.id = String(kv.id);
+  if (kv.label !== undefined) out.label = String(kv.label);
+  return out;
 }
 
 export interface InventoryItem {
@@ -22,6 +116,8 @@ export interface ActorState {
   weapon: string | null;
   morphTics: number | null;
   inventory: InventoryItem[];
+  /** Input, weapon and psprite state; null for a non-player. */
+  player: PlayerWeaponState | null;
 }
 
 /** Parse `dumpactor` output into a structured actor snapshot. */
@@ -36,11 +132,45 @@ export function parseActorState(lines: string[]): ActorState {
     weapon: null,
     morphTics: null,
     inventory: [],
+    player: null,
   };
+  const player = (): PlayerWeaponState =>
+    (out.player ??= {
+      input: null,
+      modInput: null,
+      refire: null,
+      weaponFlags: [],
+      pendingWeapon: null,
+      psprites: [],
+    });
   for (const raw of lines) {
     for (const line of raw.split(/\r?\n/)) {
       const f = line.trim().split(/\s+/);
+      const kv = () => parseKv(f.slice(1).join(" "), NAME_KEYS);
       switch (f[0]) {
+        case "stateid":
+          if (out.state && f[1]) {
+            out.state.id = f[1];
+            if (f[2]) out.state.label = f[2];
+          }
+          break;
+        case "input":
+          player().input = parseInput(kv());
+          break;
+        case "modinput":
+          player().modInput = parseInput(kv());
+          break;
+        case "weaponinfo": {
+          const w = kv();
+          const p = player();
+          p.refire = Number(w.refire);
+          p.weaponFlags = bitNames(Number(w.flags), WEAPON_FLAG_NAMES);
+          if (w.pending !== undefined) p.pendingWeapon = String(w.pending);
+          break;
+        }
+        case "psprite":
+          player().psprites.push(parsePsprite(kv()));
+          break;
         case "class":
           out.class = f[1] ?? null;
           break;
@@ -116,6 +246,12 @@ const FLAG_LETTERS: Record<string, string> = {
   a: "ambush",
 };
 
+/** Every flag name a `findactors` row can carry. */
+export const FLAG_NAMES = Object.values(FLAG_LETTERS);
+
+/** `findactors`' default `limit`; mirrors the CCMD's in mcp_actorstate.cpp. */
+export const FIND_ACTORS_LIMIT = 200;
+
 export interface FoundActors {
   actors: KvRecord[];
   /** Set when `limit` cut the list short. */
@@ -137,4 +273,27 @@ export function parseFindActors(lines: string[]): FoundActors {
     total: Number(m[2]),
   }))[0];
   return truncated ? { actors, truncated } : { actors };
+}
+
+/** A `findactors` reply parsed, or undefined when it failed (an error line, or no `MCP_FOUND` header). */
+export function parseFoundReply(lines: string[]): FoundActors | undefined {
+  return firstError(lines) === undefined && hasHeader(lines, "MCP_FOUND") ? parseFindActors(lines) : undefined;
+}
+
+/** Whether an expanded row has a flag name, or the derived `alive` (hp > 0 and not a corpse). */
+function hasFlag(a: KvRecord, name: string): boolean {
+  const flags = String(a.flags ?? "").split(",");
+  return name === "alive" ? Number(a.hp) > 0 && !flags.includes("corpse") : flags.includes(name);
+}
+
+/** The rows having (true) or lacking (false) every key in `want`, in distance order, cut to `limit`. */
+export function filterFound(
+  found: FoundActors,
+  want: Record<string, boolean | undefined>,
+  limit: number,
+): FoundActors {
+  const keys = Object.entries(want).filter(([, on]) => on !== undefined);
+  const kept = found.actors.filter((a) => keys.every(([name, on]) => hasFlag(a, name) === on));
+  if (kept.length <= limit) return { actors: kept };
+  return { actors: kept.slice(0, limit), truncated: { shown: limit, total: kept.length } };
 }

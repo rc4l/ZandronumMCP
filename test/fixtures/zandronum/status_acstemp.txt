@@ -1,0 +1,1 @@
+__MCPDONE_2j__ paused=0 menu=off console=up gamestate=level player=alive spectating=0 demo=0 automap=0 chat=0 demorec=0 pending=0 maptime=2827 acstemp=1 health=100 armor=0 cheats=10

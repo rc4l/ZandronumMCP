@@ -1,0 +1,9 @@
+MCP_FOUND
+found class=DoomImp tid=2138897147 hp=60 spawnhp=60 x=-800.0 y=828.0 z=8.0 angle=0.0 pitch=0.0 dist=128.0 sprite=TROO frame=A flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=32.0 y=656.0 z=152.0 angle=0.0 pitch=0.0 dist=833.2 sprite=TROO frame=B flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=256.0 y=272.0 z=-32.0 angle=0.0 pitch=0.0 dist=1139.4 sprite=TROO frame=A flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=320.0 y=304.0 z=-32.0 angle=0.0 pitch=0.0 dist=1187.9 sprite=TROO frame=A flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=320.0 y=224.0 z=-32.0 angle=0.0 pitch=0.0 dist=1217.0 sprite=TROO frame=B flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=1200.0 y=608.0 z=40.0 angle=180.0 pitch=0.0 dist=2002.1 sprite=TROO frame=B flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=1200.0 y=864.0 z=40.0 angle=180.0 pitch=0.0 dist=2006.7 sprite=TROO frame=A flags=mso
+found class=DoomImp tid=0 hp=60 spawnhp=60 x=1248.0 y=608.0 z=40.0 angle=180.0 pitch=0.0 dist=2050.1 sprite=TROO frame=A flags=mso

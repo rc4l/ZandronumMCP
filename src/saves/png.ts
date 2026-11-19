@@ -1,6 +1,8 @@
 // Zandronum/ZDoom savegames (.zds) are PNG files with metadata in tEXt chunks
 // (g_game.cpp: M_AppendPNGText "Title"/"Current Map"/...). Read those chunks.
 
+import type { SaveMeta } from "../adapter.js";
+
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Parse a PNG's tEXt chunks into a keyword->text map. PNG is big-endian. */
@@ -24,15 +26,6 @@ export function parsePngText(buf: Buffer): Record<string, string> {
     off += 8 + len + 4; // type+len header is 8, then data, then 4-byte CRC
   }
   return out;
-}
-
-export interface SaveMeta {
-  file: string;
-  title: string | null;
-  map: string | null;
-  engine: string | null;
-  gameWad: string | null;
-  created: string | null;
 }
 
 /** Pull the save-relevant fields out of a .zds buffer. */

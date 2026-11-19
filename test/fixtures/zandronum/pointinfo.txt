@@ -1,0 +1,5 @@
+MCP_POINT
+point sector=11 inmap=1 floorz=8.0 ceilingz=264.0 light=224 special=0 tag=0
+floortex name=GRASS1
+ceiltex name=F_SKY1
+fit ok=1

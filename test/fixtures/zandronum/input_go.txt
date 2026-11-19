@@ -1,0 +1,7 @@
+MCP_INPUT cleared
+MCP_INPUT seg 1 total=3
+MCP_INPUT seg 2 total=5
+MCP_INPUT armed segs=2 tics=5 maptime=2977
+MCP_INPUT_SEG 1 maptime=2977
+MCP_INPUT_SEG 2 maptime=2980
+MCP_INPUT_END reason=done consumed=5 maptime=2982

@@ -1,0 +1,2 @@
+MCP_FUNCTIONS
+function 0 0 confadd
