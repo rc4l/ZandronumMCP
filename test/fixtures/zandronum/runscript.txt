@@ -1,0 +1,2 @@
+ConfProbe 7
+MCP_RUNSCRIPT script=ConfProbe started=1 result=42 finished=1 module=1

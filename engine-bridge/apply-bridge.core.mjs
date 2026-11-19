@@ -6,7 +6,8 @@
 // Strategy (see anchors.md + the project README):
 //   * NEW files are copied in (zero conflict, ever).
 //   * Existing files get ONE anchored, idempotent one-line insertion each.
-//   * ACS CCMD blocks are appended to p_acs.cpp (where the file-static arrays live).
+//   * ACS CCMD blocks are appended to p_acs.cpp (where the file-static arrays live),
+//     and replaced in place when the overlay's copy changes.
 //
 import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
@@ -21,7 +22,29 @@ export const OVERLAY_FILES = [
   "mcp_actorstate.cpp",
   "mcp_hud.cpp",
   "mcp_hud.h",
+  "mcp_input.cpp",
 ];
+
+// Overlay blocks kept in p_acs.cpp: marker name, source file, log label.
+export const ACS_BLOCKS = [
+  ["MCP_ACSVARS", "mcp_acsvars.inc", "ACS var CCMDs"],
+  ["MCP_MAPVARS", "mcp_mapvars.inc", "map var CCMDs"],
+  ["MCP_MAPSLOT", "mcp_mapslot.inc", "map var slot CCMD"],
+  ["MCP_SCRIPTS", "mcp_scripts.inc", "script/function CCMDs"],
+  ["MCP_RUNACS", "mcp_runacs.inc", "run_acs and run_script CCMDs"],
+];
+
+// Marker of the -host tee (3b), kept in the line's trailing comment.
+export const HOST_TEE = "MCP: -host returns before the tee below";
+
+// The bridge header include, on a file's first unconditional #include.
+const BRIDGE_INCLUDE = {
+  anchor: "^\\s*#include", requireTopLevel: true,
+  line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
+};
+
+// The definition, not d_main.cpp's earlier `void D_DoomLoop ();` prototype.
+const DOOM_LOOP = "^void D_DoomLoop \\(\\)\\s*$";
 
 /** Detect the dominant EOL so rewrites don't churn line endings. */
 export function detectEol(text) {
@@ -107,14 +130,45 @@ export function insertLine(file, { anchor, line, marker, position = "After", sco
   log(`  + patched: ${name} (${marker})`);
 }
 
-/** Idempotent, marker-guarded block append. */
-export function appendOnce(file, marker, body, label, log) {
-  if (hasMarker(file, marker)) {
+/** Keep the one line of `file` starting with `prefix` equal to `line`: appended under `header` when absent, replaced when it differs. */
+export function syncLine(file, { prefix, line, header }, label, log) {
+  const text = readFileSync(file, "utf8");
+  const eol = detectEol(text);
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.startsWith(prefix));
+  if (at < 0) {
+    appendBlock(file, header + eol + line + eol);
+    log(`  + patched: ${basename(file)} (${label})`);
+  } else if (lines[at] === line) {
+    log(`  = already patched: ${basename(file)} (${label})`);
+  } else {
+    lines[at] = line;
+    writeFileSync(file, lines.join(eol));
+    log(`  ~ updated: ${basename(file)} (${label})`);
+  }
+}
+
+/** Keep the block of `file` from `// ==== NAME` to `// ==== end NAME ====` equal to `body`, appending or replacing it. */
+export function syncBlock(file, name, body, label, log) {
+  const text = readFileSync(file, "utf8");
+  const begin = text.indexOf(`// ==== ${name} `);
+  if (begin < 0) {
+    appendBlock(file, body);
+    log(`  + patched: ${basename(file)} (${label})`);
+    return;
+  }
+  const endMark = `// ==== end ${name} ====`;
+  const end = text.indexOf(endMark, begin);
+  if (end < 0) {
+    throw new Error(`${basename(file)}: the ${name} block has no "${endMark}" line, so it can't be replaced.`);
+  }
+  const block = body.trimEnd();
+  if (text.slice(begin, end + endMark.length) === block) {
     log(`  = already patched: ${basename(file)} (${label})`);
     return;
   }
-  appendBlock(file, body);
-  log(`  + patched: ${basename(file)} (${label})`);
+  writeFileSync(file, text.slice(0, begin) + block + text.slice(end + endMark.length));
+  log(`  ~ updated: ${basename(file)} (${label})`);
 }
 
 /**
@@ -138,41 +192,41 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
 
   // 1. New files -- copy overlay verbatim (zero-conflict).
   for (const f of OVERLAY_FILES) copyFileSync(join(overlayDir, f), join(srcSrc, f));
-  log("  + copied overlay: mcp_bridge/event/renderinfo/actorstate/hud");
+  log(`  + copied overlay: ${OVERLAY_FILES.join(" ")}`);
 
   const dmain = join(srcSrc, "d_main.cpp");
   const cconsole = join(srcSrc, "c_console.cpp");
   const vtext = join(srcSrc, "v_text.cpp");
   const vdraw = join(srcSrc, "v_draw.cpp");
   const sbar = join(srcSrc, "g_shared", "sbar.h");
+  const ggame = join(srcSrc, "g_game.cpp");
   const pacs = join(srcSrc, "p_acs.cpp");
   const cmake = join(srcSrc, "CMakeLists.txt");
 
   // 2. d_main.cpp -- include + per-frame poll inside D_DoomLoop (all modes).
-  insertLine(dmain, {
-    anchor: "^\\s*#include", requireTopLevel: true,
-    line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
-  }, log);
+  insertLine(dmain, BRIDGE_INCLUDE, log);
   insertLine(dmain, {
     anchor: "switch \\( NETWORK_GetState\\( \\)\\)", position: "Before",
-    scopeAfter: "void D_DoomLoop",
+    scopeAfter: DOOM_LOOP,
     line: "\t\t\tMCP_Bridge_Poll();", marker: "MCP_Bridge_Poll();",
   }, log);
 
   // 3. c_console.cpp -- include + tee every printed line.
-  insertLine(cconsole, {
-    anchor: "^\\s*#include", requireTopLevel: true,
-    line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
-  }, log);
+  insertLine(cconsole, BRIDGE_INCLUDE, log);
   insertLine(cconsole, {
     anchor: "I_PrintStr \\(outlinecopy\\)",
     line: "\t\tMCP_Bridge_TeeOutput( outlinecopy );", marker: "MCP_Bridge_TeeOutput",
   }, log);
-  // ...but keep the bridge's own correlator lines off the notify area (an
-  // unbraced guard on the one call; it sits inside braces in PrintString).
+  // A -host server returns before that tee, so tee its lines too (anchors.md row 4b; after the tee, whose marker this line contains).
+  insertLine(cconsole, {
+    anchor: "const int length = static_cast<int>\\(strlen \\(outlinecopy\\)\\);", position: "Before",
+    scopeAfter: "For servers, dump message to console window",
+    line: `\t\tMCP_Bridge_TeeOutput( outlinecopy ); // ${HOST_TEE}`, marker: HOST_TEE,
+  }, log);
+  // Bridge replies skip notify only; console, logfile and tee stay untouched (anchors.md row 4a).
   insertLine(cconsole, {
     anchor: "C_AddNotifyString \\(printlevel, outlinecopy\\);", position: "Before",
-    line: "\t\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )", marker: "MCP_Bridge_ShowInNotify",
+    line: "\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )", marker: "MCP_Bridge_ShowInNotify",
   }, log);
 
   // 3a. v_text.cpp -- tee every drawn HUD string (DrawTextV is the funnel).
@@ -204,20 +258,31 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
     line: "\tvoid MCP_DumpMessages();", marker: "MCP_DumpMessages",
   }, log);
 
+  // 3a'''. g_game.cpp -- include + the ticcmd override, right after G_Ticker copied
+  //       the tic's real cmd into players[i].cmd (so demo playback stays untouched).
+  insertLine(ggame, BRIDGE_INCLUDE, log);
+  insertLine(ggame, {
+    anchor: "// check for turbo cheats", position: "Before",
+    scopeAfter: "void G_Ticker",
+    line: "\t\t\t\tMCP_Input_Override( i, cmd );", marker: "MCP_Input_Override",
+  }, log);
+
   // 3b. p_acs.cpp -- append the ACS world/global var, map var, and script CCMDs.
   //     They need access to file-static ACS arrays, so they live inside p_acs.cpp
   //     (appended at EOF -- the most update-stable spot) rather than a new file.
-  appendOnce(pacs, "MCP_ACSVARS", readFileSync(join(overlayDir, "mcp_acsvars.inc"), "utf8"), "ACS var CCMDs appended", log);
-  appendOnce(pacs, "MCP_MAPVARS", readFileSync(join(overlayDir, "mcp_mapvars.inc"), "utf8"), "map var CCMDs appended", log);
-  appendOnce(pacs, "MCP_SCRIPTS", readFileSync(join(overlayDir, "mcp_scripts.inc"), "utf8"), "script/function CCMDs appended", log);
-  appendOnce(pacs, "MCP_RUNACS", readFileSync(join(overlayDir, "mcp_runacs.inc"), "utf8"), "run_acs CCMD appended", log);
+  insertLine(pacs, BRIDGE_INCLUDE, log);
+  for (const [name, inc, label] of ACS_BLOCKS) {
+    syncBlock(pacs, name, readFileSync(join(overlayDir, inc), "utf8"), label, log);
+  }
 
   // 4. CMakeLists.txt -- compile the overlay into the zdoom target.
-  const cmakeEol = detectEol(readFileSync(cmake, "utf8"));
-  const cmakeBody =
-    "# MCP dev bridge (overlay -- not committed upstream)" + cmakeEol +
-    "target_sources( zdoom PRIVATE mcp_bridge.cpp mcp_crash.cpp mcp_event.cpp mcp_renderinfo.cpp mcp_actorstate.cpp mcp_hud.cpp )" + cmakeEol;
-  appendOnce(cmake, "mcp_bridge.cpp", cmakeBody, "target_sources zdoom", log);
+  const units = OVERLAY_FILES.filter((f) => f.endsWith(".cpp"));
+  const target = {
+    prefix: "target_sources( zdoom PRIVATE mcp_bridge.cpp",
+    line: `target_sources( zdoom PRIVATE ${units.join(" ")} )`,
+    header: "# MCP dev bridge (overlay -- not committed upstream)",
+  };
+  syncLine(cmake, target, "target_sources zdoom", log);
 
   log("Done. Rebuild the engine, then launch with ZANDRONUM_BRIDGE_PORT set to enable the bridge.");
 }

@@ -1,0 +1,1 @@
+MCP_MARK n=1 tic=3676 maptime=3121 map=MAP01 x=-800.0 y=700.0 z=8.0 angle=90.0 shot=mcp_mark_9077_20261112-144718_1 note=conf note

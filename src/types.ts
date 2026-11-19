@@ -50,3 +50,6 @@ export interface RunningScript {
   /** Execution state, e.g. "Running", "Delayed", "Suspended". */
   state: string;
 }
+
+/** A tool declining to run in the engine's current state: an error reply, not a failed call, so run_scenario's onFail applies. */
+export class ToolRefusal extends Error {}

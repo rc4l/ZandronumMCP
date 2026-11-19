@@ -1,0 +1,1 @@
+MCP_MAPSLOT module=2 slot=6 index=11 value=205 name=MAPSLOTN

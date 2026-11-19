@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseStatus, describeStatus, statusBlockers, requireField } from "../src/parsers/status.js";
+import { parseStatus, describeStatus, footerNote, isPaused, statusBlockers, requireField } from "../src/parsers/status.js";
 
 const SENTINEL = "__MCPDONE_a1__";
 
@@ -13,7 +13,7 @@ describe("parseStatus", () => {
   });
 
   it("parses every key=value field off the status line", () => {
-    const line = `${SENTINEL} paused=0 menu=off console=up gamestate=level player=alive spectating=0 demo=0 automap=0 chat=0 demorec=0 pending=0 health=100 armor=0`;
+    const line = `${SENTINEL} paused=0 menu=off console=up gamestate=level player=alive spectating=0 demo=0 automap=0 chat=0 demorec=0 health=100 armor=0`;
     expect(parseStatus(line, SENTINEL)).toEqual({
       paused: "0",
       menu: "off",
@@ -25,7 +25,6 @@ describe("parseStatus", () => {
       automap: "0",
       chat: "0",
       demorec: "0",
-      pending: "0",
       health: "100",
       armor: "0",
     });
@@ -50,7 +49,6 @@ describe("describeStatus", () => {
       automap: "0",
       chat: "0",
       demorec: "0",
-      pending: "0",
     };
     expect(describeStatus(status)).toBeUndefined();
   });
@@ -58,6 +56,7 @@ describe("describeStatus", () => {
   it("names an open menu by class and reports every other unusual condition", () => {
     const status = {
       paused: "1",
+      pauseext: "1",
       menu: "on",
       menuclass: "DOptionMenu",
       console: "down",
@@ -72,7 +71,7 @@ describe("describeStatus", () => {
       acstemp: "2",
     };
     expect(describeStatus(status)).toBe(
-      "Engine state: paused, a menu is open (DOptionMenu), console is down, " +
+      "Engine state: paused, paused by focus loss (pauseext), a menu is open (DOptionMenu), console is down, " +
         "not in a level (intermission), player is dead, spectating, " +
         "playing back a demo, automap is open, chat input is open, " +
         "recording a demo, a map/save/demo load is pending, " +
@@ -109,22 +108,30 @@ describe("describeStatus", () => {
   });
 });
 
-describe("statusBlockers", () => {
-  it("lists what stops the sim or eats input, leaving out paused, demorec and acstemp", () => {
-    const status = { paused: "1", menu: "on", chat: "1", demorec: "1", pending: "1", acstemp: "2" };
-    expect(statusBlockers(status)).toEqual([
-      "a menu is open",
-      "chat input is open",
-      "a map/save/demo load is pending",
-    ]);
-  });
+describe("footerNote", () => {
+  const PAUSED = "Engine state: paused.";
+  const MENU = "Engine state: paused, a menu is open.";
+  const NORMAL = "Engine state: back to normal.";
 
-  it("has nothing to list without a snapshot", () => {
-    expect(statusBlockers(undefined)).toEqual([]);
+  it.each<[string, string | undefined, string | undefined, boolean, string | undefined]>([
+    ["prints the first unusual note", undefined, PAUSED, false, PAUSED],
+    ["suppresses a repeat", PAUSED, PAUSED, false, undefined],
+    ["prints the whole note when it changed", PAUSED, MENU, false, MENU],
+    ["says back to normal when the note cleared", PAUSED, undefined, false, NORMAL],
+    ["stays silent while normal", undefined, undefined, false, undefined],
+    ["repeats an unchanged note on an error", PAUSED, PAUSED, true, PAUSED],
+    ["says back to normal on an error too", PAUSED, undefined, true, NORMAL],
+    ["adds nothing to an error while normal", undefined, undefined, true, undefined],
+  ])("%s", (_name, prev, note, isError, expected) => {
+    expect(footerNote(prev, note, isError)).toBe(expected);
   });
 });
 
-describe("requireField", () => {
+describe("statusBlockers / requireField", () => {
+  it("has no blockers to list without a snapshot", () => {
+    expect(statusBlockers(undefined)).toEqual([]);
+  });
+
   it("hands back the snapshot when it carries the field", () => {
     const status = { maptime: "7" };
     expect(requireField(status, true, "maptime")).toEqual({ status });
@@ -141,5 +148,11 @@ describe("requireField", () => {
     expect(requireField(undefined, true, "maptime")).toEqual({
       error: "status read timed out (engine busy, e.g. loading a map); retry",
     });
+  });
+});
+
+describe("isPaused", () => {
+  it("reads any non-zero pause, a focus pause's -1 included, and no snapshot as paused", () => {
+    expect([{ paused: "0" }, { paused: "1" }, { paused: "-1" }, {}, undefined].map(isPaused)).toEqual([false, true, true, true, true]);
   });
 });

@@ -1,0 +1,19 @@
+MCP_ACTOR
+class DoomPlayer
+health 100
+pos -800.0 700.0 8.0
+angle 90.0
+pitch 5.8
+state PLAY A -1
+stateid DoomPlayer.0 Spawn
+weapon Pistol
+morphtics 0
+input buttons=0 oldbuttons=0 forward=0 side=0 up=0 yaw=0 pitch=0 roll=0
+modinput buttons=0 oldbuttons=0 forward=0 side=0 up=0 yaw=0 pitch=0 roll=0
+weaponinfo refire=0 flags=143
+psprite layer=1 sprite=PISG frame=A tics=1 x=0.0 y=32.4 id=Pistol.0 label=Ready
+item Pistol 1 1
+item Fist 1 1
+item Clip 50 200
+item BasicArmor 0 1
+item HexenArmor 1 1

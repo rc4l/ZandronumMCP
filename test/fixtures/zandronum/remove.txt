@@ -1,0 +1,2 @@
+removed class=DoomImp tid=269827475 hp=40 spawnhp=60 x=-600.0 y=700.0 z=8.0 angle=0.0 pitch=0.0
+removed_total count=1

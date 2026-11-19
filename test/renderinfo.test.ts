@@ -28,6 +28,7 @@ describe("parseRenderInfo", () => {
 
   it("keeps values that contain spaces as strings", () => {
     expect(parseRenderInfo(sample).gl_vendor).toBe("Intel Inc.");
+    expect(parseRenderInfo(["device=Intel Inc.", "fps=60"])).toEqual({ device: "Intel Inc.", fps: 60 });
   });
 
   it("handles multiple lines arriving in one chunk and an empty value", () => {

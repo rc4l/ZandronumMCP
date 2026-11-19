@@ -1,0 +1,1 @@
+inv op=give item=Clip held=Clip before=48 after=53 class=DoomPlayer tid=0 hp=100 spawnhp=100 x=-800.0 y=746.8 z=8.0 angle=270.0 pitch=5.8 flags=fso name=DoomPlayer
