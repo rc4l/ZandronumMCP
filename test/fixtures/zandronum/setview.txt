@@ -1,0 +1,1 @@
+view angle=90.0 pitch=5.8 tid=568587182 class=DoomImp

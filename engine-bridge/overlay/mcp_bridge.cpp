@@ -71,12 +71,6 @@
 // server does for stdin. Forward-declared to avoid pulling in c_dispatch.h.
 void AddCommandString(char *text, int keynum);
 
-// The engine's global pause flag (defined in g_game.cpp). The MCP drives it
-// directly so a backgrounded, defocused window can keep advancing tics — vital
-// for automated testing, because single-player auto-pauses on focus loss
-// (S_SetSoundPaused in i_input.cpp forces `paused = -1`, with no cvar to opt out).
-extern int paused;
-
 // Post a synthetic input event (implemented in mcp_event.cpp, which owns the
 // engine-header includes so this socket TU doesn't have to).
 void MCP_PostInputEvent( int type, int subtype, int data1, int data2 );
@@ -84,11 +78,16 @@ void MCP_PostInputEvent( int type, int subtype, int data1, int data2 );
 // Snapshot the just-drawn HUD frame (implemented in mcp_hud.cpp).
 void MCP_HUD_BeginFrame();
 
+// Opens/redirects the engine's log file (c_cmds.cpp, behind the "logfile" CCMD), so a
+// bridge-driven instance can redirect its own log.
+void StartLogging( const char *szFileName );
+
 namespace
 {
-	// One queued inbound message: either a console command or an input event.
+	// One queued inbound message: a console command, an input event, a pause, or the client gone.
 	struct InboundMsg
 	{
+		bool        isLost = false;        // the client disconnected, queued in order after its last message
 		bool        isEvent;
 		bool        isPause;               // setpause control (isPause == true)
 		int         pauseVal;              // target value for the engine `paused` flag
@@ -98,6 +97,7 @@ namespace
 
 	bool             g_initialized = false;
 	bool             g_enabled     = false;
+	int              g_replyDepth  = 0; // main thread only
 	mcp_socket_t     g_listen      = MCP_INVALID_SOCKET;
 	mcp_socket_t     g_client      = MCP_INVALID_SOCKET;
 	std::mutex       g_lock;
@@ -286,9 +286,9 @@ namespace
 
 			// hello now advertises this engine's PID so the MCP can verify it attached
 			// to the process it just spawned (and not a stale bridge on the same port).
-			char hello[256];
+			char hello[512];
 			snprintf( hello, sizeof( hello ),
-				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.5.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\"]}",
+				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.16.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\",\"mapslot\",\"rec\",\"clock\",\"walk\",\"frametime\",\"recvars\",\"recplayer\",\"rechost\",\"demo\"]}",
 				mcp_getpid() );
 			SendLine( hello );
 
@@ -345,6 +345,14 @@ namespace
 
 			if ( g_client == s ) g_client = MCP_INVALID_SOCKET;
 			mcp_close_socket( s );
+			{
+				std::lock_guard<std::mutex> lk( g_lock );
+				InboundMsg msg;
+				msg.isLost = true;
+				msg.isEvent = msg.isPause = false;
+				msg.pauseVal = msg.evtype = msg.subtype = msg.d1 = msg.d2 = 0;
+				g_inbound.push_back( msg );
+			}
 		}
 	}
 
@@ -353,6 +361,26 @@ namespace
 		g_initialized = true;
 		int port = BridgePort();
 		if ( port == 0 ) return; // opt-in: only runs with ZANDRONUM_BRIDGE_PORT set
+
+		// Log to the launcher's bridge-session folder, so agent test runs never mix into the
+		// user's real-play gamelogs.
+		const char *gamelogPrefix = getenv( "ZANDRONUM_BRIDGE_GAMELOG" );
+		if ( gamelogPrefix != NULL && gamelogPrefix[0] != '\0' )
+			StartLogging( gamelogPrefix );
+
+		// Settings the tools rely on, applied after autoexec.cfg/config so they always win.
+		{
+			MCPBridgeReplyGuard reply;
+			static const char *const startupCmds[] =
+			{
+				"screenshot_quiet 1",
+			};
+			for ( const char *c : startupCmds )
+			{
+				std::string cmd( c );
+				AddCommandString( const_cast<char *>( cmd.c_str() ), 0 );
+			}
+		}
 
 		// Arm the parent-death watchdog before anything else. Start it even if the
 		// bind below fails (e.g. a stale engine already holds the port): a bridgeless
@@ -391,6 +419,12 @@ namespace
 	}
 }
 
+void MCP_Bridge_ReplyBegin() { ++g_replyDepth; }
+void MCP_Bridge_ReplyEnd() { --g_replyDepth; }
+bool MCP_Bridge_ShowInNotify( const char * ) { return g_replyDepth == 0; }
+MCPBridgeReplySuspendGuard::MCPBridgeReplySuspendGuard() : depth( g_replyDepth ) { g_replyDepth = 0; }
+MCPBridgeReplySuspendGuard::~MCPBridgeReplySuspendGuard() { g_replyDepth = depth; }
+
 void MCP_Bridge_Poll()
 {
 	MCP_Crash_Init(); // belt-and-suspenders: also arm from the frame loop (idempotent)
@@ -408,12 +442,18 @@ void MCP_Bridge_Poll()
 			if ( !g_inbound.empty() ) { msg = g_inbound.front(); g_inbound.pop_front(); have = true; }
 		}
 		if ( !have ) break;
+		// The MCP drives `paused` directly so a defocused window keeps advancing tics.
 		if ( msg.isPause )
-			paused = msg.pauseVal;
+			MCP_Clock_SetPause( msg.pauseVal );
+		else if ( msg.isLost )
+			MCP_Clock_ClientLost();
 		else if ( msg.isEvent )
 			MCP_PostInputEvent( msg.evtype, msg.subtype, msg.d1, msg.d2 );
 		else
+		{
+			MCPBridgeReplyGuard reply;
 			AddCommandString( const_cast<char *>( msg.text.c_str() ), 0 );
+		}
 	}
 }
 
@@ -431,9 +471,9 @@ void MCP_Bridge_TeeOutput( const char *text )
 	SendLine( json );
 }
 
-bool MCP_Bridge_ShowInNotify( const char *text )
+void MCP_Bridge_LogLine( const char *text )
 {
-	return text == NULL || strncmp( text, "__MCPDONE_", 10 ) != 0;
+	if ( text != NULL ) LogWrite( text );
 }
 
 void MCP_Bridge_Shutdown()

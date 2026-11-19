@@ -86,6 +86,43 @@ display), set it explicitly in the MCP env:
 (An explicit `DISPLAY` is always respected; the `:0` default only fills it in when
 it's missing.)
 
+### Linux / X11: window position on a specific monitor
+
+By default the launched window lands wherever the window manager places it. To
+pin it to a specific spot (e.g. a second monitor), set `ZANDRONUM_WINDOW_POS` in
+the MCP env — the server passes it through as SDL's windowed-mode position hint.
+Find your monitor's origin with `xrandr --listmonitors` (the `+X+Y` in each
+line):
+
+```json
+"env": { "ZANDRONUM_BRIDGE_PORT": "7777", "ZANDRONUM_EXE": "...", "ZANDRONUM_WINDOW_POS": "1920,0" }
+```
+
+There is no default here — unlike `DISPLAY`, a fixed position isn't safe for
+every setup (it would push a single-monitor user's window off-screen), so
+nothing moves unless you opt in. As with `DISPLAY`, an explicit
+`SDL_VIDEO_WINDOW_POS` already in the launching environment is always respected
+over `ZANDRONUM_WINDOW_POS`.
+
+### Engine config, IWAD and gamelog locations
+
+Launched engines run on `zandronum-mcp.ini` beside the engine binary, so a clean
+rebuild of a build folder resets it. To keep one config across builds, point
+`ZANDRONUM_CONFIG` at an ini anywhere else (`config: "isolated"` copies sit beside
+it). `ZANDRONUM_IWAD` is the IWAD a launch uses when the call names none; without
+it the engine searches for one itself. Each launch logs the console to a timestamped
+gamelog (the bridge log `read_marks` and log waits read is rewritten each launch;
+`read_marks gamelog=` reads an earlier session's marks from these), by default under a per-user folder in
+the system temp dir; `ZANDRONUM_BRIDGE_GAMELOG` sets the path prefix instead. Set it
+to keep playtest marks across reboots (temp dirs get cleaned), and on Windows when the
+temp path has non-ASCII characters (the engine can't open those). A bare demo name
+(`launch_instance` `record`, `play_demo`) resolves in `ZANDRONUM_DEMO_DIR`, else the
+engine's folder:
+
+```json
+"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD", "ZANDRONUM_BRIDGE_GAMELOG": "/path/to/logs/zagamelog", "ZANDRONUM_DEMO_DIR": "/path/to/demos" }
+```
+
 ### Gatekeeper / "Apple could not verify…"
 
 The app is ad-hoc signed but **not notarized** (a paid Apple Developer ID would be
@@ -104,12 +141,13 @@ the only thing Gatekeeper gates. A self-built engine is never quarantined, so th
 only affects downloads. (For a no-friction download you'd sign with a Developer ID
 and notarize the app in CI — not wired up here.)
 
-## ACS compilers for `run_acs`
+## ACS compilers
 
 `run_acs` compiles its snippet on the host before loading it into the game, so it needs
 [zt-bcc](https://github.com/zeta-group/zt-bcc) (the default) or
-[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. Nothing else needs a
-compiler: without one, the server and every other tool work as usual, and `run_acs` returns
+[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. The map-var tools' and
+`record`'s `sourceFile` build the named source with zt-bcc too. Nothing else needs a
+compiler: without one, the server and every other tool work as usual, and these calls return
 an error naming what to install and which variable to set, without touching the game.
 
 The server looks for `zt-bcc`, then `bcc`, on `PATH` (and `acc` for acc). To use a binary
@@ -136,6 +174,48 @@ if that path has non-ASCII characters (a user folder like `C:\Users\José`). If 
 refuses its temp folder, set `TEMP` in the MCP env to an existing plain-ASCII folder, e.g.
 `"TEMP": "C:\\mcp-temp"` (`TMPDIR` on Linux and macOS).
 
+### Per-project profiles
+
+One server usually serves every mod, so per-project settings go in a profile file kept in
+that project, not in the server's env. `ZANDRONUM_RUNACS_PROFILES` lists the profile files,
+separated like `PATH` (`:` on Linux and macOS, `;` on Windows):
+
+```json
+"env": { "ZANDRONUM_RUNACS_PROFILES": "/path/to/mymod/scripts/mcp-run-acs.json" }
+```
+
+A profile applies itself to a snippet that `#import`s one of the libraries it lists (compared
+by file name, in any case), so no call needs an extra argument and a snippet for another mod
+never picks it up. The files are read on every call, so an edit applies right away.
+
+```json
+{ "imports": ["mylib.acs"],
+  "includeDirs": ["."],
+  "rawDefines": true,
+  "defineFiles": ["mydefs.acs"],
+  "defines": { "MCP_PROBE": "1" } }
+```
+
+- `imports` (required): library file names that select the profile.
+- `includeDirs`: added after the call's own `includeDirs`, before zt-bcc's `lib/`.
+- `defineFiles`: headers whose `#define` and `#libdefine` lines are copied ahead of the
+  snippet. `#import` doesn't carry a library's `#define`s, and including the header again
+  fails on its enums, so the server copies only the define lines. A define inside an `#if`
+  block (other than the header's include guard) is refused, since the server can't evaluate
+  conditionals.
+- `defines`: extra `NAME: value` defines. A name a defineFile also defines is an error.
+- `rawDefines`: puts `#pragma raw define on` first (zt-bcc only), for libraries whose
+  headers use it. Raw defines are case-sensitive, and so are the snippet's own `#define`s
+  while such a profile applies.
+
+Relative paths resolve against the profile file's folder. The reply names each profile it
+applied (`profile: <file>`), and a compile error in a copied define points at its own file
+and line, not at the generated prelude.
+
+### Map vars by source (`sourceFile`)
+
+How the map-var tools find a var the module doesn't export, and why that fails closed: PROTOCOL.md, ACS.
+
 ## Run the server from source
 
 Instead of the published `npx` package, you can point your client at a local build:
@@ -153,4 +233,9 @@ Then in your client config use `"command": "node"` with the path to your
 ```bash
 npm test
 npm run coverage
+npm run docs:tools   # after adding or re-describing a tool (CI runs docs:tools:check)
+npm run e2e          # drives a real bridge build through the tools; needs ZANDRONUM_EXE, ZANDRONUM_IWAD and a display
 ```
+
+The `docs:tools` scripts load TypeScript with `node --import`, which needs Node 20.6 or newer.
+`npm run e2e` reads `dist/`, so build first; it ends with `all checks passed`.

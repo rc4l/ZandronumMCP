@@ -1,18 +1,20 @@
 import net from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { envName, type EngineAdapter } from "../adapter.js";
 
 /**
- * Accept `ZANDRONUM_EXE` pointing at either the macOS `.app` bundle or the binary
+ * Accept `<PREFIX>_EXE` pointing at either the macOS `.app` bundle or the binary
  * directly. A `.app` resolves to its inner executable so users can set the
- * friendly bundle path (e.g. `…/zandronum-mcp-hooks.app`); anything else is
+ * friendly bundle path (e.g. `…/<engine>-mcp-hooks.app`); anything else is
  * returned as-is.
  */
-export function resolveEngineExe(exe: string): string {
+export function resolveEngineExe(exe: string, engine: Pick<EngineAdapter, "macHooksBinary">): string {
   const trimmed = exe.replace(/[/\\]+$/, "");
   return trimmed.toLowerCase().endsWith(".app")
-    ? join(trimmed, "Contents", "MacOS", "zandronum-mcp-hooks")
+    ? join(trimmed, "Contents", "MacOS", engine.macHooksBinary)
     : exe;
 }
 
@@ -20,7 +22,7 @@ export function resolveEngineExe(exe: string): string {
  * Where the engine writes named screenshots: its own working directory, which
  * is `dirname(exe)` (the engine cwd we launch it in). The engine ignores
  * `screenshot_dir` for named screenshots, so the server must look here. An
- * explicit `ZANDRONUM_SCREENSHOT_DIR` overrides; with no engine configured we
+ * explicit `<PREFIX>_SCREENSHOT_DIR` overrides; with no engine configured we
  * fall back to the process cwd.
  */
 export function resolveScreenshotDir(
@@ -73,9 +75,13 @@ export function clearQuarantine(
  * never opens a window (see issue #6). We only fill it in when missing, so a real
  * `DISPLAY` (e.g. `:1`, or a remote one) is always respected.
  *
+ * The engine's `launchEnv` extras and `<PREFIX>_BRIDGE_GAMELOG` (its native logfile, not the
+ * `<PREFIX>_BRIDGE_LOG` console tee) fill in only what the launching environment leaves unset.
+ *
  * Pure and parameterised so every branch is unit-testable off-platform.
  */
 export function buildLaunchEnv(
+  engine: EngineAdapter,
   exe: string,
   port: number,
   base: NodeJS.ProcessEnv = process.env,
@@ -84,11 +90,11 @@ export function buildLaunchEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...base,
-    ZANDRONUM_BRIDGE_PORT: String(port),
+    [envName(engine, "BRIDGE_PORT")]: String(port),
     // The engine's watchdog exits the game if this PID (the MCP server) dies, so a
     // launched instance can never outlive the session that spawned it and linger
     // as a stale bridge. See mcp_bridge.cpp WatchdogThread.
-    ZANDRONUM_BRIDGE_PARENT_PID: String(parentPid),
+    [envName(engine, "BRIDGE_PARENT_PID")]: String(parentPid),
   };
   if (platform === "darwin") {
     const dir = dirname(exe);
@@ -97,7 +103,38 @@ export function buildLaunchEnv(
   if (platform === "linux" && !env.DISPLAY) {
     env.DISPLAY = ":0";
   }
+  for (const [key, value] of Object.entries(engine.launchEnv(base, platform))) {
+    if (!env[key]) env[key] = value;
+  }
+  env[envName(engine, "BRIDGE_GAMELOG")] = launchGamelog(engine, exe, env);
   return env;
+}
+
+/** The gamelog prefix a launch of `exe` passes the engine: `<PREFIX>_BRIDGE_GAMELOG` when set, else the engine's default. */
+export function launchGamelog(
+  engine: Pick<EngineAdapter, "envPrefix" | "gamelogDefault">,
+  exe: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  return env[envName(engine, "BRIDGE_GAMELOG")] || engine.gamelogDefault(exe);
+}
+
+/** `launchGamelog`, or with no engine configured only an explicit `<PREFIX>_BRIDGE_GAMELOG`. */
+export function gamelogPrefix(
+  engine: Pick<EngineAdapter, "envPrefix" | "gamelogDefault">,
+  exe: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  return exe === undefined ? env[envName(engine, "BRIDGE_GAMELOG")] || undefined : launchGamelog(engine, exe, env);
+}
+
+/** A per-user dir under the OS temp dir: `<tmp>/<name>-<uid>`, or `<tmp>/<name>` with no uid (Windows' is per-user). */
+export function userTempDir(
+  name: string,
+  tmp: string = tmpdir(),
+  proc: { getuid?: () => number } = process,
+): string {
+  return join(tmp, proc.getuid ? `${name}-${proc.getuid()}` : name);
 }
 
 /**
@@ -112,7 +149,7 @@ export const DEFAULT_BASE_PORT = 7777;
 /**
  * The bridge port an engine's instance 1 listens on.
  *
- * An explicit ZANDRONUM_BRIDGE_PORT always wins. Otherwise it is derived from
+ * An explicit <PREFIX>_BRIDGE_PORT always wins. Otherwise it is derived from
  * the engine's path, so several checkouts of the same project — each with its
  * own build, each driven by its own editor session — land in different port
  * ranges without anyone configuring anything. Sessions sharing one build still
@@ -132,19 +169,27 @@ export function deriveBasePort(exe: string | undefined, envPort: string | undefi
 
 /**
  * Where a launched engine keeps its own config, so agent-driven runs can't
- * scribble on the user's real settings — or on another checkout's.
+ * scribble on the user's real settings.
  *
- * Zandronum stores its ini under the user's preferences directory, NOT next to
- * the binary, so every build on the machine reads and writes the SAME file.
- * Two branches under test then trade cvars through it: whichever engine exits
- * last wins, and the next launch of any other build inherits the result. Giving
- * each build its own `-config` breaks that channel.
+ * The engines store their ini under the user's preferences directory, NOT next
+ * to the binary, so every build on the machine reads and writes the SAME file —
+ * this gives each checkout a dedicated one beside its binary instead.
+ * `<PREFIX>_CONFIG` moves it, a relative one resolving against the engine's cwd as `-config` would.
  */
-export function configPathFor(exe: string): string {
-  return join(dirname(exe), "zandronum-mcp.ini");
+export function configPathFor(
+  engine: Pick<EngineAdapter, "serverName" | "envPrefix">,
+  exe: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return resolve(dirname(exe), env[envName(engine, "CONFIG")] || `${engine.serverName}.ini`);
 }
 
-/** Game options that map to Zandronum command-line arguments. */
+/** A `config: "isolated"` instance's copy of the shared ini, keyed by bridge port since instance ids repeat across sessions. */
+export function isolatedConfigPathFor(engine: Pick<EngineAdapter, "serverName">, shared: string, port: number): string {
+  return join(dirname(shared), `${engine.serverName}-${port}.ini`);
+}
+
+/** Game options that map to engine command-line arguments. */
 export interface LaunchOptions {
   iwad?: string;
   files?: string[];
@@ -156,23 +201,58 @@ export interface LaunchOptions {
   extraArgs?: string[];
   /** Engine config file (-config). See configPathFor. */
   config?: string;
+  /** Absolute `.lmp` path for `-record`. */
+  record?: string;
+  /** Savegame path for `-loadgame`. */
+  save?: string;
+  /** Pin `use_mouse`; defaults to on for a recording (a human plays the take), else left as the config has it. */
+  mouse?: boolean;
 }
 
-/** Build the argv for launching Zandronum from structured options. */
-export function buildLaunchArgs(o: LaunchOptions): string[] {
+/** Where engine args carry `flag` (`-config`, `+name`, `-host`; case-insensitive), or -1. */
+function argIndex(args: readonly string[] | undefined, flag: string): number {
+  const want = flag.toLowerCase();
+  return args?.findIndex((a) => a.toLowerCase() === want) ?? -1;
+}
+
+/** Whether engine args carry `flag`. */
+export function hasArg(args: readonly string[] | undefined, flag: string): boolean {
+  return argIndex(args, flag) >= 0;
+}
+
+/** The value after `flag` in engine args, if any. */
+export function argValue(args: readonly string[] | undefined, flag: string): string | undefined {
+  const i = argIndex(args, flag);
+  return i >= 0 ? args![i + 1] : undefined;
+}
+
+/** Build the engine argv from structured options; `env` feeds the engine's own pins. */
+export function buildLaunchArgs(
+  o: LaunchOptions,
+  engine: EngineAdapter,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const args: string[] = [];
   // Before anything else: the config decides defaults the rest may override.
-  if (o.config) args.push("-config", o.config);
-  if (o.iwad) args.push("-iwad", o.iwad);
+  // A caller's own -config in extraArgs wins, as the engine takes the first match.
+  if (o.config && !hasArg(o.extraArgs, "-config")) args.push("-config", o.config);
+  if (o.iwad && !hasArg(o.extraArgs, "-iwad")) args.push("-iwad", o.iwad);
   if (o.files?.length) args.push("-file", ...o.files);
   if (o.skill !== undefined) args.push("-skill", String(o.skill));
-  if (o.map) args.push("+map", o.map);
+  if (o.save) args.push(...engine.loadSaveArgs(o.save, o.extraArgs));
+  if (o.record) args.push("-record", o.record);
+  // All +set pins precede +map, since +args run in argv order and a map launch would otherwise load with the saved values.
+  //
   // Always pin the video mode so an agent-driven instance never inherits the
-  // saved `fullscreen` cvar (it's CVAR_ARCHIVE) and takes over the user's
+  // saved fullscreen cvar (it's CVAR_ARCHIVE) and takes over the user's
   // screen. Windowed unless fullscreen is explicitly requested.
-  args.push("+set", "fullscreen", o.fullscreen ? "1" : "0");
+  args.push("+set", engine.fullscreenCvar, o.fullscreen ? "1" : "0");
+  // use_mouse only on request: `mouse`, and on by default for a recording, which a human plays.
+  if (o.mouse !== undefined || o.record !== undefined) args.push("+set", "use_mouse", o.mouse === false ? "0" : "1");
   if (o.width !== undefined) args.push("+set", "vid_defwidth", String(o.width));
   if (o.height !== undefined) args.push("+set", "vid_defheight", String(o.height));
+  args.push(...engine.launchPins(o, env));
+  if (o.map) args.push("+map", o.map);
   if (o.extraArgs?.length) args.push(...o.extraArgs);
   return args;
 }
@@ -210,16 +290,26 @@ export async function findFreePort(
   throw new Error(`no free bridge port in [${start}, ${start + span})`);
 }
 
-/** Poll until host:port accepts a connection, or throw after `attempts` tries. */
-export async function waitForPort(
-  host: string,
-  port: number,
-  attempts = 60,
-  intervalMs = 700,
-  connect: (h: string, p: number) => Promise<boolean> = tryConnect,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
-): Promise<void> {
+export interface WaitForPortOptions {
+  attempts?: number;
+  intervalMs?: number;
+  connect?: (h: string, p: number) => Promise<boolean>;
+  sleep?: (ms: number) => Promise<void>;
+  /** Stops the polling once fired, e.g. when the engine already exited. */
+  signal?: AbortSignal;
+}
+
+/** Poll until host:port accepts a connection, or throw after `attempts` tries or on abort. */
+export async function waitForPort(host: string, port: number, opts: WaitForPortOptions = {}): Promise<void> {
+  const {
+    attempts = 60,
+    intervalMs = 700,
+    connect = tryConnect,
+    sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+    signal,
+  } = opts;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) throw new Error(`stopped waiting for bridge port ${host}:${port}`);
     if (await connect(host, port)) return;
     if (i < attempts - 1) await sleep(intervalMs);
   }

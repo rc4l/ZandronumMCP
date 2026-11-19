@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it, expect } from "vitest";
 import net from "node:net";
 import {
@@ -12,21 +13,42 @@ import {
   findFreePort,
   deriveBasePort,
   configPathFor,
+  isolatedConfigPathFor,
+  userTempDir,
+  argValue,
+  hasArg,
   DEFAULT_BASE_PORT,
   PORT_STRIDE,
 } from "../src/process/launch.js";
+import type { EngineAdapter } from "../src/adapter.js";
+import { engine } from "../src/engine.js";
+import { abs, norm } from "./fakes/paths.js";
+
+// A neutral variant, so core launch logic is tested apart from any one engine's values
+// (those are in test/engine.test.ts).
+const T: EngineAdapter = {
+  ...engine,
+  envPrefix: "ENG",
+  serverName: "eng-mcp",
+  macHooksBinary: "eng-hooks",
+  fullscreenCvar: "fs",
+  launchPins: (_o, env) => ["+set", "pin", env.PIN ?? "0"],
+  launchEnv: (base, platform) => (platform === "linux" && base.POS ? { WIN_POS: base.POS } : {}),
+  gamelogDefault: (exe) => `${exe}.gamelog`,
+  loadSaveArgs: (save) => ["-loadgame", save],
+};
 
 describe("resolveEngineExe", () => {
-  it("resolves a macOS .app bundle to its inner executable", () => {
-    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.app")).toBe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks");
+  it("resolves a macOS .app bundle to the engine's inner executable", () => {
+    expect(resolveEngineExe("/Apps/eng.app", T)).toBe(norm("/Apps/eng.app/Contents/MacOS/eng-hooks"));
   });
   it("tolerates a trailing slash and case", () => {
-    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.APP/")).toBe("/Apps/zandronum-mcp-hooks.APP/Contents/MacOS/zandronum-mcp-hooks");
+    expect(resolveEngineExe("/Apps/eng.APP/", T)).toBe(norm("/Apps/eng.APP/Contents/MacOS/eng-hooks"));
   });
   it("leaves a direct binary path untouched", () => {
-    expect(resolveEngineExe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks")).toBe("/Apps/zandronum-mcp-hooks.app/Contents/MacOS/zandronum-mcp-hooks");
-    expect(resolveEngineExe("/games/zandronum-mcp-hooks")).toBe("/games/zandronum-mcp-hooks");
-    expect(resolveEngineExe("C:/games/zandronum-mcp-hooks.exe")).toBe("C:/games/zandronum-mcp-hooks.exe");
+    expect(resolveEngineExe("/Apps/eng.app/Contents/MacOS/eng-hooks", T)).toBe("/Apps/eng.app/Contents/MacOS/eng-hooks");
+    expect(resolveEngineExe("/games/eng-hooks", T)).toBe("/games/eng-hooks");
+    expect(resolveEngineExe("C:/games/eng-hooks.exe", T)).toBe("C:/games/eng-hooks.exe");
   });
 });
 
@@ -61,45 +83,65 @@ describe("clearQuarantine", () => {
 
 describe("buildLaunchEnv", () => {
   it("always sets the bridge port from the instance port", () => {
-    const env = buildLaunchEnv("/games/zandronum.exe", 7778, {}, "win32");
-    expect(env.ZANDRONUM_BRIDGE_PORT).toBe("7778");
+    const env = buildLaunchEnv(T, "/games/eng.exe", 7778, {}, "win32");
+    expect(env.ENG_BRIDGE_PORT).toBe("7778");
     expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
   });
 
   it("passes the MCP's PID as the watchdog parent so the engine can't outlive it", () => {
-    const env = buildLaunchEnv("/games/zandronum.exe", 7778, {}, "win32", 4242);
-    expect(env.ZANDRONUM_BRIDGE_PARENT_PID).toBe("4242");
+    const env = buildLaunchEnv(T, "/games/eng.exe", 7778, {}, "win32", 4242);
+    expect(env.ENG_BRIDGE_PARENT_PID).toBe("4242");
   });
 
   it("preserves the base env", () => {
-    const env = buildLaunchEnv("/games/zandronum", 7777, { PATH: "/usr/bin" }, "linux");
+    const env = buildLaunchEnv(T, "/games/eng", 7777, { PATH: "/usr/bin" }, "linux");
     expect(env.PATH).toBe("/usr/bin");
     expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
   });
 
   it("on macOS points DYLD_LIBRARY_PATH at the engine's folder (for the SDL2 dlopen)", () => {
-    const env = buildLaunchEnv("/Apps/zandronum/zandronum", 7777, {}, "darwin");
-    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/zandronum");
+    const env = buildLaunchEnv(T, "/Apps/eng/eng", 7777, {}, "darwin");
+    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/eng");
   });
 
   it("on macOS prepends to an existing DYLD_LIBRARY_PATH rather than clobbering it", () => {
-    const env = buildLaunchEnv("/Apps/zandronum/zandronum", 7777, { DYLD_LIBRARY_PATH: "/opt/lib" }, "darwin");
-    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/zandronum:/opt/lib");
+    const env = buildLaunchEnv(T, "/Apps/eng/eng", 7777, { DYLD_LIBRARY_PATH: "/opt/lib" }, "darwin");
+    expect(env.DYLD_LIBRARY_PATH).toBe("/Apps/eng:/opt/lib");
   });
 
   it("on Linux defaults DISPLAY to :0 when the IDE didn't pass one (issue #6)", () => {
-    const env = buildLaunchEnv("/games/zandronum", 7777, {}, "linux");
+    const env = buildLaunchEnv(T, "/games/eng", 7777, {}, "linux");
     expect(env.DISPLAY).toBe(":0");
   });
 
   it("on Linux respects an existing DISPLAY", () => {
-    const env = buildLaunchEnv("/games/zandronum", 7777, { DISPLAY: ":1" }, "linux");
+    const env = buildLaunchEnv(T, "/games/eng", 7777, { DISPLAY: ":1" }, "linux");
     expect(env.DISPLAY).toBe(":1");
   });
 
   it("never sets DISPLAY off Linux", () => {
-    expect(buildLaunchEnv("/g/z.exe", 7777, {}, "win32").DISPLAY).toBeUndefined();
-    expect(buildLaunchEnv("/g/z", 7777, {}, "darwin").DISPLAY).toBeUndefined();
+    expect(buildLaunchEnv(T, "/g/z.exe", 7777, {}, "win32").DISPLAY).toBeUndefined();
+    expect(buildLaunchEnv(T, "/g/z", 7777, {}, "darwin").DISPLAY).toBeUndefined();
+  });
+
+  it("adds the engine's own env extras", () => {
+    expect(buildLaunchEnv(T, "/games/eng", 7777, { POS: "1920,0" }, "linux").WIN_POS).toBe("1920,0");
+    expect(buildLaunchEnv(T, "/games/eng", 7777, {}, "linux").WIN_POS).toBeUndefined();
+  });
+
+  it("lets the launching environment win over an engine extra", () => {
+    const env = buildLaunchEnv(T, "/games/eng", 7777, { WIN_POS: "0,0", POS: "1920,0" }, "linux");
+    expect(env.WIN_POS).toBe("0,0");
+  });
+
+  it("defaults the gamelog from the engine", () => {
+    const env = buildLaunchEnv(T, "/games/eng/eng", 7777, {}, "linux");
+    expect(env.ENG_BRIDGE_GAMELOG).toBe("/games/eng/eng.gamelog");
+  });
+
+  it("respects an existing gamelog", () => {
+    const env = buildLaunchEnv(T, "/games/eng/eng", 7777, { ENG_BRIDGE_GAMELOG: "/custom/prefix" }, "linux");
+    expect(env.ENG_BRIDGE_GAMELOG).toBe("/custom/prefix");
   });
 });
 
@@ -121,8 +163,12 @@ describe("findFreePort", () => {
 });
 
 describe("buildLaunchArgs", () => {
-  it("defaults to windowed with no other options", () => {
-    expect(buildLaunchArgs({})).toEqual(["+set", "fullscreen", "0"]);
+  it("defaults to windowed, with no other options", () => {
+    expect(buildLaunchArgs({}, T, {})).toEqual(["+set", "fs", "0", "+set", "pin", "0"]);
+  });
+
+  it("passes the server env to the engine's own pins", () => {
+    expect(buildLaunchArgs({}, T, { PIN: "7" }).slice(-3)).toEqual(["+set", "pin", "7"]);
   });
 
   it("maps every option to its flag", () => {
@@ -135,25 +181,75 @@ describe("buildLaunchArgs", () => {
       width: 1920,
       height: 1080,
       extraArgs: ["-nomonsters"],
-    });
+    }, T, {});
     expect(args).toEqual([
       "-iwad", "freedoom2.wad",
       "-file", "a.pk3", "b.wad",
       "-skill", "4",
-      "+map", "MAP01",
-      "+set", "fullscreen", "0",
+      "+set", "fs", "0",
       "+set", "vid_defwidth", "1920",
       "+set", "vid_defheight", "1080",
+      "+set", "pin", "0",
+      "+map", "MAP01",
       "-nomonsters",
     ]);
   });
 
+  it("puts +map after every +set pin, so a launch with `map` can't load a live level on the saved values", () => {
+    const args = buildLaunchArgs({ map: "MAP01", mouse: false, width: 640 }, T, {});
+    const mapIndex = args.indexOf("+map");
+    const lastSetIndex = args.lastIndexOf("+set");
+    expect(mapIndex).toBeGreaterThan(lastSetIndex);
+  });
+
   it("treats empty arrays as absent", () => {
-    expect(buildLaunchArgs({ files: [], extraArgs: [] })).toEqual(["+set", "fullscreen", "0"]);
+    expect(buildLaunchArgs({ files: [], extraArgs: [] }, T, {})).toEqual(["+set", "fs", "0", "+set", "pin", "0"]);
   });
 
   it("emits fullscreen 1 when true", () => {
-    expect(buildLaunchArgs({ fullscreen: true })).toEqual(["+set", "fullscreen", "1"]);
+    expect(buildLaunchArgs({ fullscreen: true }, T, {}).slice(0, 3)).toEqual(["+set", "fs", "1"]);
+  });
+
+  it("reads the server's own env for the pins by default", () => {
+    expect(buildLaunchArgs({}, T)).toEqual(buildLaunchArgs({}, T, process.env));
+  });
+
+  it("pins use_mouse only when mouse is set, and on by default for a recording", () => {
+    const mouse = (o: Parameters<typeof buildLaunchArgs>[0]) => {
+      const args = buildLaunchArgs(o, T, {});
+      return args.includes("use_mouse") ? args.slice(args.indexOf("use_mouse") - 1, args.indexOf("use_mouse") + 2) : [];
+    };
+    expect(mouse({})).toEqual([]);
+    expect(mouse({ mouse: true })).toEqual(["+set", "use_mouse", "1"]);
+    expect(mouse({ mouse: false })).toEqual(["+set", "use_mouse", "0"]);
+    expect(mouse({ record: "/d/a.lmp" })).toEqual(["+set", "use_mouse", "1"]);
+    expect(mouse({ record: "/d/a.lmp", mouse: false })).toEqual(["+set", "use_mouse", "0"]);
+  });
+
+  it("passes save and record as -loadgame and -record before the +set pins", () => {
+    expect(buildLaunchArgs({ save: "/s/base.zds", record: "/d/a.lmp", mouse: false }, T, {}).slice(0, 4)).toEqual([
+      "-loadgame", "/s/base.zds", "-record", "/d/a.lmp",
+    ]);
+  });
+
+  it("builds the save args through the adapter, which sees the caller's extraArgs", () => {
+    const E: EngineAdapter = { ...T, loadSaveArgs: (save, extra) => ["-ls", save, ...(extra ?? [])] };
+    const args = buildLaunchArgs({ save: "/s/base.zds", extraArgs: ["-x"] }, E, {});
+    expect(args.slice(0, 4)).toEqual(["-ls", "/s/base.zds", "-x", "+set"]);
+    expect(buildLaunchArgs({ save: "/s/base.zds" }, E, {}).slice(0, 3)).toEqual(["-ls", "/s/base.zds", "+set"]);
+  });
+
+  it("pins vid_defwidth/vid_defheight only when given", () => {
+    const size = (o: Parameters<typeof buildLaunchArgs>[0]) =>
+      buildLaunchArgs(o, T, {}).flatMap((a, i, all) => (a.startsWith("vid_def") ? [a, all[i + 1]] : []));
+    expect(size({})).toEqual([]);
+    expect(size({ width: 640 })).toEqual(["vid_defwidth", "640"]);
+    expect(size({ height: 480 })).toEqual(["vid_defheight", "480"]);
+  });
+
+  it("puts the engine's pins ahead of the caller's extraArgs so they can still override", () => {
+    const args = buildLaunchArgs({ extraArgs: ["+set", "pin", "2"] }, T, {});
+    expect(args.slice(-6)).toEqual(["+set", "pin", "0", "+set", "pin", "2"]);
   });
 });
 
@@ -175,7 +271,7 @@ describe("resolveScreenshotDir", () => {
 
 describe("waitForPort", () => {
   it("resolves once connect succeeds", async () => {
-    await expect(waitForPort("h", 1, 5, 1, async () => true)).resolves.toBeUndefined();
+    await expect(waitForPort("h", 1, { attempts: 5, intervalMs: 1, connect: async () => true })).resolves.toBeUndefined();
   });
 
   it("retries then throws when the port never opens", async () => {
@@ -184,8 +280,24 @@ describe("waitForPort", () => {
       calls += 1;
       return false;
     };
-    await expect(waitForPort("h", 1, 3, 1, connect, async () => {})).rejects.toThrow(/never opened/);
+    await expect(
+      waitForPort("h", 1, { attempts: 3, intervalMs: 1, connect, sleep: async () => {} }),
+    ).rejects.toThrow(/never opened/);
     expect(calls).toBe(3);
+  });
+
+  it("stops polling once its signal is aborted", async () => {
+    const polling = new AbortController();
+    let calls = 0;
+    const connect = async () => {
+      calls += 1;
+      if (calls === 2) polling.abort();
+      return false;
+    };
+    await expect(
+      waitForPort("h", 1, { attempts: 60, intervalMs: 1, connect, sleep: async () => {}, signal: polling.signal }),
+    ).rejects.toThrow(/stopped waiting for bridge port h:1/);
+    expect(calls).toBe(2);
   });
 
   it("works against a real port that opens slightly late (default connect/sleep)", async () => {
@@ -199,7 +311,7 @@ describe("waitForPort", () => {
       void probe;
     });
     setTimeout(() => server.listen(port, "127.0.0.1"), 60);
-    await waitForPort("127.0.0.1", port, 30, 25);
+    await waitForPort("127.0.0.1", port, { attempts: 30, intervalMs: 25 });
     expect(await tryConnect("127.0.0.1", port)).toBe(true);
     await new Promise<void>((r) => server.close(() => r()));
   });
@@ -247,16 +359,41 @@ describe("deriveBasePort", () => {
 });
 
 describe("configPathFor", () => {
-  it("puts the engine's config next to the binary, not in the shared user ini", () => {
-    expect(configPathFor(join("/repos/a/build", "zandronum"))).toBe(
-      join("/repos/a/build", "zandronum-mcp.ini"),
-    );
+  it("gives each checkout its own ini beside the engine binary", () => {
+    expect(configPathFor(T, join("/a", "eng"), {})).toBe(abs("/a/eng-mcp.ini"));
+    expect(configPathFor(T, join("/b", "eng"), {})).toBe(abs("/b/eng-mcp.ini"));
+  });
+  it("takes <PREFIX>_CONFIG over the default, ignoring an empty one", () => {
+    expect(configPathFor(T, join("/a", "eng"), { ENG_CONFIG: "/c/mine.ini" })).toBe(abs("/c/mine.ini"));
+    expect(configPathFor(T, join("/a", "eng"), { ENG_CONFIG: "" })).toBe(abs("/a/eng-mcp.ini"));
+  });
+  it("resolves a relative <PREFIX>_CONFIG against the engine's folder, as the engine would", () => {
+    expect(configPathFor(T, join("/a", "eng"), { ENG_CONFIG: join("cfg", "mine.ini") })).toBe(abs("/a/cfg/mine.ini"));
+  });
+  it("reads the process env when none is given", () => {
+    expect(configPathFor(T, join("/a", "eng"))).toBe(configPathFor(T, join("/a", "eng"), process.env));
+  });
+});
+
+describe("isolatedConfigPathFor", () => {
+  it("sits beside the shared ini, keyed by bridge port", () => {
+    expect(isolatedConfigPathFor(T, join("/c", "mine.ini"), 7781)).toBe(join("/c", "eng-mcp-7781.ini"));
+  });
+});
+
+describe("userTempDir", () => {
+  it("keys the dir by uid where there is one, so users sharing a temp dir don't collide", () => {
+    expect(userTempDir("eng-mcp", "/tmp", { getuid: () => 1000 })).toBe(join("/tmp", "eng-mcp-1000"));
+    expect(userTempDir("eng-mcp", "C:\\Temp", {})).toBe(join("C:\\Temp", "eng-mcp"));
+  });
+  it("defaults to the OS temp dir and this process", () => {
+    expect(userTempDir("eng-mcp")).toBe(userTempDir("eng-mcp", tmpdir(), process));
   });
 });
 
 describe("buildLaunchArgs config", () => {
   it("passes -config first so later flags win", () => {
-    expect(buildLaunchArgs({ config: "/b/z.ini", iwad: "d2.wad" }).slice(0, 4)).toEqual([
+    expect(buildLaunchArgs({ config: "/b/z.ini", iwad: "d2.wad" }, T, {}).slice(0, 4)).toEqual([
       "-config",
       "/b/z.ini",
       "-iwad",
@@ -265,6 +402,38 @@ describe("buildLaunchArgs config", () => {
   });
 
   it("omits -config when none is given", () => {
-    expect(buildLaunchArgs({}).includes("-config")).toBe(false);
+    expect(buildLaunchArgs({}, T, {}).includes("-config")).toBe(false);
+  });
+
+  it.each([
+    ["config", "-CONFIG", "/b/z.ini", "/t/mine.ini"],
+    ["iwad", "-Iwad", "/w/DOOM2.WAD", "/t/FREEDOOM2.WAD"],
+  ])("drops the default %s when extraArgs brings its own", (key, flag, ours, theirs) => {
+    const args = buildLaunchArgs({ [key]: ours, extraArgs: [flag, theirs] }, T, {});
+    expect(args.includes(ours)).toBe(false);
+    expect(args.slice(-2)).toEqual([flag, theirs]);
+  });
+
+  it("finds the value after a flag in any case, as a whole arg only", () => {
+    expect(argValue(["-nosound", "-Config", "/t/a.ini"], "-config")).toBe("/t/a.ini");
+    expect(argValue(["-connect", "127.0.0.1", "+NAME", "client_a"], "+name")).toBe("client_a");
+    expect(argValue(["-config"], "-config")).toBeUndefined();
+    expect(argValue(["-nosound"], "-config")).toBeUndefined();
+    expect(argValue(undefined, "+name")).toBeUndefined();
+    expect(argValue(["+name", "-hostile"], "-host")).toBeUndefined();
+  });
+
+  it("spots a flag in any case, even with no value after it", () => {
+    expect(hasArg(["-nosound", "-CONFIG"], "-config")).toBe(true);
+    expect(hasArg(["-CONFIG"], "-Config")).toBe(true);
+    expect(hasArg(["-nosound"], "-config")).toBe(false);
+    expect(hasArg(undefined, "-config")).toBe(false);
+  });
+
+  it("keeps the default -config when extraArgs has none", () => {
+    expect(buildLaunchArgs({ config: "/b/z.ini", extraArgs: ["-nosound"] }, T, {}).slice(0, 2)).toEqual([
+      "-config",
+      "/b/z.ini",
+    ]);
   });
 });

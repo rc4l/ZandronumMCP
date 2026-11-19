@@ -1,11 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { parsePlayerState, parseTarget, withLiveStatus } from "../src/parsers/playerstate.js";
+import { parsePlayerState, parseTarget, playersReply, withLiveStatus } from "../src/parsers/playerstate.js";
 import type { PlayerState } from "../src/parsers/playerstate.js";
 
+// Captured currentpos replies: Zandronum's single "lightlevel", UZDoom's sector + actor pair.
+const CURRENTPOS = {
+  zandronum:
+    "Current player position: (128.500,-64.000,0.000), angle: 270.000, floorheight: -8.000, sector:12, lightlevel: 144",
+  uzdoom:
+    "Current player position: (128.500,-64.000,0.000), angle: 270.000, floorheight: -8.000, sector:12, sector lightlevel: 144, actor lightlevel: -1",
+};
+
 describe("parsePlayerState", () => {
-  it("parses currentpos including negative coordinates", () => {
-    const line =
-      "Current player position: (128.500,-64.000,0.000), angle: 270.000, floorheight: -8.000, sector:12, lightlevel: 144";
+  it.each(Object.entries(CURRENTPOS))("parses %s's currentpos including negative coordinates", (_e, line) => {
     expect(parsePlayerState([line])).toEqual({
       x: 128.5,
       y: -64,
@@ -16,21 +22,28 @@ describe("parsePlayerState", () => {
       light: 144,
     });
   });
-  it("returns null when there is no position line", () => {
-    expect(parsePlayerState(["nothing here"])).toBeNull();
+  it.each(["nothing here", "You are not in game!"])("returns null for %j", (line) => {
+    expect(parsePlayerState([line])).toBeNull();
   });
 });
 
 describe("parseTarget", () => {
-  it("parses a linetarget result", () => {
-    expect(parseTarget(["Target=DoomImp, Health=60, Spawnhealth=60"])).toEqual({
+  it.each([
+    ["Zandronum", "Target=DoomImp, Health=60, Spawnhealth=60"],
+    ["UZDoom", "Class=DoomImp, Health=60, Spawnhealth=60"],
+    ["UZDoom player", "Player=bob, Class=DoomPlayer, Health=60, Spawnhealth=100"],
+  ])("parses a %s linetarget result", (_e, line) => {
+    expect(parseTarget([line])).toMatchObject({ health: 60, target: expect.stringMatching(/^Doom/) });
+  });
+  it("keeps the class name and spawn health", () => {
+    expect(parseTarget(["Class=DoomImp, Health=60, Spawnhealth=60"])).toEqual({
       target: "DoomImp",
       health: 60,
       spawnHealth: 60,
     });
   });
-  it("returns null when nothing is aimed at", () => {
-    expect(parseTarget(["(no target)"])).toBeNull();
+  it.each(["(no target)", "No target found"])("returns null for %j", (line) => {
+    expect(parseTarget([line])).toBeNull();
   });
 });
 
@@ -70,5 +83,13 @@ describe("withLiveStatus", () => {
 
   it("reads spectating=1 as true", () => {
     expect(withLiveStatus(base, { spectating: "1" }).spectating).toBe(true);
+  });
+});
+
+describe("playersReply", () => {
+  it("returns the player rows under MCP_PLAYERS, else undefined", () => {
+    expect(playersReply(["MCP_PLAYERS", "player slot=0 name=Player"])).toEqual([{ slot: 0, name: "Player" }]);
+    expect(playersReply(["MCP_PLAYERS"])).toEqual([]);
+    expect(playersReply(["Unknown command \"dumpplayers\""])).toBeUndefined();
   });
 });

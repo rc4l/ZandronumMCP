@@ -5,7 +5,7 @@ import type { BridgeMessage } from "../../src/types.js";
 
 /**
  * A real TCP server that speaks the bridge NDJSON protocol, standing in for a
- * patched zandronum.exe. Lets us integration-test the entire MCP server with no
+ * patched engine binary. Lets us integration-test the entire MCP server with no
  * game running: register canned responses per command substring, and the fake
  * replays them followed by the echoed sentinel so correlation completes.
  *
@@ -52,7 +52,7 @@ export class FakeBridge {
   private probesToSwallow = 0;
   private readonly rawHandlers: Array<{ match: string; messages: Record<string, unknown>[] }> = [];
   private readonly swallowed: string[] = [];
-  private readonly commandHooks: Array<{ match: string; run: () => void }> = [];
+  private readonly commandHooks: Array<{ match: string; run: (command: string) => void }> = [];
   /** Every message the client sent — lets tests assert fire-and-forget sends. */
   readonly received: Array<{ t?: string; text?: string }> = [];
   private readonly swallowCommands: boolean;
@@ -61,6 +61,7 @@ export class FakeBridge {
   private readonly pauseWaiters: Array<(v: number) => void> = [];
   readonly events: RecordedEvent[] = [];
   readonly pauses: number[] = [];
+  private pauseInStatus = false;
   /** Fields echoed back on the mcp_status correlator line. Override with `setStatus`. */
   private status: Record<string, string | undefined> = DEFAULT_STATUS;
   port = 0;
@@ -106,7 +107,7 @@ export class FakeBridge {
   /** Run `run` whenever a command containing `match` arrives, before the reply
    *  is built, so a test can model a command's side effect (e.g. a cheat
    *  toggling the status snapshot). */
-  onCommand(match: string, run: () => void): this {
+  onCommand(match: string, run: (command: string) => void): this {
     this.commandHooks.push({ match, run });
     return this;
   }
@@ -189,6 +190,8 @@ export class FakeBridge {
         } else if (msg.t === "setpause") {
           const v = Number(msg.paused);
           this.pauses.push(v);
+          // As the engine's master pause flag, which mcp_status reports (opt-in: trackPause).
+          if (this.pauseInStatus) this.status = { ...this.status, paused: String(v) };
           for (const w of this.pauseWaiters.splice(0)) w(v);
         }
       }
@@ -213,7 +216,7 @@ export class FakeBridge {
       this.probesToSwallow--;
       return;
     }
-    for (const h of this.commandHooks) if (command.includes(h.match)) h.run();
+    for (const h of this.commandHooks) if (command.includes(h.match)) h.run(command);
 
     const raw = this.rawHandlers.find((h) => command.includes(h.match));
     const handler = raw ? undefined : this.handlers.find((h) => command.includes(h.match));
@@ -246,6 +249,12 @@ export class FakeBridge {
   /** Resolve with the next input event the client posts. */
   waitForEvent(): Promise<RecordedEvent> {
     return new Promise((resolve) => this.eventWaiters.push(resolve));
+  }
+
+  /** Let each setpause the client posts set the status snapshot's paused field, as the engine does. */
+  trackPause(): this {
+    this.pauseInStatus = true;
+    return this;
   }
 
   /** Resolve with the next setpause value (0/1) the client posts. */

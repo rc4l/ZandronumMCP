@@ -1,0 +1,1 @@
+MCP_CLOCK frozen=1 gametic=468 maptime=468 frac=1/1 interp=1 jobs=0 steps=4 shots=1 reason=done frametime=1 framems=15753 armed=0

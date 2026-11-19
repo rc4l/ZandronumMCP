@@ -63,14 +63,14 @@ export function readPpid(
   }
 }
 
-/** Parse `ps -A -o pid=,command=` output into PIDs whose command contains needle. */
-export function parsePsPids(psOutput: string, needle: string): number[] {
+/** Parse `ps -A -o pid=,command=` output into PIDs whose command contains needle, minus selfPid. */
+export function parsePsPids(psOutput: string, needle: string, selfPid = process.pid): number[] {
   const pids: number[] = [];
   for (const line of psOutput.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || !trimmed.includes(needle)) continue;
     const pid = Number.parseInt(trimmed.split(/\s+/, 1)[0], 10);
-    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) pids.push(pid);
+    if (Number.isInteger(pid) && pid > 0 && pid !== selfPid) pids.push(pid);
   }
   return pids;
 }

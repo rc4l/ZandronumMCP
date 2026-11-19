@@ -1,14 +1,51 @@
 import path from "node:path";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { InstanceRegistry, defaultLaunchIo, type LaunchIo } from "./process/registry.js";
-import { findFreePort } from "./process/launch.js";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  EngineExitedError,
+  InstanceRegistry,
+  PortWaitError,
+  defaultLaunchIo,
+  defaultQuitIo,
+  type LaunchIo,
+  type QuitResult,
+} from "./process/registry.js";
+import {
+  deriveBasePort,
+  findFreePort,
+  gamelogPrefix,
+  resolveEngineExe,
+  resolveScreenshotDir,
+  tryConnect,
+} from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
+import { crashLogPath } from "./process/startuplog.js";
 import { buildIndex, type AcsIndex } from "./acs/symbols.js";
-import { compileAcs, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
+import { compileAcs, defaultCompileDeps, removeDir, type CompileRequest, type CompileResult } from "./acs/compile.js";
+import { resolveMapSlot, type MapSlotRequest, type MapSlotResult } from "./acs/probe.js";
+import { collectAcsModulesAt, type AcsModule } from "./acs/collect.js";
+import { importsOf, parseProfile, profilesFor, type RunAcsProfile } from "./acs/profiles.js";
 import { readMapFromContainer, type MapData } from "./map/index.js";
-import { captureScreenshot } from "./screenshot/capture.js";
+import { captureScreenshot, readShot } from "./screenshot/capture.js";
 import type { BridgeClient } from "./bridge/transport.js";
+import type { PlayedDemo } from "./demo/play.js";
+import { envName, type EngineAdapter } from "./adapter.js";
 
 /** Everything the tools need from the environment, resolved once at startup. */
 export interface ServerConfig {
@@ -19,10 +56,72 @@ export interface ServerConfig {
   screenshotDir: string;
   iwad?: string;
   acsSrc?: string;
+  /** Savegame dir: `<PREFIX>_SAVE_DIR`, else the engine's default (`resolveSaveDir`). */
   saveDir?: string;
   /** `run_acs` compilers; default to `zt-bcc`/`bcc` or `acc` on PATH. */
   bcc?: string;
   acc?: string;
+  /** `run_acs` profile files (`<PREFIX>_RUNACS_PROFILES`, `path.delimiter`-separated). */
+  runAcsProfiles?: string[];
+  /** The gamelog prefix launches use (`gamelogPrefix`); its dir holds earlier sessions' gamelogs. */
+  gamelog?: string;
+  /** Where a bare `record` name lands: `<PREFIX>_DEMO_DIR`, else the exe's dir. */
+  demoDir?: string;
+}
+
+/** The server's config from `<PREFIX>_*` env vars, so MCP clients can pass it in their config. */
+export function configFromEnv(engine: EngineAdapter, env: NodeJS.ProcessEnv): ServerConfig {
+  const get = (suffix: string) => env[envName(engine, suffix)];
+  // Accept either the macOS .app bundle or the binary directly.
+  const raw = get("EXE");
+  const exe = raw ? resolveEngineExe(raw, engine) : undefined;
+  const profiles = (get("RUNACS_PROFILES") ?? "").split(path.delimiter).map((p) => p.trim()).filter(Boolean);
+  return {
+    host: get("BRIDGE_HOST") ?? "127.0.0.1",
+    // Derived from the engine path unless pinned, so separate checkouts don't all fight over 7777.
+    basePort: deriveBasePort(exe, get("BRIDGE_PORT")),
+    exe,
+    screenshotDir: resolveScreenshotDir(exe, get("SCREENSHOT_DIR")),
+    iwad: get("IWAD"),
+    acsSrc: get("ACS_SRC"),
+    saveDir: engine.resolveSaveDir(env, exe),
+    bcc: get("BCC"),
+    acc: get("ACC"),
+    runAcsProfiles: profiles.length > 0 ? profiles : undefined,
+    gamelog: gamelogPrefix(engine, exe, env),
+    demoDir: get("DEMO_DIR") ?? (exe && path.dirname(exe)),
+  };
+}
+
+/** `launch_instance`'s tool-level options, `iwad` already resolved. */
+export interface LaunchArgs {
+  iwad?: string;
+  files?: string[];
+  map?: string;
+  skill?: number;
+  fullscreen?: boolean;
+  width?: number;
+  height?: number;
+  extraArgs?: string[];
+  config?: "shared" | "isolated";
+  /** false: return once spawned; the instance attaches on first use. */
+  wait?: boolean;
+  /** The absolute `.lmp` path a `-record` launch writes, so tools know the instance records. */
+  record?: string;
+  /** The absolute savegame path a launch starts from (`-loadgame`). */
+  save?: string;
+  /** Pin `use_mouse` (`buildLaunchArgs`). */
+  mouse?: boolean;
+}
+
+/** What `relaunch_instance` reuses: the last launch's options and where it ran. */
+export interface LastLaunch {
+  args: LaunchArgs;
+  port: number;
+  logFile: string;
+  enginePid?: number;
+  /** The bridge version its hello gave, once attached. */
+  bridge?: string;
 }
 
 /**
@@ -33,10 +132,17 @@ export interface ContextIo {
   existsSync: (p: string) => boolean;
   readFileSync: (p: string) => Buffer;
   readTextSync: (p: string) => string;
+  /** Up to the first `bytes` bytes of a file, so a type check needn't read it whole. */
+  readHeadSync: (p: string, bytes: number) => Buffer;
   readdirSync: (p: string) => string[];
+  isDirSync: (p: string) => boolean;
+  realpathSync: (p: string) => string;
   /** Change-detection stamp for a file; used to invalidate parse caches. */
   stampOf: (p: string) => string;
+  mtimeOf: (p: string) => Date;
   sleep: (ms: number) => Promise<void>;
+  /** Whether a process is still running. */
+  alive: (pid: number) => boolean;
   /** Run `fn` every `ms` until the returned cancel is called. */
   every: (ms: number, fn: () => void) => () => void;
   capture: (
@@ -44,24 +150,85 @@ export interface ContextIo {
     dir: string,
     opts?: { name?: string; keep?: boolean },
   ) => Promise<{ base64: string; path: string }>;
+  /** Wait for a shot the engine was told to write elsewhere (`<dir>/<name>.png`) and read it; deleted unless `keep`. */
+  readShot: (dir: string, name: string, keep: boolean) => Promise<{ base64: string; path: string }>;
   findFreePort: (start: number) => Promise<number>;
-  hasBridge: (exe: string) => boolean;
+  /** Whether host:port accepts a connection right now (one try). */
+  portOpen: (host: string, port: number) => Promise<boolean>;
+  hasBridge: (exe: string, marker: string) => boolean;
   reap: (exe: string, opts?: ReapOptions) => Promise<ReapResult>;
   launchIo: LaunchIo;
   compileAcs: (req: CompileRequest) => CompileResult;
   removeDir: (dir: string) => void;
+  /** A fresh temp dir named `prefix` plus a unique suffix (mkdtempSync). */
+  mkdtemp: (prefix: string) => string;
+  /** Delete a file; a missing one is no error. */
+  removeFile: (p: string) => void;
+  /** The map-var tools' `sourceFile` lookup: two compiles in a temp dir it removes itself. */
+  resolveMapSlot: (req: MapSlotRequest) => MapSlotResult[];
+  mkdirp: (dir: string) => void;
+  /** A file's sha1 and size, read in chunks. */
+  sha1Of: (p: string) => { sha1: string; bytes: number };
+  /** The git HEAD and dirtiness of the work tree holding `p`, or undefined outside one. */
+  gitRevOf: (p: string) => { rev: string; dirty: boolean } | undefined;
+  /** Write via a temp file and rename, so a reader never sees a half-written file. */
+  writeFileAtomic: (p: string, data: string | Buffer) => void;
+  now: () => Date;
+}
+
+function sha1File(p: string): { sha1: string; bytes: number } {
+  const hash = createHash("sha1");
+  const buf = Buffer.alloc(1 << 20);
+  const fd = openSync(p, "r");
+  let bytes = 0;
+  try {
+    for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0; bytes += n) hash.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return { sha1: hash.digest("hex"), bytes };
+}
+
+function gitRev(p: string): { rev: string; dirty: boolean } | undefined {
+  const dir = statSync(p).isDirectory() ? p : path.dirname(p);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+  try {
+    return { rev: git("rev-parse", "HEAD").trim(), dirty: git("status", "--porcelain").trim() !== "" };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeAtomic(p: string, data: string | Buffer): void {
+  const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, data, { flag: "wx" });
+  renameSync(tmp, p);
 }
 
 export const defaultContextIo: ContextIo = {
   existsSync: (p) => existsSync(p),
   readFileSync: (p) => readFileSync(p),
   readTextSync: (p) => readFileSync(p, "utf8"),
+  readHeadSync: (p, bytes) => {
+    const fd = openSync(p, "r");
+    try {
+      const buf = Buffer.alloc(bytes);
+      return buf.subarray(0, readSync(fd, buf, 0, bytes, 0));
+    } finally {
+      closeSync(fd);
+    }
+  },
   readdirSync: (p) => readdirSync(p),
+  isDirSync: (p) => statSync(p).isDirectory(),
+  realpathSync: (p) => realpathSync(p),
   stampOf: (p) => {
     const s = statSync(p);
     return `${s.mtimeMs}:${s.size}`;
   },
+  mtimeOf: (p) => statSync(p).mtime,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  alive: defaultQuitIo.alive,
   every: (ms, fn) => {
     const timer = setInterval(fn, ms);
     // Never let a progress ticker hold the process open.
@@ -69,12 +236,22 @@ export const defaultContextIo: ContextIo = {
     return () => clearInterval(timer);
   },
   capture: (client, dir, opts) => captureScreenshot(client, { dir, ...opts }),
+  readShot: (dir, name, keep) => readShot({ dir, name, keep }),
   findFreePort: (start) => findFreePort(start),
-  hasBridge: (exe) => hasBridge(exe),
+  portOpen: (host, port) => tryConnect(host, port),
+  hasBridge: (exe, marker) => hasBridge(exe, marker),
   reap: (exe, opts) => reapOrphanEngines(exe, defaultReapIo, opts),
   launchIo: defaultLaunchIo,
   compileAcs: (req) => compileAcs(req),
   removeDir: (dir) => removeDir(dir),
+  mkdtemp: (prefix) => mkdtempSync(prefix),
+  removeFile: (p) => rmSync(p, { force: true }),
+  resolveMapSlot: (req) => resolveMapSlot(req, { readFile: (p) => readFileSync(p), compile: defaultCompileDeps, removeDir }),
+  mkdirp: (dir) => void mkdirSync(dir, { recursive: true }),
+  sha1Of: sha1File,
+  gitRevOf: gitRev,
+  writeFileAtomic: writeAtomic,
+  now: () => new Date(),
 };
 
 /**
@@ -97,21 +274,30 @@ export class ServerContext {
    * instance is an error, not a guess.
    */
   private readonly boundPorts = new Map<number, number>();
-  /** Per-instance engine console logfile (ZANDRONUM_BRIDGE_LOG). */
+  /** Per-instance engine console logfile (<PREFIX>_BRIDGE_LOG). */
   private readonly logFiles = new Map<number, string>();
   /** In-flight attaches, keyed by instance — see `clientFor`. */
   private readonly attaching = new Map<number, Promise<BridgeClient>>();
-  /** PID of the engine each instance was launched as, when the bridge reported
-   *  one. Used to catch a re-attach landing on a different process. */
+  /** Engine PID per instance (the launched child's, or an attached bridge's): checked on re-attach and matched against a get_crash report. */
   private readonly enginePids = new Map<number, number>();
+  /** Each instance's last launch, kept past kill/reset/crash for `relaunch_instance`. */
+  private readonly lastLaunch = new Map<number, LastLaunch>();
+  private readonly demos = new Map<number, PlayedDemo>();
   private readonly maps = new Map<string, { stamp: string; data: MapData }>();
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
+  private readonly acsModules = new Map<string, { stamp: string; modules: AcsModule[] }>();
 
   constructor(
+    readonly engine: EngineAdapter,
     readonly config: ServerConfig,
     readonly io: ContextIo = defaultContextIo,
-    readonly registry: InstanceRegistry = new InstanceRegistry(),
+    readonly registry: InstanceRegistry = new InstanceRegistry(engine),
   ) {}
+
+  /** The name of one of the engine's env vars, e.g. `ctx.env("EXE")`. */
+  env(suffix: string): string {
+    return envName(this.engine, suffix);
+  }
 
   /** The conventional port for an instance: instance 1 gets the base port. */
   portFor(instance: number): number {
@@ -128,6 +314,11 @@ export class ServerContext {
     return this.boundPorts.has(instance);
   }
 
+  /** Every instance number this session has claimed, ascending. */
+  boundInstances(): number[] {
+    return [...this.boundPorts.keys()].sort((a, b) => a - b);
+  }
+
   /** Claim an instance number for a port, without a launch behind it. */
   bind(instance: number, port: number): void {
     this.boundPorts.set(instance, port);
@@ -136,23 +327,64 @@ export class ServerContext {
   rememberLaunch(instance: number, port: number, logFile: string): void {
     this.boundPorts.set(instance, port);
     this.logFiles.set(instance, logFile);
+    // A new engine is starting, so the last one's PID no longer names this instance.
+    this.enginePids.delete(instance);
   }
 
-  /** Record which process an instance's bridge belongs to, once it says so. */
+  /** Record which process is this instance's engine. */
   rememberEngine(instance: number, pid: number | undefined): void {
-    if (pid !== undefined) this.enginePids.set(instance, pid);
+    if (pid === undefined) return;
+    this.enginePids.set(instance, pid);
+    const last = this.lastLaunch.get(instance);
+    if (last) last.enginePid = pid;
   }
 
+  /** Store a launch's options before its spawn, so a launch that never came up stays relaunchable. */
+  rememberLaunchArgs(instance: number, args: LaunchArgs, port: number, logFile: string): void {
+    this.lastLaunch.set(instance, { args, port, logFile });
+  }
+
+  launchArgsFor(instance: number): LastLaunch | undefined {
+    return this.lastLaunch.get(instance);
+  }
+
+  forgetLaunchArgs(instance: number): void {
+    this.lastLaunch.delete(instance);
+  }
+
+  /** Keep the bridge version an instance's hello gave, for its recording's sidecar. */
+  rememberBridge(instance: number, client: BridgeClient): void {
+    const last = this.lastLaunch.get(instance);
+    if (last && client.bridgeVersion !== undefined) last.bridge = client.bridgeVersion;
+  }
+
+  /** The engine PID recorded for the instance, if any. */
+  enginePidFor(instance: number): number | undefined {
+    return this.enginePids.get(instance);
+  }
+
+  /** The demo `play_demo` last started on an instance, for `seek_demo`'s rewind. */
+  rememberDemo(instance: number, demo: PlayedDemo): void {
+    this.demos.set(instance, demo);
+  }
+
+  demoFor(instance: number): PlayedDemo | undefined {
+    return this.demos.get(instance);
+  }
+
+  // forgetInstance/forgetAll keep lastLaunch: relaunch must work after kill_instance and reset.
   forgetInstance(instance: number): void {
     this.boundPorts.delete(instance);
     this.logFiles.delete(instance);
     this.enginePids.delete(instance);
+    this.demos.delete(instance);
   }
 
   forgetAll(): void {
     this.boundPorts.clear();
     this.logFiles.clear();
     this.enginePids.clear();
+    this.demos.clear();
   }
 
   /** Where an instance's engine console log lives, if it can be determined. */
@@ -161,6 +393,15 @@ export class ServerContext {
     if (known) return known;
     return this.config.exe
       ? path.join(path.dirname(this.config.exe), `mcp-bridge-${this.effectivePort(instance)}.log`)
+      : undefined;
+  }
+
+  /** An instance's crash report and its file's mtime, or undefined when there is none. */
+  readCrash(instance: number): { file: string; report: string; written: Date } | undefined {
+    const logFile = this.logPathFor(instance);
+    const file = logFile && crashLogPath(logFile);
+    return file && this.io.existsSync(file)
+      ? { file, report: this.io.readTextSync(file), written: this.io.mtimeOf(file) }
       : undefined;
   }
 
@@ -184,6 +425,8 @@ export class ServerContext {
    * port, the next tool call would silently drive the wrong process. So when we
    * know which PID an instance is supposed to be, a mismatch fails loudly
    * instead.
+   *
+   * An instance launched with `wait: false` attaches here, waiting for its bridge (`attachPending`).
    */
   async clientFor(instance: number): Promise<BridgeClient> {
     if (this.registry.has(instance)) return this.registry.get(instance);
@@ -199,8 +442,10 @@ export class ServerContext {
     const inflight = this.attaching.get(instance);
     if (inflight) return inflight;
     const port = this.effectivePort(instance);
-    const attach = this.registry
-      .attach({ id: instance, host: this.config.host, port })
+    const connect = this.registry.pending(instance)
+      ? this.attachPending(instance, port)
+      : this.registry.attach({ id: instance, host: this.config.host, port });
+    const attach = connect
       .then((client) => {
         const expected = this.enginePids.get(instance);
         const actual = client.enginePid;
@@ -213,11 +458,45 @@ export class ServerContext {
               `is gone and something else took its port. Run the "reset" tool, then relaunch.`,
           );
         }
+        this.rememberBridge(instance, client);
         return client;
       })
       .finally(() => this.attaching.delete(instance));
     this.attaching.set(instance, attach);
     return attach;
+  }
+
+  /** Wait for a spawned instance's bridge and attach, failing on any exit, since a wrapper that
+   *  backgrounds the engine would fail the PID handshake anyway. */
+  private attachPending(instance: number, port: number): Promise<BridgeClient> {
+    const target = { id: instance, host: this.config.host, port };
+    return this.registry.attachSpawned(target, this.io.launchIo, true).catch((e: unknown) => {
+      if (e instanceof EngineExitedError) {
+        throw new Error(`Instance ${instance}'s ${e.message}; get_startup_errors shows why.`);
+      }
+      if (e instanceof PortWaitError) {
+        throw new Error(
+          `Instance ${instance} (launched with wait: false) has no bridge on port ${port} yet: ${e.message}. ` +
+            `If it is still starting (a netgame host opens its bridge only once its lobby fills), call again later; kill_instance stops it.`,
+        );
+      }
+      throw e;
+    });
+  }
+
+  /** Quit an instance, attaching a pending one whose bridge is up first, since a SIGKILLed netgame
+   *  host can freeze its guests; one with no bridge yet is force-killed at once. */
+  async quit(instance: number): Promise<QuitResult> {
+    if (this.registry.pending(instance)) {
+      if (await this.io.portOpen(this.config.host, this.effectivePort(instance))) {
+        await this.clientFor(instance).catch(() => undefined);
+      }
+      if (!this.registry.find(instance)) {
+        this.registry.kill(instance);
+        return "unbridged";
+      }
+    }
+    return this.registry.quit(instance);
   }
 
   /** Peek at an instance's client without attaching, connecting, or throwing —
@@ -239,7 +518,7 @@ export class ServerContext {
    */
   loadMap(file: string | undefined, map: string): MapData {
     const wad = file ?? this.config.iwad;
-    if (!wad) throw new Error("No WAD specified. Pass `file` or set ZANDRONUM_IWAD.");
+    if (!wad) throw new Error(`No WAD specified. Pass \`file\` or set ${this.env("IWAD")}.`);
     const key = `${wad}|${map.toUpperCase()}`;
     const stamp = this.io.stampOf(wad);
     const hit = this.maps.get(key);
@@ -247,6 +526,19 @@ export class ServerContext {
     const data = readMapFromContainer(this.io.readFileSync(wad), map);
     this.maps.set(key, { stamp, data });
     return data;
+  }
+
+  /** The ACS modules a launch file holds, memoised on a regular file's stamp but not a directory's,
+   *  which doesn't move when a file inside it is rewritten. */
+  deployedModules(file: string): AcsModule[] {
+    const skips = (name: string, isDir: boolean) => this.engine.dirWalkSkips(name, isDir, process.platform);
+    if (this.io.isDirSync(file)) return collectAcsModulesAt(file, this.io, skips);
+    const stamp = this.io.stampOf(file);
+    const hit = this.acsModules.get(file);
+    if (hit && hit.stamp === stamp) return hit.modules;
+    const modules = collectAcsModulesAt(file, this.io, skips);
+    this.acsModules.set(file, { stamp, modules });
+    return modules;
   }
 
   /**
@@ -257,7 +549,7 @@ export class ServerContext {
    */
   loadAcsIndex(dir: string | undefined): AcsIndex {
     const src = dir ?? this.config.acsSrc;
-    if (!src) throw new Error("No ACS source dir. Pass `dir` or set ZANDRONUM_ACS_SRC.");
+    if (!src) throw new Error(`No ACS source dir. Pass \`dir\` or set ${this.env("ACS_SRC")}.`);
     const names = this.io
       .readdirSync(src)
       .filter((f) => f.toLowerCase().endsWith(".acs"))
@@ -271,10 +563,41 @@ export class ServerContext {
     return index;
   }
 
-  /** Where savegames live: explicit arg, then env, then next to the engine. */
+  /** The `run_acs` profiles a snippet's `#import`s select, reread every call so an edit needs no reconnect. */
+  runAcsProfiles(source: string): RunAcsProfile[] {
+    const files = this.config.runAcsProfiles;
+    if (!files || importsOf(source).length === 0) return [];
+    const env = this.env("RUNACS_PROFILES");
+    const profiles = files.map((file) => {
+      let text: string;
+      try {
+        text = this.io.readTextSync(file);
+      } catch (e) {
+        throw new Error(`can't read run_acs profile ${file} (listed in ${env}): ${(e as Error).message}`);
+      }
+      try {
+        return parseProfile(text, file);
+      } catch (e) {
+        throw new Error(`${(e as Error).message} (listed in ${env})`);
+      }
+    });
+    return profilesFor(source, profiles);
+  }
+
+  /** Where savegames live: explicit arg, else the configured dir. */
   resolveSaveDir(dir?: string): string {
-    const d = dir ?? this.config.saveDir ?? (this.config.exe ? path.dirname(this.config.exe) : undefined);
-    if (!d) throw new Error("No save dir. Pass `dir`, or set ZANDRONUM_SAVE_DIR or ZANDRONUM_EXE.");
+    const d = dir ?? this.config.saveDir;
+    if (!d) throw new Error(`No save dir. Pass \`dir\`, or set ${this.env("SAVE_DIR")} or ${this.env("EXE")}.`);
     return d;
+  }
+
+  /** The `.zds` files in a save dir, relative to it; one subfolder level deep when the engine nests saves. */
+  saveFiles(dir: string): string[] {
+    const names = this.io.readdirSync(dir);
+    const subs = this.engine.saveSubdirs ? names.filter((f) => this.io.isDirSync(path.join(dir, f))) : [];
+    return [
+      ...names.filter((f) => !subs.includes(f)),
+      ...subs.flatMap((s) => this.io.readdirSync(path.join(dir, s)).map((f) => path.join(s, f))),
+    ].filter((f) => f.toLowerCase().endsWith(".zds"));
   }
 }

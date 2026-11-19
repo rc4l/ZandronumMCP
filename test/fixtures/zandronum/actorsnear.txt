@@ -1,0 +1,3 @@
+MCP_ACTORS
+near Chainsaw 1000 -480 848 CSAW
+near DoomImp 60 -800 828 TROO

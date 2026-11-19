@@ -1,0 +1,14 @@
+actor E2eNotifyControl : Actor
+{
+  Health 1
+  +SHOOTABLE
+  States
+  {
+  Spawn:
+    TNT1 A -1
+    Stop
+  Death:
+    TNT1 A 0 A_Log("e2e synchronous death")
+    Stop
+  }
+}

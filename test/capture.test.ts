@@ -2,8 +2,10 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureScreenshot, screenshotName, type CaptureIo } from "../src/screenshot/capture.js";
+import { captureScreenshot, readShot, screenshotName, type CaptureIo } from "../src/screenshot/capture.js";
+import { CAPTURE_TAG, captureTag } from "../src/screenshot/tag.js";
 import type { BridgeClient } from "../src/bridge/transport.js";
+import { norm } from "./fakes/paths.js";
 
 // A stub client — capture only needs runCommand, and we drive the filesystem
 // ourselves, so we don't need a real engine or bridge here.
@@ -22,9 +24,16 @@ afterEach(() => {
 
 describe("screenshotName", () => {
   it("formats a sequence into a name", () => {
-    expect(screenshotName(3, 4242)).toBe("mcp_shot_4242_3");
-    // Defaults to this process, so two servers can't collide on one filename.
-    expect(screenshotName(3)).toBe(`mcp_shot_${process.pid}_3`);
+    expect(screenshotName(3, "4242_ab12cd")).toBe("mcp_shot_4242_ab12cd_3");
+    // Defaults to this process's tag, so two servers can't collide on one filename.
+    expect(screenshotName(3)).toBe(`mcp_shot_${CAPTURE_TAG}_3`);
+  });
+});
+
+describe("captureTag", () => {
+  it("is the PID plus a hex token, so sandboxed servers sharing a PID still differ", () => {
+    expect(captureTag(2, Buffer.from([0xab, 0x01, 0xff]))).toBe("2_ab01ff");
+    expect(CAPTURE_TAG).toMatch(new RegExp(`^${process.pid}_[0-9a-f]{6}$`));
   });
 });
 
@@ -41,7 +50,7 @@ describe("captureScreenshot", () => {
       },
     };
     const shot = await captureScreenshot(stubClient, { dir: "/anywhere" }, io);
-    expect(shot.name).toMatch(/^mcp_shot_\d+_\d+$/);
+    expect(shot.name).toMatch(/^mcp_shot_\d+_[0-9a-f]{6}_\d+$/);
     expect(shot.base64).toBe(Buffer.from("PNGDATA").toString("base64"));
     expect(unlinked).toEqual([shot.path]);
   });
@@ -118,7 +127,16 @@ describe("captureScreenshot", () => {
     };
     const shot = await captureScreenshot(client, { dir: "/d", name: "k", keep: true }, io);
     expect(shot.base64).toBe(Buffer.from("NEW").toString("base64"));
-    expect(unlinked).toEqual(["/d/k.png"]);
+    expect(unlinked).toEqual([norm("/d/k.png")]);
+  });
+
+  it("reads a shot something else issued, keeping it when asked", async () => {
+    const dir = freshDir();
+    const path = join(dir, "issued.png");
+    writeFileSync(path, Buffer.from("FROZEN"));
+    const shot = await readShot({ dir, name: "issued", keep: true });
+    expect(shot).toEqual({ name: "issued", path, base64: Buffer.from("FROZEN").toString("base64") });
+    expect(existsSync(path)).toBe(true);
   });
 
   it("reads then deletes a real file via the default IO", async () => {

@@ -1,0 +1,5 @@
+#library "msimplib"
+#import "zcommon.bcs"
+
+int mil_v = 5;
+int mil_arr[3] = { 1, 2, 3 };

@@ -1,0 +1,1 @@
+MCP_MARK n=1 tic=2008 maptime=1668 map=MAP01 x=-800.0 y=700.0 z=8.0 angle=90.0 shot=mcp_mark_7877_20261113-014351_1 note=conf note

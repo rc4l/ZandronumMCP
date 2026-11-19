@@ -1,4 +1,10 @@
 import type { EngineStatus } from "./status.js";
+import { hasHeader, parseKvLines, type KvRecord } from "./lines.js";
+
+/** A `dumpplayers` reply's player rows, or undefined when it didn't run (no `MCP_PLAYERS` header). */
+export function playersReply(lines: string[]): KvRecord[] | undefined {
+  return hasHeader(lines, "MCP_PLAYERS") ? parseKvLines(lines, "player") : undefined;
+}
 
 export interface PlayerState {
   x: number;
@@ -40,8 +46,9 @@ export function withLiveStatus(state: PlayerState, status: EngineStatus | undefi
   return merged;
 }
 
+// `light` is the sector value: Zandronum prints one "lightlevel", UZDoom "sector lightlevel" then "actor lightlevel".
 const POS_RE =
-  /Current player position: \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\), angle: (-?[\d.]+), floorheight: (-?[\d.]+), sector:(\d+), lightlevel: (-?\d+)/;
+  /Current player position: \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\), angle: (-?[\d.]+), floorheight: (-?[\d.]+), sector:(\d+), (?:sector )?lightlevel: (-?\d+)/;
 
 /** Parse `currentpos` output. */
 export function parsePlayerState(lines: string[]): PlayerState | null {
@@ -64,7 +71,9 @@ export function parsePlayerState(lines: string[]): PlayerState | null {
   return null;
 }
 
-const TARGET_RE = /Target=([^,]+), Health=(-?\d+), Spawnhealth=(-?\d+)/;
+// Zandronum prints "Target=<class>"; UZDoom's C_PrintInfo prints "Class=<class>" (after
+// "Player=<name>, " for a player target).
+const TARGET_RE = /(?:Target|Class)=([^,]+), Health=(-?\d+), Spawnhealth=(-?\d+)/;
 
 /** Parse `linetarget` output (the actor the player is aiming at). */
 export function parseTarget(lines: string[]): TargetInfo | null {

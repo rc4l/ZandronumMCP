@@ -3,16 +3,29 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   OVERLAY_FILES,
   detectEol,
   parseArgs,
   findAnchorIndex,
   appendBlock,
+  insertLine,
   applyBridge,
+  syncBlock,
+  ACS_BLOCKS,
+  REC_HOOKS,
+  CLOCK_HOOKS,
+  HOST_TEE,
 } from "../engine-bridge/apply-bridge.core.mjs";
 
 const overlayDir = join(dirname(fileURLToPath(import.meta.url)), "..", "engine-bridge", "overlay");
+
+it("keeps synchronous marker-script output outside the bridge reply guard", () => {
+  const actor = readFileSync(join(overlayDir, "mcp_actorstate.cpp"), "utf8");
+  const round = actor.slice(actor.indexOf("static void MCP_AppendRound"), actor.indexOf("CCMD( mcp_mark )"));
+  expect(round).toMatch(/MCPBridgeReplySuspendGuard gameOutput;\s+line\.AppendFormat\( " round=%d", P_StartScript/);
+});
 
 const tmpDirs: string[] = [];
 function freshDir(): string {
@@ -20,6 +33,43 @@ function freshDir(): string {
   tmpDirs.push(d);
   return d;
 }
+
+it("railings take precedence over two-sided blocking flags in the real probe predicate", () => {
+  if (spawnSync("g++", ["--version"]).status !== 0) throw new Error("probe regression needs g++");
+  const actor = readFileSync(join(overlayDir, "mcp_actorstate.cpp"), "utf8");
+  const predicate = actor.slice(actor.indexOf("static bool MCP_LineBlocks"), actor.indexOf("static line_t *MCP_BlockingLine"));
+  const work = freshDir(), source = join(work, "probe.cpp"), exe = join(work, "probe");
+  writeFileSync(source, `
+#include <cassert>
+#include <cstddef>
+#include <initializer_list>
+enum { ML_BLOCKING=1, ML_BLOCKEVERYTHING=2, ML_RAILING=4, ML_BLOCKMONSTERS=8,
+  ML_BLOCK_PLAYERS=16, ML_BLOCK_FLOATERS=32, MF3_NOBLOCKMONST=64, MF_FRIENDLY=128,
+  MF_FLOAT=256, COMPATF_NOBLOCKFRIENDS=512 };
+static int i_compatflags = 0;
+struct AActor { int flags=0, flags3=0; };
+struct line_t { void *backsector; int flags; };
+${predicate}
+int main() {
+  AActor probe;
+  for (bool player : {false, true}) {
+    for (int flag : {ML_BLOCKING, ML_BLOCKEVERYTHING, ML_BLOCK_PLAYERS}) {
+      line_t line = { &probe, ML_RAILING | flag };
+      assert(!MCP_LineBlocks(&probe, &line, player));
+      line.backsector = NULL;
+      assert(MCP_LineBlocks(&probe, &line, player));
+    }
+  }
+  line_t line = { &probe, ML_BLOCKING };
+  assert(MCP_LineBlocks(&probe, &line, true));
+  line.flags = ML_BLOCK_PLAYERS;
+  assert(MCP_LineBlocks(&probe, &line, true));
+  assert(!MCP_LineBlocks(&probe, &line, false));
+}
+`);
+  execFileSync("g++", ["-std=c++14", "-Wall", "-Wextra", "-Werror", source, "-o", exe]);
+  execFileSync(exe);
+});
 afterEach(() => {
   for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
@@ -29,24 +79,94 @@ function buildFixture(): string {
   const root = freshDir();
   const src = join(root, "src");
   mkdirSync(join(src, "g_shared"), { recursive: true });
+  mkdirSync(join(src, "sdl"));
+  mkdirSync(join(src, "win32"));
+  mkdirSync(join(src, "gl", "scene"), { recursive: true });
 
   // First include is Windows-only and guarded (mirrors the real d_main.cpp). The
   // bridge include must skip it and land on the first UNCONDITIONAL include, else
   // non-Windows builds compile the bridge header out and its symbols go undeclared.
   writeFileSync(join(src, "d_main.cpp"),
-    '#ifdef _WIN32\n#include <direct.h>\n#else\n#include <sys/stat.h>\n#endif\n#include "doomdef.h"\n#include "d_main.h"\n\nvoid D_DoomLoop ()\n{\n\tswitch ( NETWORK_GetState( ))\n\t{\n\t}\n}\n');
+    '#ifdef _WIN32\n#include <direct.h>\n#else\n#include <sys/stat.h>\n#endif\n#include "doomdef.h"\n#include "d_main.h"\n\nvoid D_DoomLoop ();\n\nvoid D_Decoy ()\n{\n\tswitch ( NETWORK_GetState( ))\n\tD_Display ();\n}\n\nvoid D_DoomLoop ()\n{\n\tswitch ( NETWORK_GetState( ))\n\t{\n\t\t\t\tD_Display( );\n\t\t\t\tD_Display ();\n\t}\n}\n');
   writeFileSync(join(src, "c_console.cpp"),
-    '#include "templates.h"\n\nvoid C_Foo()\n{\n\tI_PrintStr (outlinecopy);\n\t{\n\t\tC_AddNotifyString (printlevel, outlinecopy);\n\t\tmaybedrawnow (false, false);\n\t}\n}\n');
+    '#include "templates.h"\n\nvoid C_Decoy()\n{\n\t\tconst int length = static_cast<int>(strlen (outlinecopy));\n}\n\nvoid C_Foo()\n{\n\t// For servers, dump message to console window.\n\tif ( Args && Args->CheckParm( "-host" ))\n\t{\n\t\tconst int length = static_cast<int>(strlen (outlinecopy));\n\t\treturn length;\n\t}\n\tI_PrintStr (outlinecopy);\n\tif (printlevel != PRINT_LOG)\n\t{\n\t\t\tC_AddNotifyString (printlevel, outlinecopy);\n\t}\n\tLogOutput();\n}\n');
   writeFileSync(join(src, "v_text.cpp"),
     '#include "v_text.h"\n\nvoid DCanvas::DrawTextV (int normalcolor)\n{\n\tif (normalcolor >= NumTextColors)\n\t\tnormalcolor = 0;\n}\n');
   writeFileSync(join(src, "v_draw.cpp"),
     '#include "v_video.h"\n\nvoid STACK_ARGS DCanvas::DrawTexture (FTexture *img, double x, double y, int tags_first, ...)\n{\n\tva_start(tags, tags_first);\n}\n');
   writeFileSync(join(src, "g_shared", "sbar.h"),
     "class DBaseStatusBar\n{\n\tvoid DetachAllMessages ();\n};\n");
-  writeFileSync(join(src, "p_acs.cpp"), "// p_acs.cpp\n");
+  // Decoy demo writes around G_Ticker: the override must land inside it.
+  writeFileSync(join(src, "g_game.cpp"),
+    '#include <string.h>\n\nvoid G_Decoy ()\n{\n\tif (demorecording)\n}\nvoid G_Ticker ()\n{\n\t\t\t\tif (demorecording)\n\t\t\t\t{\n\t\t\t\t\tG_WriteDemoTiccmd (newcmd, i, buf);\n\t\t\t\t}\n\t\t\t\tmemcpy (cmd, newcmd, sizeof(ticcmd_t));\n\n\t\t\t\t// check for turbo cheats\n}\n\nvoid G_CheckDemoStatus ()\n{\n\tif (demorecording)\n}\n\n// GAME_ResetMap decoy\nvoid ResetDecoy()\n{\n\tDestroyActors();\n}\nvoid GAME_ResetMap (bool runEnterScripts)\n{\n\tDestroyActors();\n}\n');
+  writeFileSync(join(src, "p_pspr.cpp"), [
+    '#include "p_local.h"', "void PspriteDecoy()", "{", "\tpsp->state = NULL;", "\t// [BB] Some action functions", "}",
+    "void P_SetPsprite (player_t *player, int position, FState *state, bool nofunction)", "{", "\tdo", "\t{",
+    "\t\tif (state == NULL)", "\t\t{ // Object removed itself.", "\t\t\tpsp->state = NULL;", "\t\t\tbreak;", "\t\t}",
+    "\t\tpsp->tics = state->GetTics();", "\t\t// [BB] Some action functions rely on ReadyWeapon.", "\t\tCallAction();",
+    "\t} while (!psp->tics);", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "p_tick.cpp"),
+    '#include "p_local.h"\n\nvoid P_Ticker (void)\n{\n\tlevel.time++;\n\tlevel.maptime++;\n\tlevel.totaltime++;\n}\n');
+  // Decoys ahead of each scoped hook: a looser scope would land on them.
+  writeFileSync(join(src, "p_mobj.cpp"), [
+    '#include "network.h"', "", "AActor *P_Decoy ()", "{", "\treturn actor;", "}",
+    "bool AActor::SetState (FState *newstate, bool nofunction)", "{", "\t\tstate = newstate;", "\t\ttics = GetTics(newstate);", "}",
+    "void AActor::DestroyAllInventory ()", "{", "\tinv->Destroy ();", "}",
+    "AActor *AActor::StaticSpawn (const PClass *type)", "{", "\tg_SpawnCycles.Unclock();", "\treturn actor;", "}",
+    "void AActor::FreeNetID ()", "{", "\tg_ActorNetIDList.freeID ( NetID );", "}",
+    "void AActor::Destroy ()", "{", "\t// [BC/BB] Free it's network ID.", "\tg_ActorNetIDList.freeID ( NetID );", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "p_interaction.cpp"), [
+    '#include "doomdef.h"', "", "// bool wasgibbed", "void AActor::Die (AActor *source, AActor *inflictor, int dmgflags)", "{",
+    "\tbool wasgibbed = (health < GibHealth());", "}",
+    "int P_DamageMobj (AActor *target, AActor *inflictor, AActor *source, int damage, FName mod, int flags)", "{",
+    "\ttarget->DamageTypeReceived = mod;", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "p_acs.cpp"), [
+    "// p_acs.cpp", "#include <assert.h>", "", "int DLevelScript::RunScript ()", "{", "\tif (state == SCRIPT_PleaseRemove)", "\t{", "\t}", "}",
+    'DLevelScript::DLevelScript ()', "{", '\tDPrintf("%s started.\\n", "decoy");', "}",
+    "DLevelScript::DLevelScript (AActor *who, line_t *where, int num)", "{", '\tDPrintf("%s started.\\n", ScriptPresentation(num).GetChars());', "}", "",
+  ].join("\n"));
+  // Decoys ahead of TryRunTics: the hold and clamp must land inside it.
+  writeFileSync(join(src, "d_net.cpp"), [
+    "#include <stddef.h>", "", "void NetDecoy ()", "{", "\tbool doWait = false;", "\t\tcounts = 1;", "}",
+    "void TryRunTics (void)", "{", "\tbool doWait = cl_capfps || r_NoInterpolate /*|| netgame*/;", "\tif (counts < 1)", "\t\tcounts = 1;", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "sdl", "i_system.cpp"), [
+    "#include <stdlib.h>", "", "unsigned int I_FPSTime()", "{", "\treturn SDL_GetTicks();", "}", "",
+    "fixed_t I_GetTimeFrac (uint32 *ms)", "{", "\tDWORD now = SDL_GetTicks ();",
+    "\tif (ms) *ms = TicStart + (1000 / TICRATE);", "\tif (TicStart == 0)", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "win32", "i_system.cpp"), [
+    "#include <stdlib.h>", "", "unsigned int I_FPSTime()", "{", "\treturn timeGetTime();", "}", "",
+    "fixed_t I_GetTimeFrac(uint32 *ms)", "{", "\tif (ms != NULL)", "\t{", "\t\t*ms = TicNext;", "\t}",
+    "\tDWORD step = TicNext - TicStart;", "}", "",
+  ].join("\n"));
+  writeFileSync(join(src, "gl", "scene", "gl_scene.cpp"), [
+    '#include "gl_scene.h"', "", "void RenderScene()", "{", "\tgl_frameMS = I_MSTime();", "}", "",
+  ].join("\n"));
   writeFileSync(join(src, "CMakeLists.txt"), "add_executable( zdoom WIN32 )\n");
   return root;
 }
+
+/** Each recorder hook as `[file, the line its anchor matches, the hook line, "after" | "before"]`. */
+const REC_SITES: Array<[string, string, string, "after" | "before"]> = [
+  ["p_tick.cpp", "\tlevel.maptime++;", "\tMCP_Rec_Tick();", "after"],
+  ["p_mobj.cpp", "\t\ttics = GetTics(newstate);", "\t\tMCP_Rec_State( this );", "after"],
+  ["p_interaction.cpp", "\ttarget->DamageTypeReceived = mod;", "\tMCP_Rec_Damage( target, inflictor, source, damage, mod );", "after"],
+  ["p_interaction.cpp", "\tbool wasgibbed = (health < GibHealth());", "\tMCP_Rec_Death( this, source, inflictor );", "before"],
+  ["p_acs.cpp", '\tDPrintf("%s started.\\n", ScriptPresentation(num).GetChars());', "\tMCP_Rec_ScriptStart( this, num, module->GetModuleName(), activator );", "after"],
+  ["p_acs.cpp", "\tif (state == SCRIPT_PleaseRemove)", "\tif (state == SCRIPT_PleaseRemove) MCP_Rec_ScriptEnd( this, script );", "before"],
+];
+
+/** Each clock hook as `[file, the line its anchor matches, the hook line, "after" | "before"]`. */
+const CLOCK_SITES: Array<[string, string, string, "after" | "before"]> = [
+  ["d_net.cpp", "\tbool doWait = cl_capfps || r_NoInterpolate /*|| netgame*/;", "\tif ( MCP_Clock_Hold() ) return;", "before"],
+  ["sdl/i_system.cpp", "\tif ( ms && MCP_ClockFrameUsed ) *ms = MCP_Clock_FrameTime( MCP_FRAME_TICMS, *ms );", "\tif ( MCP_ClockFrozen ) return MCP_ClockFracValue;", "after"],
+  ["win32/i_system.cpp", "\tDWORD step = TicNext - TicStart;", "\tif ( MCP_ClockFrozen ) return MCP_ClockFracValue;", "before"],
+  ["d_main.cpp", "\t\t\t\tD_Display ();", "\t\t\t\tMCP_Clock_AfterDisplay();", "after"],
+];
 
 const linesOf = (file: string) => readFileSync(file, "utf8").split("\n");
 /** Assert `inserted` sits immediately after the first line matching `anchor`. */
@@ -139,6 +259,57 @@ describe("appendBlock", () => {
   });
 });
 
+describe("insertLine", () => {
+  it("replaces an older hook form found anywhere in an unscoped file", () => {
+    const f = join(freshDir(), "f.cpp");
+    writeFileSync(f, "old();\nanchor;\n");
+    insertLine(f, { anchor: "^anchor;", line: "new();", marker: "new()", replaces: "old();" }, () => {});
+    expect(readFileSync(f, "utf8")).toBe("anchor;\nnew();\n");
+  });
+});
+
+describe("syncBlock", () => {
+  const BODY = "// ==== MCP_X (overlay) ====\nnew();\n// ==== end MCP_X ====\n";
+  const run = (initial: string) => {
+    const f = join(freshDir(), "p_acs.cpp");
+    writeFileSync(f, initial);
+    const log: string[] = [];
+    syncBlock(f, "MCP_X", BODY, "x CCMDs", (m: string) => log.push(m));
+    return { text: readFileSync(f, "utf8"), log };
+  };
+
+  it("appends the block when the file has none", () => {
+    const { text, log } = run("// p_acs.cpp\n");
+    expect(text).toBe(`// p_acs.cpp\n\n${BODY}`);
+    expect(log).toEqual(["  + patched: p_acs.cpp (x CCMDs)"]);
+  });
+
+  it("replaces a stale block in place and leaves its neighbours alone", () => {
+    const stale = "// ==== MCP_X (overlay) ====\nold();\nolder();\n// ==== end MCP_X ====";
+    const { text, log } = run(`head\n\n${stale}\n\n// ==== MCP_Y (overlay) ====\ny();\n// ==== end MCP_Y ====\n`);
+    expect(text).toBe(`head\n\n${BODY}\n// ==== MCP_Y (overlay) ====\ny();\n// ==== end MCP_Y ====\n`);
+    expect(log).toEqual(["  ~ updated: p_acs.cpp (x CCMDs)"]);
+  });
+
+  it("leaves an up-to-date block untouched", () => {
+    const { text, log } = run(`head\n\n${BODY}`);
+    expect(text).toBe(`head\n\n${BODY}`);
+    expect(log).toEqual(["  = already patched: p_acs.cpp (x CCMDs)"]);
+  });
+
+  it("throws rather than guess where a block without its end line stops", () => {
+    expect(() => run("// ==== MCP_X (overlay) ====\nold();\n")).toThrow(/MCP_X block has no "\/\/ ==== end MCP_X ====" line/);
+  });
+
+  it("every overlay block starts and ends with the marker lines it is found by", () => {
+    for (const [name, inc] of ACS_BLOCKS) {
+      const body = readFileSync(join(overlayDir, inc), "utf8");
+      expect(body.startsWith(`// ==== ${name} `)).toBe(true);
+      expect(body.trimEnd().endsWith(`// ==== end ${name} ====`)).toBe(true);
+    }
+  });
+});
+
 describe("applyBridge", () => {
   it("throws when the source tree is missing", () => {
     expect(() => applyBridge({ src: join(freshDir(), "nope"), overlayDir })).toThrow(/Source tree not found/);
@@ -154,34 +325,240 @@ describe("applyBridge", () => {
 
     // anchored one-line hooks
     assertAfter(join(src, "d_main.cpp"), /#include "doomdef.h"/, '#include "mcp_bridge.h"');
-    assertBefore(join(src, "d_main.cpp"), /switch \( NETWORK_GetState/, "\t\t\tMCP_Bridge_Poll();");
+    // Past the prototype and the decoy, inside the loop's definition.
+    const dmain = linesOf(join(src, "d_main.cpp"));
+    expect(dmain[dmain.lastIndexOf("\tswitch ( NETWORK_GetState( ))") - 1]).toBe("\t\t\tMCP_Bridge_Poll();");
+    expect(dmain.filter((l) => l.includes("MCP_Bridge_Poll"))).toHaveLength(1);
     assertAfter(join(src, "c_console.cpp"), /I_PrintStr \(outlinecopy\)/, "\t\tMCP_Bridge_TeeOutput( outlinecopy );");
-    assertBefore(join(src, "c_console.cpp"), /C_AddNotifyString \(printlevel/, "\t\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )");
     assertBefore(join(src, "v_text.cpp"), /normalcolor >= NumTextColors/, "\tMCP_HUD_TeeText( x, y, string );");
     assertBefore(join(src, "v_draw.cpp"), /va_start\(tags, tags_first\)/, "\tMCP_HUD_TeeTexture( x, y, img );");
     assertAfter(join(src, "g_shared", "sbar.h"), /DetachAllMessages/, "\tvoid MCP_DumpMessages();");
+    assertAfter(join(src, "g_game.cpp"), /#include <string.h>/, '#include "mcp_bridge.h"');
+    const ggame = linesOf(join(src, "g_game.cpp"));
+    expect(ggame.indexOf("\t\t\t\tnewcmd = MCP_Input_Override( i, newcmd );")).toBe(ggame.indexOf("\t\t\t\tif (demorecording)") - 1);
+    expect(ggame.filter((l) => l.includes("MCP_Input_Override"))).toHaveLength(1);
 
     // appended CCMD blocks + CMake target
     const pacs = readFileSync(join(src, "p_acs.cpp"), "utf8");
+    expect(pacs).toContain('#include "mcp_bridge.h"');
     expect(pacs).toContain("MCP_ACSVARS");
     expect(pacs).toContain("MCP_MAPVARS");
+    expect(pacs).toContain("CCMD( mcp_mapslot )");
+    expect(pacs.indexOf("// ==== MCP_ACSREF ")).toBeGreaterThan(pacs.indexOf("// ==== end MCP_MAPSLOT ===="));
+    expect(pacs.indexOf("// ==== end MCP_ACSREF ====")).toBeLessThan(pacs.indexOf("// ==== MCP_SCRIPTS "));
     expect(pacs).toContain("MCP_SCRIPTS");
     expect(pacs).toContain("MCP_RUNACS");
-    expect(readFileSync(join(src, "CMakeLists.txt"), "utf8")).toContain("target_sources( zdoom PRIVATE mcp_bridge.cpp");
+    // Every overlay translation unit is compiled in.
+    const target = readFileSync(join(src, "CMakeLists.txt"), "utf8").match(/target_sources\( zdoom PRIVATE (.*) \)/);
+    expect(target?.[1].split(" ").sort()).toEqual(OVERLAY_FILES.filter((f) => f.endsWith(".cpp")).sort());
+  });
+
+  it("puts each recorder hook at its site, once, with the bridge include on each file's first include", () => {
+    const root = buildFixture();
+    const src = join(root, "src");
+    applyBridge({ src: root, overlayDir });
+    for (const [file, anchor, hook, side] of REC_SITES) {
+      const lines = linesOf(join(src, file));
+      const i = lines.indexOf(anchor);
+      expect(i, `${file}: ${anchor}`).toBeGreaterThan(0);
+      expect(lines[side === "after" ? i + 1 : i - 1]).toBe(hook);
+      expect(lines.filter((l) => l === hook)).toHaveLength(1);
+    }
+    const firsts: Record<string, string> = {
+      "p_tick.cpp": '#include "p_local.h"', "p_mobj.cpp": '#include "network.h"',
+      "p_interaction.cpp": '#include "doomdef.h"', "p_acs.cpp": "#include <assert.h>",
+    };
+    for (const [file, first] of Object.entries(firsts)) assertAfter(join(src, file), new RegExp(`^${first}$`), '#include "mcp_bridge.h"');
+  });
+
+  it("keeps bridge replies out of notify without suppressing the console, tee or logfile", () => {
+    const root = buildFixture();
+    const consoleFile = join(root, "src", "c_console.cpp");
+    applyBridge({ src: root, overlayDir });
+    const before = readFileSync(consoleFile, "utf8");
+    assertBefore(consoleFile, /C_AddNotifyString \(printlevel, outlinecopy\);/,
+      "\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )");
+    expect(before).toContain("\tI_PrintStr (outlinecopy);\n\t\tMCP_Bridge_TeeOutput( outlinecopy );");
+    expect(before).toContain("\t}\n\tLogOutput();");
+    expect(before.match(/MCP_Bridge_ShowInNotify/g)).toHaveLength(1);
+    applyBridge({ src: root, overlayDir });
+    expect(readFileSync(consoleFile, "utf8")).toBe(before);
+  });
+
+  it("tees a -host server's lines before its early return, once", () => {
+    const root = buildFixture();
+    const file = join(root, "src", "c_console.cpp");
+    applyBridge({ src: root, overlayDir });
+    const con = linesOf(file);
+    const hostTee = `\t\tMCP_Bridge_TeeOutput( outlinecopy ); // ${HOST_TEE}`;
+    expect(con[con.lastIndexOf("\t\tconst int length = static_cast<int>(strlen (outlinecopy));") - 1]).toBe(hostTee);
+    expect(con.filter((l) => l.includes("MCP_Bridge_TeeOutput"))).toHaveLength(2);
+    const before = readFileSync(file, "utf8");
+    applyBridge({ src: root, overlayDir });
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("scopes psprite hooks inside the state loop and reset before teardown", () => {
+    const root = buildFixture();
+    const src = join(root, "src");
+    applyBridge({ src: root, overlayDir });
+    const pspr = linesOf(join(src, "p_pspr.cpp"));
+    const sig = pspr.findIndex((line) => line.startsWith("void P_SetPsprite ("));
+    const clear = pspr.indexOf("\t\t\tMCP_Rec_PspriteClear( player->mo, position );");
+    const set = pspr.indexOf("\t\tMCP_Rec_PspriteSet( player->mo, NULL, position );");
+    expect(clear).toBeGreaterThan(sig);
+    expect(pspr[clear - 1]).toBe("\t\t\tpsp->state = NULL;");
+    expect(pspr[set - 1]).toBe("\t\tpsp->tics = state->GetTics();");
+    expect(pspr[set + 1]).toContain("// [BB] Some action functions");
+    for (const marker of ["MCP_Rec_PspriteClear", "MCP_Rec_PspriteSet"]) expect(pspr.filter((line) => line.includes(marker))).toHaveLength(1);
+    assertAfter(join(src, "p_pspr.cpp"), /^#include "p_local.h"$/, '#include "mcp_bridge.h"');
+    const ggame = linesOf(join(src, "g_game.cpp"));
+    const reset = ggame.indexOf("void GAME_ResetMap (bool runEnterScripts)");
+    expect(ggame.slice(reset + 1, reset + 4)).toEqual(["{", "\tMCP_Rec_Reset();", "\tDestroyActors();"]);
+    expect(ggame.filter((line) => line.includes("MCP_Rec_Reset"))).toHaveLength(1);
+    const files = ["p_pspr.cpp", "g_game.cpp", "p_acs.cpp"].map((file) => join(src, file));
+    const before = files.map((file) => readFileSync(file, "utf8"));
+    applyBridge({ src: root, overlayDir });
+    expect(files.map((file) => readFileSync(file, "utf8"))).toEqual(before);
+  });
+
+  it("puts frame-time hooks on independent slots before frozen returns, once after re-apply", () => {
+    const root = buildFixture();
+    const src = join(root, "src");
+    applyBridge({ src: root, overlayDir });
+    for (const [platform, source] of [["sdl", "SDL_GetTicks()"], ["win32", "timeGetTime()"]]) {
+      const file = join(src, platform, "i_system.cpp");
+      const lines = linesOf(file);
+      const fps = lines.indexOf("unsigned int I_FPSTime()");
+      expect(lines.slice(fps + 1, fps + 3)).toEqual([
+        "{", `\tif ( MCP_ClockFrameUsed ) return MCP_Clock_FrameTime( MCP_FRAME_FPS, ${source} );`,
+      ]);
+      const ms = lines.findIndex((line) => line.includes("MCP_FRAME_TICMS"));
+      expect(ms).toBeGreaterThan(lines.findIndex((line) => line.includes(platform === "sdl" ? "if (ms) *ms = " : "*ms = TicNext;")));
+      expect(ms).toBeLessThan(lines.indexOf("\tif ( MCP_ClockFrozen ) return MCP_ClockFracValue;"));
+      expect(lines[ms]).toBe(platform === "sdl"
+        ? "\tif ( ms && MCP_ClockFrameUsed ) *ms = MCP_Clock_FrameTime( MCP_FRAME_TICMS, *ms );"
+        : "\t\tif ( MCP_ClockFrameUsed ) *ms = MCP_Clock_FrameTime( MCP_FRAME_TICMS, *ms );");
+      expect(lines.filter((line) => line.includes("MCP_FRAME_FPS"))).toHaveLength(1);
+      expect(lines.filter((line) => line.includes("MCP_FRAME_TICMS"))).toHaveLength(1);
+    }
+    const gl = join(src, "gl", "scene", "gl_scene.cpp");
+    assertAfter(gl, /^#include "gl_scene.h"$/, '#include "mcp_bridge.h"');
+    assertAfter(gl, /gl_frameMS = I_MSTime\(\);/,
+      "\tif ( MCP_ClockFrameUsed ) gl_frameMS = MCP_Clock_FrameTime( MCP_FRAME_GLMS, gl_frameMS );");
+    const files = [join(src, "sdl", "i_system.cpp"), join(src, "win32", "i_system.cpp"), gl];
+    const before = files.map((file) => readFileSync(file, "utf8"));
+    applyBridge({ src: root, overlayDir });
+    expect(files.map((file) => readFileSync(file, "utf8"))).toEqual(before);
+  });
+
+  it("puts each clock hook at its site past the decoys, once, with the bridge include on each file's first include", () => {
+    const root = buildFixture();
+    const src = join(root, "src");
+    applyBridge({ src: root, overlayDir });
+    for (const [file, anchor, hook, side] of CLOCK_SITES) {
+      const lines = linesOf(join(src, file));
+      const i = lines.lastIndexOf(anchor);
+      expect(lines[side === "after" ? i + 1 : i - 1], `${file}: ${anchor}`).toBe(hook);
+      expect(lines.filter((l) => l === hook)).toHaveLength(1);
+    }
+    // The clamp follows TryRunTics' own `counts = 1;`, outside the unbraced if.
+    const dnet = linesOf(join(src, "d_net.cpp"));
+    const own = dnet.lastIndexOf("\t\tcounts = 1;");
+    expect(dnet.slice(own - 1, own + 2)).toEqual(["\tif (counts < 1)", "\t\tcounts = 1;", "\tMCP_Clock_Clamp( counts );"]);
+    for (const file of ["d_net.cpp", "sdl/i_system.cpp", "win32/i_system.cpp"]) {
+      assertAfter(join(src, file), /^#include <std(def|lib)\.h>$/, '#include "mcp_bridge.h"');
+    }
+  });
+
+  it("scopes the spawn and destroy hooks past the decoys to their own functions", () => {
+    const root = buildFixture();
+    const pmobj = join(root, "src", "p_mobj.cpp");
+    applyBridge({ src: root, overlayDir });
+    const lines = linesOf(pmobj);
+    const after = (signature: string, line: string) => lines.indexOf(line, lines.indexOf(signature));
+    // Destroy is the last function, FreeNetID and DestroyAllInventory come first.
+    const freeId = after("void AActor::Destroy ()", "\tg_ActorNetIDList.freeID ( NetID );");
+    expect(lines[freeId - 1]).toBe("\tMCP_Rec_Destroy( this );");
+    expect(lines[after("void AActor::FreeNetID ()", "\tg_ActorNetIDList.freeID ( NetID );") - 1]).toBe("{");
+    expect(lines.filter((l) => l.includes("MCP_Rec_Destroy"))).toHaveLength(1);
+    const ret = after("AActor *AActor::StaticSpawn (const PClass *type)", "\treturn actor;");
+    expect(lines[ret - 1]).toBe("\tMCP_Rec_Spawn( actor );");
+    expect(lines.filter((l) => l.includes("MCP_Rec_Spawn"))).toHaveLength(1);
   });
 
   it("is idempotent — a second run changes nothing and reports 'already patched'", () => {
     const root = buildFixture();
     const src = join(root, "src");
     applyBridge({ src: root, overlayDir });
-    const before = linesOf(join(src, "d_main.cpp")).join("\n");
-    const consoleBefore = linesOf(join(src, "c_console.cpp")).join("\n");
+    const patched = ["d_main.cpp", "c_console.cpp", "g_game.cpp", ...[...REC_HOOKS, ...CLOCK_HOOKS].map(([f]) => f)].map((f) => join(src, String(f)));
+    const before = patched.map((f) => readFileSync(f, "utf8"));
 
     const log: string[] = [];
     applyBridge({ src: root, overlayDir, log: (m) => log.push(m) });
-    expect(linesOf(join(src, "d_main.cpp")).join("\n")).toBe(before);
-    expect(linesOf(join(src, "c_console.cpp")).join("\n")).toBe(consoleBefore);
+    expect(patched.map((f) => readFileSync(f, "utf8"))).toEqual(before);
     expect(log.some((l) => l.includes("already patched"))).toBe(true);
+  });
+
+  it("a re-apply delivers an edited ACS block (a marker check alone would skip it)", () => {
+    const root = buildFixture();
+    const pacs = join(root, "src", "p_acs.cpp");
+    applyBridge({ src: root, overlayDir });
+    const applied = readFileSync(pacs, "utf8");
+    // The tree as an older overlay left it: the run_acs block without one of its lines (CRLF from a Windows checkout).
+    const stale = applied.replace(/^CCMD\( mcp_runacs \)\r?\n/m, "");
+    expect(stale).not.toBe(applied);
+    writeFileSync(pacs, stale);
+
+    const log: string[] = [];
+    applyBridge({ src: root, overlayDir, log: (m) => log.push(m) });
+    expect(readFileSync(pacs, "utf8")).toBe(applied);
+    expect(log.filter((l) => l.includes("updated"))).toEqual(["  ~ updated: p_acs.cpp (run_acs and run_script CCMDs)"]);
+  });
+
+  it("a re-apply adds a new overlay .cpp to the target_sources line, in place", () => {
+    const root = buildFixture();
+    const cmake = join(root, "src", "CMakeLists.txt");
+    applyBridge({ src: root, overlayDir });
+    const applied = readFileSync(cmake, "utf8");
+    // The line as an overlay from before mcp_clock.cpp left it.
+    const stale = applied.replace(" mcp_clock.cpp )", " )");
+    expect(stale).not.toBe(applied);
+    writeFileSync(cmake, stale);
+
+    const log: string[] = [];
+    applyBridge({ src: root, overlayDir, log: (m) => log.push(m) });
+    expect(readFileSync(cmake, "utf8")).toBe(applied);
+    expect(log).toContain("  ~ updated: CMakeLists.txt (target_sources zdoom)");
+  });
+
+  // Older overlays' hook lines and where each sat: post-copy, then in place on the net cmd.
+  it.each([
+    ["\t\t\t\tMCP_Input_Override( i, cmd );", "\t\t\t\t// check for turbo cheats"],
+    ["\t\t\t\tMCP_Input_Override( i, newcmd );", "\t\t\t\tif (demorecording)"],
+  ])("migrates the older input hook %j to the copying one, only inside G_Ticker, once", (old, site) => {
+    const root = buildFixture();
+    const ggame = join(root, "src", "g_game.cpp");
+    // A tree an older overlay patched, plus an identical line in a decoy ahead of G_Ticker.
+    const fresh = readFileSync(ggame, "utf8");
+    writeFileSync(ggame, fresh
+      .replace("void G_Decoy ()\n{\n", `void G_Decoy ()\n{\n${old}\n`)
+      .replace(`\n${site}`, `\n${old}\n${site}`));
+
+    const log: string[] = [];
+    applyBridge({ src: root, overlayDir, log: (m) => log.push(m) });
+    const lines = linesOf(ggame);
+    const ticker = lines.indexOf("void G_Ticker ()");
+    expect(lines.indexOf(old)).toBeLessThan(ticker);
+    expect(lines.lastIndexOf(old)).toBe(lines.indexOf(old));
+    expect(lines[lines.indexOf("\t\t\t\tif (demorecording)") - 1]).toBe("\t\t\t\tnewcmd = MCP_Input_Override( i, newcmd );");
+    expect(log).toContain(`  ~ migrated: g_game.cpp (${old.trim()})`);
+
+    const again: string[] = [];
+    const before = readFileSync(ggame, "utf8");
+    applyBridge({ src: root, overlayDir, log: (m) => again.push(m) });
+    expect(readFileSync(ggame, "utf8")).toBe(before);
+    expect(again.some((l) => l.includes("migrated"))).toBe(false);
   });
 
   it("revert removes the overlay files", () => {

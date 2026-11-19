@@ -1,14 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { FakeBridge } from "./fakes/fake-bridge.js";
 import { BridgeClient } from "../src/bridge/transport.js";
 import { parseDumpActors } from "../src/parsers/dumpactors.js";
+import { engine } from "../src/engine.js";
+import { engineFixture } from "./fakes/fixtures.js";
 
-const fixture = readFileSync(
-  fileURLToPath(new URL("./fixtures/dumpactors.golden.txt", import.meta.url)),
-  "utf8",
-).split(/\r?\n/);
+const golden = (engineId: string) => engineFixture(engineId, "dumpactors.golden.txt");
 
 let bridge: FakeBridge | undefined;
 let client: BridgeClient | undefined;
@@ -30,22 +27,32 @@ describe("BridgeClient <-> FakeBridge", () => {
     expect(await client.runCommand("say hi")).toEqual([]);
   });
 
-  it("drives list-actors end-to-end through the real client + parser", async () => {
+  it("returns a multi-line reply verbatim, in order, sentinel excluded", async () => {
+    // The client does no parsing of its own: whatever the engine printed between the
+    // command and its sentinel is what a tool sees.
+    const reply = ["Line one", "  indented two", "", "three"];
+    bridge = await FakeBridge.start();
+    bridge.respondTo("dumpactors", reply);
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+
+    expect(await client.runCommand("dumpactors")).toEqual(reply);
+  });
+
+  it.each([
+    ["zandronum", "ArtiBoostArmor"],
+  ])("drives list-actors end-to-end through the real client + parser on the %s golden", async (engineId, sample) => {
+    const fixture = golden(engineId);
     bridge = await FakeBridge.start();
     bridge.respondTo("dumpactors", fixture);
     client = new BridgeClient({ port: bridge.port });
     await client.connect();
 
-    const output = await client.runCommand("dumpactors");
-    const actors = parseDumpActors(output);
+    const actors = parseDumpActors(await client.runCommand("dumpactors"));
 
-    expect(actors).toContainEqual({
-      name: "ArtiBoostArmor",
-      edNum: 8041,
-      spawnId: 22,
-      filter: "4:Hexen",
-      source: "zandronum.pk3:actors/hexen/boostarmor.txt",
-    });
+    expect(actors).toEqual(parseDumpActors(fixture));
+    expect(actors).toHaveLength(4);
+    expect(actors.map((a) => a.name)).toContain(sample);
   });
 
   it("correlates two serial commands independently", async () => {
@@ -176,6 +183,22 @@ describe("BridgeClient <-> FakeBridge", () => {
     expect(client.supports("nope")).toBe(false);
   });
 
+  it("reports the engine name and bridge version from the hello, and undefined when it omits them", async () => {
+    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: engine.id, bridge: "0.16.0" } });
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+    expect(client.engineName).toBe(engine.id);
+    expect(client.bridgeVersion).toBe("0.16.0");
+    client.close();
+
+    await bridge.close();
+    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello" } });
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+    expect(client.engineName).toBeUndefined();
+    expect(client.bridgeVersion).toBeUndefined();
+  });
+
   it("defaults to no capabilities when the hello omits caps", async () => {
     bridge = await FakeBridge.start();
     client = new BridgeClient({ port: bridge.port });
@@ -246,20 +269,9 @@ describe("BridgeClient <-> FakeBridge", () => {
     expect(sent[0].text).toMatch(/^mcp_status /);
   });
 
-  it("resolves (not rejects) when a status refresh probe times out", async () => {
-    bridge = await FakeBridge.start({
-      hello: { v: 1, t: "hello", caps: ["cmd", "status"] },
-      swallowCommands: true,
-    });
-    client = new BridgeClient({ port: bridge.port });
-    await client.connect();
-    await client.refreshStatus(); // readStatus resolves with no status after ~500ms
-    expect(client.lastStatus).toBeUndefined();
-  });
-
   it("drops another request's late sentinel line from a command's output", async () => {
     bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", caps: ["cmd", "status"] } });
-    bridge.respondTo("save s1", ["__MCPDONE_old__ paused=1", "real line"]);
+    bridge.respondTo("save s1", ["__MCPDONE_old__ paused=1 acstemp=0", "real line"]);
     client = new BridgeClient({ port: bridge.port });
     await client.connect();
     expect(await client.runCommand("save s1")).toEqual(["real line"]);
@@ -273,6 +285,17 @@ describe("BridgeClient <-> FakeBridge", () => {
     client = new BridgeClient({ port: bridge.port });
     await client.connect();
     expect(await client.runCommand("dumphud")).toEqual([hud]);
+  });
+
+  it("resolves (not rejects) when a status refresh probe times out", async () => {
+    bridge = await FakeBridge.start({
+      hello: { v: 1, t: "hello", caps: ["cmd", "status"] },
+      swallowCommands: true,
+    });
+    client = new BridgeClient({ port: bridge.port });
+    await client.connect();
+    await client.refreshStatus(); // readStatus resolves with no status after ~500ms
+    expect(client.lastStatus).toBeUndefined();
   });
 
   describe("readStatus", () => {

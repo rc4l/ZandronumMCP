@@ -1,0 +1,1 @@
+acsvar global 2 = 10

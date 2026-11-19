@@ -6,7 +6,8 @@
 // Strategy (see anchors.md + the project README):
 //   * NEW files are copied in (zero conflict, ever).
 //   * Existing files get ONE anchored, idempotent one-line insertion each.
-//   * ACS CCMD blocks are appended to p_acs.cpp (where the file-static arrays live).
+//   * ACS CCMD blocks are appended to p_acs.cpp (where the file-static arrays live),
+//     and replaced in place when the overlay's copy changes.
 //
 import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { join, basename } from "node:path";
@@ -21,6 +22,106 @@ export const OVERLAY_FILES = [
   "mcp_actorstate.cpp",
   "mcp_hud.cpp",
   "mcp_hud.h",
+  "mcp_input.cpp",
+  "mcp_steer.h",
+  "mcp_clock.cpp",
+];
+
+// Overlay blocks kept in p_acs.cpp: marker name, source file, log label.
+export const ACS_BLOCKS = [
+  ["MCP_ACSVARS", "mcp_acsvars.inc", "ACS var CCMDs"],
+  ["MCP_MAPVARS", "mcp_mapvars.inc", "map var CCMDs"],
+  ["MCP_MAPSLOT", "mcp_mapslot.inc", "map var slot CCMD"],
+  ["MCP_ACSREF", "mcp_acsref.inc", "ACS var refs"],
+  ["MCP_SCRIPTS", "mcp_scripts.inc", "script/function CCMDs"],
+  ["MCP_RUNACS", "mcp_runacs.inc", "run_acs and run_script CCMDs"],
+];
+
+// Marker of the -host tee (3b), kept in the line's trailing comment.
+export const HOST_TEE = "MCP: -host returns before the tee below";
+
+// The bridge header include, on a file's first unconditional #include.
+const BRIDGE_INCLUDE = {
+  anchor: "^\\s*#include", requireTopLevel: true,
+  line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
+};
+
+// The mcp_rec recorder's playsim hooks (mcp_actorstate.cpp), each marker its hook's name, unique per file.
+export const REC_HOOKS = [
+  ["g_game.cpp", [
+    { anchor: "^\\{", scopeAfter: "^void GAME_ResetMap", line: "\tMCP_Rec_Reset();", marker: "MCP_Rec_Reset" },
+  ]],
+  ["p_pspr.cpp", [
+    { anchor: "^\\s*psp->state = NULL;", scopeAfter: "^void P_SetPsprite \\(", line: "\t\t\tMCP_Rec_PspriteClear( player->mo, position );", marker: "MCP_Rec_PspriteClear" },
+    { anchor: "^\\s*// \\[BB\\] Some action functions", position: "Before", scopeAfter: "^void P_SetPsprite \\(",
+      line: "\t\tMCP_Rec_PspriteSet( player->mo, NULL, position );", marker: "MCP_Rec_PspriteSet" },
+  ]],
+  ["p_tick.cpp", [
+    // Right after the tic's maptime++, so once per simulated tic, after everything in it.
+    { anchor: "^\\s*level\\.maptime\\+\\+;", scopeAfter: "^void P_Ticker", line: "\tMCP_Rec_Tick();", marker: "MCP_Rec_Tick" },
+  ]],
+  ["p_mobj.cpp", [
+    { anchor: "^\\s*return actor;", position: "Before", scopeAfter: "^AActor \\*AActor::StaticSpawn",
+      line: "\tMCP_Rec_Spawn( actor );", marker: "MCP_Rec_Spawn" },
+    // The exact signature: a looser scope lands on DestroyAllInventory, then FreeNetID's freeID.
+    { anchor: "g_ActorNetIDList\\.freeID \\( NetID \\);", position: "Before", scopeAfter: "^void AActor::Destroy \\(\\)",
+      line: "\tMCP_Rec_Destroy( this );", marker: "MCP_Rec_Destroy" },
+    { anchor: "tics = GetTics\\(newstate\\);", scopeAfter: "^bool AActor::SetState \\(",
+      line: "\t\tMCP_Rec_State( this );", marker: "MCP_Rec_State" },
+  ]],
+  ["p_interaction.cpp", [
+    // After both health subtractions in P_DamageMobj.
+    { anchor: "target->DamageTypeReceived = mod;", line: "\tMCP_Rec_Damage( target, inflictor, source, damage, mod );", marker: "MCP_Rec_Damage" },
+    { anchor: "bool wasgibbed", position: "Before", scopeAfter: "^void AActor::Die \\(",
+      line: "\tMCP_Rec_Death( this, source, inflictor );", marker: "MCP_Rec_Death" },
+  ]],
+  ["p_acs.cpp", [
+    // The member functions pass plain values: DLevelScript's members are protected.
+    { anchor: 'DPrintf\\("%s started\\.', scopeAfter: "^DLevelScript::DLevelScript \\(AActor",
+      line: "\tMCP_Rec_ScriptStart( this, num, module->GetModuleName(), activator );", marker: "MCP_Rec_ScriptStart" },
+    { anchor: "^\\s*if \\(state == SCRIPT_PleaseRemove\\)", position: "Before",
+      line: "\tif (state == SCRIPT_PleaseRemove) MCP_Rec_ScriptEnd( this, script );", marker: "MCP_Rec_ScriptEnd" },
+  ]],
+];
+
+// The definition, not d_main.cpp's earlier `void D_DoomLoop ();` prototype.
+const DOOM_LOOP = "^void D_DoomLoop \\(\\)\\s*$";
+
+// The frozen clock's hooks (mcp_clock.cpp).
+const CLOCK_FRAC = {
+  scopeAfter: "^fixed_t I_GetTimeFrac", line: "\tif ( MCP_ClockFrozen ) return MCP_ClockFracValue;", marker: "MCP_ClockFrozen",
+};
+export const CLOCK_HOOKS = [
+  ["d_net.cpp", [
+    // Before the waits: a held frame runs no tic and never reads the clock in a loop.
+    { anchor: "^\\s*bool doWait = ", position: "Before", scopeAfter: "^void TryRunTics",
+      line: "\tif ( MCP_Clock_Hold() ) return;", marker: "MCP_Clock_Hold" },
+    { anchor: "^\\s*counts = 1;", scopeAfter: "^void TryRunTics", line: "\tMCP_Clock_Clamp( counts );", marker: "MCP_Clock_Clamp" },
+  ]],
+  // The frame-ms rewrite must run before the frozen frac return.
+  [join("sdl", "i_system.cpp"), [
+    { ...CLOCK_FRAC, anchor: "^\\s*if \\(ms\\) \\*ms = " },
+    { anchor: "^\\s*if \\(ms\\) \\*ms = ", scopeAfter: "^fixed_t I_GetTimeFrac",
+      line: "\tif ( ms && MCP_ClockFrameUsed ) *ms = MCP_Clock_FrameTime( MCP_FRAME_TICMS, *ms );", marker: "MCP_FRAME_TICMS" },
+    { anchor: "^\\{", scopeAfter: "^unsigned int I_FPSTime\\(\\)",
+      line: "\tif ( MCP_ClockFrameUsed ) return MCP_Clock_FrameTime( MCP_FRAME_FPS, SDL_GetTicks() );", marker: "MCP_FRAME_FPS" },
+  ]],
+  [join("win32", "i_system.cpp"), [
+    { ...CLOCK_FRAC, anchor: "^\\s*DWORD step = TicNext - TicStart;", position: "Before" },
+    { anchor: "^\\s*\\*ms = TicNext;", scopeAfter: "^fixed_t I_GetTimeFrac",
+      line: "\t\tif ( MCP_ClockFrameUsed ) *ms = MCP_Clock_FrameTime( MCP_FRAME_TICMS, *ms );", marker: "MCP_FRAME_TICMS" },
+    { anchor: "^\\{", scopeAfter: "^unsigned int I_FPSTime\\(\\)",
+      line: "\tif ( MCP_ClockFrameUsed ) return MCP_Clock_FrameTime( MCP_FRAME_FPS, timeGetTime() );", marker: "MCP_FRAME_FPS" },
+  ]],
+  [join("gl", "scene", "gl_scene.cpp"), [
+    { anchor: "^\\s*gl_frameMS = I_MSTime\\(\\);",
+      line: "\tif ( MCP_ClockFrameUsed ) gl_frameMS = MCP_Clock_FrameTime( MCP_FRAME_GLMS, gl_frameMS );", marker: "MCP_FRAME_GLMS" },
+  ]],
+  // The single-player D_Display, the only call spelled with a space.
+  ["d_main.cpp", [
+    { anchor: "^\\s*D_Display \\(\\);", scopeAfter: DOOM_LOOP,
+      line: "\t\t\t\tMCP_Clock_AfterDisplay();", marker: "MCP_Clock_AfterDisplay" },
+  ]],
 ];
 
 /** Detect the dominant EOL so rewrites don't churn line endings. */
@@ -90,8 +191,9 @@ export function appendBlock(file, body) {
   writeFileSync(file, text + eol + body + (body.endsWith("\n") ? "" : eol));
 }
 
-/** Idempotent, marker-guarded one-line insertion before/after an anchor. */
-export function insertLine(file, { anchor, line, marker, position = "After", scopeAfter, requireTopLevel = false }, log) {
+/** Idempotent, marker-guarded one-line insertion before/after an anchor, first deleting the first
+ *  match after `scopeAfter` of each older form of the line in `replaces` (a string or an array). */
+export function insertLine(file, { anchor, line, marker, position = "After", scopeAfter, requireTopLevel = false, replaces = [] }, log) {
   const name = basename(file);
   if (hasMarker(file, marker)) {
     log(`  = already patched: ${name} (${marker})`);
@@ -100,6 +202,15 @@ export function insertLine(file, { anchor, line, marker, position = "After", sco
   const text = readFileSync(file, "utf8");
   const eol = detectEol(text);
   const lines = text.split(/\r?\n/);
+  const forms = [replaces].flat();
+  const from = forms.length > 0 && scopeAfter ? findAnchorIndex(lines, scopeAfter) : 0;
+  for (const form of forms) {
+    const old = lines.findIndex((l, i) => i >= from && l === form);
+    if (old >= 0) {
+      lines.splice(old, 1);
+      log(`  ~ migrated: ${name} (${form.trim()})`);
+    }
+  }
   const idx = findAnchorIndex(lines, anchor, scopeAfter, requireTopLevel);
   const at = position === "After" ? idx + 1 : idx;
   lines.splice(at, 0, line);
@@ -107,14 +218,45 @@ export function insertLine(file, { anchor, line, marker, position = "After", sco
   log(`  + patched: ${name} (${marker})`);
 }
 
-/** Idempotent, marker-guarded block append. */
-export function appendOnce(file, marker, body, label, log) {
-  if (hasMarker(file, marker)) {
+/** Keep the one line of `file` starting with `prefix` equal to `line`: appended under `header` when absent, replaced when it differs. */
+export function syncLine(file, { prefix, line, header }, label, log) {
+  const text = readFileSync(file, "utf8");
+  const eol = detectEol(text);
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.startsWith(prefix));
+  if (at < 0) {
+    appendBlock(file, header + eol + line + eol);
+    log(`  + patched: ${basename(file)} (${label})`);
+  } else if (lines[at] === line) {
+    log(`  = already patched: ${basename(file)} (${label})`);
+  } else {
+    lines[at] = line;
+    writeFileSync(file, lines.join(eol));
+    log(`  ~ updated: ${basename(file)} (${label})`);
+  }
+}
+
+/** Keep the block of `file` from `// ==== NAME` to `// ==== end NAME ====` equal to `body`, appending or replacing it. */
+export function syncBlock(file, name, body, label, log) {
+  const text = readFileSync(file, "utf8");
+  const begin = text.indexOf(`// ==== ${name} `);
+  if (begin < 0) {
+    appendBlock(file, body);
+    log(`  + patched: ${basename(file)} (${label})`);
+    return;
+  }
+  const endMark = `// ==== end ${name} ====`;
+  const end = text.indexOf(endMark, begin);
+  if (end < 0) {
+    throw new Error(`${basename(file)}: the ${name} block has no "${endMark}" line, so it can't be replaced.`);
+  }
+  const block = body.trimEnd();
+  if (text.slice(begin, end + endMark.length) === block) {
     log(`  = already patched: ${basename(file)} (${label})`);
     return;
   }
-  appendBlock(file, body);
-  log(`  + patched: ${basename(file)} (${label})`);
+  writeFileSync(file, text.slice(0, begin) + block + text.slice(end + endMark.length));
+  log(`  ~ updated: ${basename(file)} (${label})`);
 }
 
 /**
@@ -138,41 +280,41 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
 
   // 1. New files -- copy overlay verbatim (zero-conflict).
   for (const f of OVERLAY_FILES) copyFileSync(join(overlayDir, f), join(srcSrc, f));
-  log("  + copied overlay: mcp_bridge/event/renderinfo/actorstate/hud");
+  log(`  + copied overlay: ${OVERLAY_FILES.join(" ")}`);
 
   const dmain = join(srcSrc, "d_main.cpp");
   const cconsole = join(srcSrc, "c_console.cpp");
   const vtext = join(srcSrc, "v_text.cpp");
   const vdraw = join(srcSrc, "v_draw.cpp");
   const sbar = join(srcSrc, "g_shared", "sbar.h");
+  const ggame = join(srcSrc, "g_game.cpp");
   const pacs = join(srcSrc, "p_acs.cpp");
   const cmake = join(srcSrc, "CMakeLists.txt");
 
   // 2. d_main.cpp -- include + per-frame poll inside D_DoomLoop (all modes).
-  insertLine(dmain, {
-    anchor: "^\\s*#include", requireTopLevel: true,
-    line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
-  }, log);
+  insertLine(dmain, BRIDGE_INCLUDE, log);
   insertLine(dmain, {
     anchor: "switch \\( NETWORK_GetState\\( \\)\\)", position: "Before",
-    scopeAfter: "void D_DoomLoop",
+    scopeAfter: DOOM_LOOP,
     line: "\t\t\tMCP_Bridge_Poll();", marker: "MCP_Bridge_Poll();",
   }, log);
 
   // 3. c_console.cpp -- include + tee every printed line.
-  insertLine(cconsole, {
-    anchor: "^\\s*#include", requireTopLevel: true,
-    line: '#include "mcp_bridge.h"', marker: '#include "mcp_bridge.h"',
-  }, log);
+  insertLine(cconsole, BRIDGE_INCLUDE, log);
   insertLine(cconsole, {
     anchor: "I_PrintStr \\(outlinecopy\\)",
     line: "\t\tMCP_Bridge_TeeOutput( outlinecopy );", marker: "MCP_Bridge_TeeOutput",
   }, log);
-  // ...but keep the bridge's own correlator lines off the notify area (an
-  // unbraced guard on the one call; it sits inside braces in PrintString).
+  // A -host server returns before that tee, so tee its lines too (anchors.md row 4b; after the tee, whose marker this line contains).
+  insertLine(cconsole, {
+    anchor: "const int length = static_cast<int>\\(strlen \\(outlinecopy\\)\\);", position: "Before",
+    scopeAfter: "For servers, dump message to console window",
+    line: `\t\tMCP_Bridge_TeeOutput( outlinecopy ); // ${HOST_TEE}`, marker: HOST_TEE,
+  }, log);
+  // Bridge replies skip notify only; console, logfile and tee stay untouched (anchors.md row 4a).
   insertLine(cconsole, {
     anchor: "C_AddNotifyString \\(printlevel, outlinecopy\\);", position: "Before",
-    line: "\t\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )", marker: "MCP_Bridge_ShowInNotify",
+    line: "\t\t\tif ( MCP_Bridge_ShowInNotify( outlinecopy ) )", marker: "MCP_Bridge_ShowInNotify",
   }, log);
 
   // 3a. v_text.cpp -- tee every drawn HUD string (DrawTextV is the funnel).
@@ -204,20 +346,39 @@ export function applyBridge({ src, revert = false, overlayDir, log = () => {} })
     line: "\tvoid MCP_DumpMessages();", marker: "MCP_DumpMessages",
   }, log);
 
+  // 3a'''. g_game.cpp -- include + the ticcmd override, before a recording demo writes the net cmd,
+  //       returning a copy so the net slot the next tic delta-decodes over keeps the real input.
+  insertLine(ggame, BRIDGE_INCLUDE, log);
+  insertLine(ggame, {
+    anchor: "^\\s*if \\(demorecording\\)\\s*$", position: "Before",
+    scopeAfter: "void G_Ticker",
+    line: "\t\t\t\tnewcmd = MCP_Input_Override( i, newcmd );", marker: "newcmd = MCP_Input_Override( i, newcmd )",
+    replaces: ["\t\t\t\tMCP_Input_Override( i, cmd );", "\t\t\t\tMCP_Input_Override( i, newcmd );"],
+  }, log);
+
+  // 3a''''. The mcp_rec recorder's and the frozen clock's hooks.
+  for (const [file, hooks] of [...REC_HOOKS, ...CLOCK_HOOKS]) {
+    const at = join(srcSrc, file);
+    insertLine(at, BRIDGE_INCLUDE, log);
+    for (const hook of hooks) insertLine(at, hook, log);
+  }
+
   // 3b. p_acs.cpp -- append the ACS world/global var, map var, and script CCMDs.
   //     They need access to file-static ACS arrays, so they live inside p_acs.cpp
   //     (appended at EOF -- the most update-stable spot) rather than a new file.
-  appendOnce(pacs, "MCP_ACSVARS", readFileSync(join(overlayDir, "mcp_acsvars.inc"), "utf8"), "ACS var CCMDs appended", log);
-  appendOnce(pacs, "MCP_MAPVARS", readFileSync(join(overlayDir, "mcp_mapvars.inc"), "utf8"), "map var CCMDs appended", log);
-  appendOnce(pacs, "MCP_SCRIPTS", readFileSync(join(overlayDir, "mcp_scripts.inc"), "utf8"), "script/function CCMDs appended", log);
-  appendOnce(pacs, "MCP_RUNACS", readFileSync(join(overlayDir, "mcp_runacs.inc"), "utf8"), "run_acs CCMD appended", log);
+  insertLine(pacs, BRIDGE_INCLUDE, log);
+  for (const [name, inc, label] of ACS_BLOCKS) {
+    syncBlock(pacs, name, readFileSync(join(overlayDir, inc), "utf8"), label, log);
+  }
 
   // 4. CMakeLists.txt -- compile the overlay into the zdoom target.
-  const cmakeEol = detectEol(readFileSync(cmake, "utf8"));
-  const cmakeBody =
-    "# MCP dev bridge (overlay -- not committed upstream)" + cmakeEol +
-    "target_sources( zdoom PRIVATE mcp_bridge.cpp mcp_crash.cpp mcp_event.cpp mcp_renderinfo.cpp mcp_actorstate.cpp mcp_hud.cpp )" + cmakeEol;
-  appendOnce(cmake, "mcp_bridge.cpp", cmakeBody, "target_sources zdoom", log);
+  const units = OVERLAY_FILES.filter((f) => f.endsWith(".cpp"));
+  const target = {
+    prefix: "target_sources( zdoom PRIVATE mcp_bridge.cpp",
+    line: `target_sources( zdoom PRIVATE ${units.join(" ")} )`,
+    header: "# MCP dev bridge (overlay -- not committed upstream)",
+  };
+  syncLine(cmake, target, "target_sources zdoom", log);
 
   log("Done. Rebuild the engine, then launch with ZANDRONUM_BRIDGE_PORT set to enable the bridge.");
 }
