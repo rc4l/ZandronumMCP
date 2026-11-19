@@ -37,6 +37,8 @@ interface StatusRow {
  */
 const ROWS: StatusRow[] = [
   { key: "paused", normal: "0", note: () => "paused", blocker: false },
+  // The focus-loss pause, which `step` can't run through.
+  { key: "pauseext", normal: "0", note: () => "paused by focus loss (pauseext)" },
   {
     key: "menu",
     normal: "off",
@@ -55,6 +57,7 @@ const ROWS: StatusRow[] = [
   { key: "automap", normal: "0", note: () => "automap is open" },
   { key: "chat", normal: "0", note: () => "chat input is open" },
   { key: "demorec", normal: "0", note: () => "recording a demo", blocker: false },
+  // A queued map/load/playdemo that hasn't run yet.
   { key: "pending", normal: "0", note: () => "a map/save/demo load is pending" },
   // run_acs snippet modules in the level, which make a save unloadable.
   {
@@ -81,6 +84,16 @@ function unusualRows(status: EngineStatus): Array<{ row: StatusRow; note: string
 export function describeStatus(status: EngineStatus): string | undefined {
   const phrases = unusualRows(status).map((u) => u.note);
   return phrases.length ? `Engine state: ${phrases.join(", ")}.` : undefined;
+}
+
+/** The note a reply carries, silent when unchanged since the client's last (`prev`); store `note`, not the result, as the next `prev`. */
+export function footerNote(
+  prev: string | undefined,
+  note: string | undefined,
+  isError: boolean,
+): string | undefined {
+  if (note) return note !== prev || isError ? note : undefined;
+  return prev ? "Engine state: back to normal." : undefined;
 }
 
 /** The unusual conditions that can stop a driven sim or eat its input, worded as in

@@ -2,36 +2,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createRequire } from "node:module";
-import { deriveBasePort, resolveEngineExe, resolveScreenshotDir } from "./process/launch.js";
-import { ServerContext, type ServerConfig } from "./context.js";
+import { ServerContext, configFromEnv } from "./context.js";
 import { registerTools } from "./tools.js";
+import { engine } from "./engine.js";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
-// --- configuration (via env so MCP clients can pass it in their config) ------
-// Path to the zandronum binary (zandronum.exe on Windows; the `zandronum`
-// executable on Linux/macOS), used by launch_instance. Accept either the macOS
-// .app bundle or the binary directly.
-const exe = process.env.ZANDRONUM_EXE ? resolveEngineExe(process.env.ZANDRONUM_EXE) : undefined;
-const config: ServerConfig = {
-  host: process.env.ZANDRONUM_BRIDGE_HOST ?? "127.0.0.1",
-  // Derived from the engine path unless pinned, so separate checkouts — each
-  // with its own build, each driven by its own editor window — don't all land
-  // on 7777 and fight over it.
-  basePort: deriveBasePort(exe, process.env.ZANDRONUM_BRIDGE_PORT),
-  exe,
-  // Where the engine writes named screenshots: its own working directory
-  // (dirname of the exe), unless ZANDRONUM_SCREENSHOT_DIR overrides.
-  screenshotDir: resolveScreenshotDir(exe, process.env.ZANDRONUM_SCREENSHOT_DIR),
-  iwad: process.env.ZANDRONUM_IWAD,
-  acsSrc: process.env.ZANDRONUM_ACS_SRC,
-  saveDir: process.env.ZANDRONUM_SAVE_DIR,
-  bcc: process.env.ZANDRONUM_BCC,
-  acc: process.env.ZANDRONUM_ACC,
-};
-
-const ctx = new ServerContext(config);
-const server = new McpServer({ name: "zandronum-mcp", version });
+const config = configFromEnv(engine, process.env);
+const ctx = new ServerContext(engine, config);
+const server = new McpServer({ name: engine.serverName, version });
 registerTools(server, ctx);
 
 // Kill any games we launched when the server goes away, so they don't linger as
@@ -73,7 +52,7 @@ async function main(): Promise<void> {
   await server.connect(transport);
   // stdout is the MCP channel; logs go to stderr.
   process.stderr.write(
-    `zandronum-mcp ready (bridge ${config.host}:${config.basePort}+, engine ${config.exe ?? "unset"})\n`,
+    `${engine.serverName} ready (bridge ${config.host}:${config.basePort}+, engine ${config.exe ?? "unset"})\n`,
   );
 
   // The client closing stdin (session ended) or a terminating signal both mean

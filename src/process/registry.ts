@@ -1,8 +1,12 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { BridgeClient } from "../bridge/transport.js";
+import { envName, type EngineAdapter } from "../adapter.js";
 import {
   buildLaunchArgs,
   buildLaunchEnv,
+  hasArg,
   clearQuarantine,
   configPathFor,
   waitForPort,
@@ -26,6 +30,8 @@ export interface LaunchIo {
   waitForPort: (host: string, port: number) => Promise<void>;
   /** Clear macOS quarantine from the engine folder so Gatekeeper won't kill it. */
   clearQuarantine: (exe: string) => void;
+  /** Create the directory the engine's config goes in if it doesn't exist yet. */
+  ensureDir: (dir: string) => void;
 }
 
 export const defaultLaunchIo: LaunchIo = {
@@ -49,6 +55,7 @@ export const defaultLaunchIo: LaunchIo = {
   },
   waitForPort: (host, port) => waitForPort(host, port),
   clearQuarantine: (exe) => clearQuarantine(exe),
+  ensureDir: (dir) => mkdirSync(dir, { recursive: true }),
 };
 
 /** How often we re-check whether a quitting engine has actually exited. */
@@ -59,6 +66,8 @@ export interface QuitIo {
   alive: (pid: number) => boolean;
   sleep: (ms: number) => Promise<void>;
 }
+
+export type QuitResult = "clean" | "forced" | "absent";
 
 export const defaultQuitIo: QuitIo = {
   alive: (pid) => {
@@ -78,15 +87,34 @@ export interface LaunchConfig extends LaunchOptions {
   cwd: string;
   port: number;
   host?: string;
-  /** If set, the engine writes its console log here (ZANDRONUM_BRIDGE_LOG) so
+  /** If set, the engine writes its console log here (<PREFIX>_BRIDGE_LOG) so
    *  startup/compile errors can be read back even when the bridge never opens. */
   logFile?: string;
+}
+
+/** A launch that failed before the engine was spawned, so there is no engine output to show. */
+export class LaunchSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LaunchSetupError";
+  }
+}
+
+/** Run a pre-spawn step, rethrowing its failure as a `LaunchSetupError` that says `what` failed. */
+function setupStep(what: string, step: () => void): void {
+  try {
+    step();
+  } catch (e) {
+    throw new LaunchSetupError(`${what}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Tracks bridge connections — and now child processes — for one or more instances. */
 export class InstanceRegistry {
   private readonly clients = new Map<number, BridgeClient>();
   private readonly children = new Map<number, ChildHandle>();
+
+  constructor(readonly engine: EngineAdapter) {}
 
   async attach(config: InstanceConfig): Promise<BridgeClient> {
     const client = new BridgeClient({ host: config.host, port: config.port });
@@ -95,33 +123,10 @@ export class InstanceRegistry {
     return client;
   }
 
-  /** Spawn a bridge-enabled instance, wait for its port, then attach. */
-  async launch(config: LaunchConfig, io: LaunchIo): Promise<BridgeClient> {
-    const host = config.host ?? "127.0.0.1";
-    // Give the engine its own config unless the caller pinned one, so builds
-    // can't trade cvars through the shared user-level ini.
-    const args = buildLaunchArgs({ config: configPathFor(config.exe), ...config });
-    const env = buildLaunchEnv(config.exe, config.port);
-    if (config.logFile) env.ZANDRONUM_BRIDGE_LOG = config.logFile;
-    io.clearQuarantine(config.exe);
-    const child = io.spawn(config.exe, args, config.cwd, env);
-    this.children.set(config.id, child);
+  /** `attachSpawned` for a child `spawn` just started, reaping the child if the attach fails. */
+  async attachOrKill(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
     try {
-      await io.waitForPort(host, config.port);
-      const client = await this.attach({ id: config.id, host, port: config.port });
-
-      // PID handshake: confirm we attached to the engine we just spawned and not a
-      // stale bridge that still held the port. Only enforced when both sides report a
-      // pid — older bridges omit it, so this stays backward compatible.
-      const enginePid = client.enginePid;
-      if (child.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
-        throw new Error(
-          `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
-            `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
-            `Run the "reset" tool, then relaunch.`,
-        );
-      }
-      return client;
+      return await this.attachSpawned(config, io);
     } catch (err) {
       // The launch failed (engine hung and the bridge never opened, or a stale
       // process squatted the port). Reap the child we just spawned so a failed
@@ -129,6 +134,47 @@ export class InstanceRegistry {
       this.kill(config.id);
       throw err;
     }
+  }
+
+  /** Spawn a bridge-enabled instance and register its child, without waiting for its bridge. */
+  spawn(config: LaunchConfig, io: LaunchIo): ChildHandle {
+    // Give the engine its own persistent config, separate from the user's real
+    // engine ini (see configPathFor).
+    const configPath = configPathFor(this.engine, config.exe);
+    if (!hasArg(config.extraArgs, "-config")) {
+      setupStep(`can't create the config folder (${envName(this.engine, "CONFIG")} moves it)`, () =>
+        io.ensureDir(dirname(configPath)),
+      );
+    }
+    const args = buildLaunchArgs({ config: configPath, ...config }, this.engine);
+    const env = buildLaunchEnv(this.engine, config.exe, config.port);
+    if (config.logFile) env[envName(this.engine, "BRIDGE_LOG")] = config.logFile;
+    io.clearQuarantine(config.exe);
+    const child = io.spawn(config.exe, args, config.cwd, env);
+    this.children.set(config.id, child);
+    return child;
+  }
+
+  /** Wait for a spawned instance's bridge port and attach, leaving the child running on failure. */
+  async attachSpawned(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
+    const host = config.host ?? "127.0.0.1";
+    const child = this.children.get(config.id);
+    await io.waitForPort(host, config.port);
+    const client = await this.attach({ id: config.id, host, port: config.port });
+
+    // PID handshake: confirm we attached to the engine we just spawned and not a
+    // stale bridge that still held the port. Only enforced when both sides report a
+    // pid — older bridges omit it, so this stays backward compatible.
+    const enginePid = client.enginePid;
+    if (child?.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
+      this.detach(config.id);
+      throw new Error(
+        `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
+          `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
+          `Run the "reset" tool, then relaunch.`,
+      );
+    }
+    return client;
   }
 
   get(id: number): BridgeClient {
@@ -139,6 +185,11 @@ export class InstanceRegistry {
 
   has(id: number): boolean {
     return this.clients.has(id);
+  }
+
+  /** The PID of the child this registry launched for an instance, if it has one. */
+  childPid(id: number): number | undefined {
+    return this.children.get(id)?.pid;
   }
 
   /** Peek at an instance's client without attaching, connecting, or throwing.
@@ -183,10 +234,12 @@ export class InstanceRegistry {
    * GPU/XPC teardown finish normally. The force-kill remains as the backstop for
    * an engine that is already hung, so this never leaves an instance running.
    *
-   * Resolves true if the engine exited on its own, false if it had to be forced.
+   * Resolves "clean" if the engine exited on its own, "forced" if it had to be
+   * forced, "absent" if the id had neither a client nor a child to stop.
    */
-  async quit(id: number, timeoutMs = 5000, io: QuitIo = defaultQuitIo): Promise<boolean> {
+  async quit(id: number, timeoutMs = 5000, io: QuitIo = defaultQuitIo): Promise<QuitResult> {
     const client = this.clients.get(id);
+    if (!client && !this.children.has(id)) return "absent";
     const pid = this.children.get(id)?.pid;
     if (client) {
       // Fire-and-forget: a quitting engine can never echo runCommand's sentinel.
@@ -218,7 +271,7 @@ export class InstanceRegistry {
     } else {
       this.kill(id); // ignored us, or was already hung — force it
     }
-    return exited;
+    return exited ? "clean" : "forced";
   }
 
   /** Graceful-quit every launched instance (in parallel), then drop the rest. */

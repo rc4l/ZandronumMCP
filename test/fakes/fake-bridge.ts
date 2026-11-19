@@ -5,7 +5,7 @@ import type { BridgeMessage } from "../../src/types.js";
 
 /**
  * A real TCP server that speaks the bridge NDJSON protocol, standing in for a
- * patched zandronum.exe. Lets us integration-test the entire MCP server with no
+ * patched engine binary. Lets us integration-test the entire MCP server with no
  * game running: register canned responses per command substring, and the fake
  * replays them followed by the echoed sentinel so correlation completes.
  *

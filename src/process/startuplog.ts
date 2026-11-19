@@ -1,12 +1,12 @@
 import { isSentinelLine } from "../correlation/sentinel.js";
 
-// Pull the actionable errors out of an engine console log (ZANDRONUM_BRIDGE_LOG).
+// Pull the actionable errors out of an engine console log (<PREFIX>_BRIDGE_LOG).
 // The killer case is a DECORATE/ACS compile error or other fatal that aborts the
 // engine during startup, before the bridge socket ever opens — so the only trace
 // is what the engine printed to this log.
 
 /**
- * Lines the ZDoom/Zandronum console prints for script/compile and fatal load
+ * Lines the ZDoom-family console prints for script/compile and fatal load
  * failures. Kept broad on purpose — better to surface a near-miss line than to
  * hide the one that mattered.
  */
@@ -66,10 +66,42 @@ export function readLogWindow(log: string, opts: LogWindowOptions): LogWindow {
 
 /**
  * Where the bridge's crash handler writes its backtrace: the engine console-log
- * path (ZANDRONUM_BRIDGE_LOG) with a `.crash` suffix. Mirrors the default in
+ * path (<PREFIX>_BRIDGE_LOG) with a `.crash` suffix. Mirrors the default in
  * engine-bridge/overlay/mcp_crash.cpp (ResolveCrashPath), so the server reads
  * back exactly what the engine wrote on a fatal signal.
  */
 export function crashLogPath(logPath: string): string {
   return `${logPath}.crash`;
+}
+
+/** The `pid:` line mcp_crash.cpp writes into every report, or undefined if absent. */
+export function crashReportPid(report: string): number | undefined {
+  const m = /^pid: (\d+)\r?$/m.exec(report);
+  return m ? Number(m[1]) : undefined;
+}
+
+/** get_crash's reply for an existing crash file, which can outlive the engine that wrote it. */
+export function crashReportText(crash: {
+  instance: number;
+  crashFile: string;
+  report: string;
+  enginePid: number | undefined;
+  written: Date;
+}): string {
+  const { instance, crashFile, report, enginePid } = crash;
+  const reportPid = crashReportPid(report);
+  if (enginePid !== undefined && reportPid === enginePid) return report;
+  const written = crash.written.toISOString();
+  if (enginePid !== undefined && reportPid !== undefined) {
+    return (
+      `No crash recorded for instance ${instance} (PID ${enginePid}). ${crashFile} holds ` +
+      `another engine's crash (PID ${reportPid}, written ${written}), not this one's.`
+    );
+  }
+  const why =
+    enginePid === undefined
+      ? "this instance's engine PID is unknown"
+      : "the report has no pid line";
+  const caveat = `so this may be another engine's crash (written ${written})`;
+  return `Unverified: ${why}, ${caveat}.\n\n${report}`;
 }

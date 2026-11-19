@@ -40,8 +40,9 @@ export function withLiveStatus(state: PlayerState, status: EngineStatus | undefi
   return merged;
 }
 
+// `light` is the sector value: Zandronum prints one "lightlevel", UZDoom "sector lightlevel" then "actor lightlevel".
 const POS_RE =
-  /Current player position: \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\), angle: (-?[\d.]+), floorheight: (-?[\d.]+), sector:(\d+), lightlevel: (-?\d+)/;
+  /Current player position: \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\), angle: (-?[\d.]+), floorheight: (-?[\d.]+), sector:(\d+), (?:sector )?lightlevel: (-?\d+)/;
 
 /** Parse `currentpos` output. */
 export function parsePlayerState(lines: string[]): PlayerState | null {
@@ -64,7 +65,9 @@ export function parsePlayerState(lines: string[]): PlayerState | null {
   return null;
 }
 
-const TARGET_RE = /Target=([^,]+), Health=(-?\d+), Spawnhealth=(-?\d+)/;
+// Zandronum prints "Target=<class>"; UZDoom's C_PrintInfo prints "Class=<class>" (after
+// "Player=<name>, " for a player target).
+const TARGET_RE = /(?:Target|Class)=([^,]+), Health=(-?\d+), Spawnhealth=(-?\d+)/;
 
 /** Parse `linetarget` output (the actor the player is aiming at). */
 export function parseTarget(lines: string[]): TargetInfo | null {

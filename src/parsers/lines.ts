@@ -3,6 +3,21 @@
  * a mapper rather than another copy of the split-trim-match loop.
  */
 
+/** Strip ZDoom console colour escapes (\x1c followed by a letter or [name]). */
+export function stripColor(line: string): string {
+  // eslint-disable-next-line no-control-regex
+  return line.replace(/\x1c(\[[^\]]*\]|.)/g, "");
+}
+
+/** Console output as trimmed plain-text lines, minus colour escapes, bar glyphs (\x1d-\x1f), blanks and `bar` lines. */
+export function cleanConsoleLines(lines: string[], bar?: RegExp): string[] {
+  return lines
+    .flatMap((raw) => raw.split(/\r?\n/))
+    // eslint-disable-next-line no-control-regex
+    .map((line) => stripColor(line).replace(/[\x1d-\x1f]/g, "").trimEnd())
+    .filter((line) => line.trim() !== "" && !bar?.test(line.trim()));
+}
+
 /** Map every console line (split on newlines, trimmed) that matches `re`. */
 export function matchLines<T>(lines: string[], re: RegExp, map: (m: RegExpMatchArray) => T): T[] {
   const out: T[] = [];

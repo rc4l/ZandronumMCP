@@ -1,0 +1,1973 @@
+[
+  {
+    "name": "run_command",
+    "title": "Run console command",
+    "description": "Send a raw console command to a running, bridge-patched Zandronum instance and return its captured output.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_actor_classes",
+    "title": "List actor classes",
+    "description": "Run `dumpactors` and return the registered DECORATE/actor classes as structured data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "actors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "edNum": {
+                "type": "number"
+              },
+              "spawnId": {
+                "type": "number"
+              },
+              "filter": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "edNum",
+              "spawnId",
+              "filter",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "engineState": {
+          "type": "string",
+          "description": "The engine-state note, present only on a reply that prints one."
+        }
+      },
+      "required": [
+        "actors"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "summon",
+    "title": "Summon actor",
+    "description": "Spawn an actor of the given class at the player's position (use summon_at for exact map coordinates).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "friend",
+            "foe"
+          ],
+          "default": "normal"
+        }
+      },
+      "required": [
+        "className"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "summon_at",
+    "title": "Summon actor at coordinates",
+    "description": "Run `mcp_spawnat`: spawn an actor at exact map x/y (each coordinate within -32768..32767; z defaults to the floor, angle in degrees, 0 east) and report it in the same call, even while paused (it thinks once the sim runs). The reply's class is the actual spawned class after any mod replacement (requested= shows the asked-for name when it differs); use it and the returned tid for follow-ups with find_actors/actor_state. tid defaults to a fresh unique TID; tid 0 means none. kind friend/foe matches summonfriend/summonfoe. The spawn is refused, reporting why, for an unknown class or a spot blocked by an actor, a line or the floor/ceiling fit; force skips that check. A point in the void is only caught by the floor/ceiling check here. health, special + args (up to 5, zero-padded), ambush and dormant are set at spawn time. Missile classes spawn inert.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "className": {
+          "type": "string",
+          "pattern": "^\\S+$"
+        },
+        "x": {
+          "type": "number",
+          "minimum": -32768,
+          "maximum": 32767
+        },
+        "y": {
+          "$ref": "#/properties/x"
+        },
+        "z": {
+          "$ref": "#/properties/x"
+        },
+        "angle": {
+          "type": "number"
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "friend",
+            "foe"
+          ],
+          "default": "normal"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "health": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "special": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 5
+        },
+        "ambush": {
+          "type": "boolean"
+        },
+        "dormant": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "className",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_cheat",
+    "title": "Set a cheat on or off",
+    "description": "Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. Uses the engine's normal net path. Needs a bridge with the status cap and a cheats= field.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "noclip",
+            "god",
+            "notarget",
+            "fly",
+            "buddha",
+            "noclip2"
+          ]
+        },
+        "on": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "on"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "give",
+    "title": "Give item",
+    "description": "Give an inventory item to the player.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "item": {
+          "type": "string",
+          "minLength": 1
+        },
+        "amount": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "item"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "take",
+    "title": "Take item",
+    "description": "Remove an inventory item from the player.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "item": {
+          "type": "string",
+          "minLength": 1
+        },
+        "amount": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "item"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "load_map",
+    "title": "Load map",
+    "description": "Load a map by its lump name (e.g. MAP01, E1M1). Cheats such as god and notarget reset with the map: set them again with set_cheat.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "mapName": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "mapName"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_running_scripts",
+    "title": "List running ACS scripts",
+    "description": "Run `scriptstat` and return the currently running ACS scripts and their states.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "scripts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "name",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "engineState": {
+          "type": "string",
+          "description": "The engine-state note, present only on a reply that prints one."
+        }
+      },
+      "required": [
+        "scripts"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "run_script",
+    "title": "Run ACS script",
+    "description": "Run (puke) an ACS script by number or name, with optional integer arguments.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "script": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "always": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "script"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "run_acs",
+    "title": "Hot-load and run an ACS snippet",
+    "description": "Compile full ACS source host-side (bcc by default: zt-bcc or bcc on PATH, with zt-bcc's lib/ found next to or one folder above the binary; or acc on PATH; ZANDRONUM_BCC/ZANDRONUM_ACC override the executables) and load it into the running level as a temporary module, then optionally run one of its scripts by number or name with up to 4 args. The script runs inside this call until its first delay, so its Log() output comes back in the reply (Print() is a HUD message: use read_hud); stepTics then runs the sim that many tics and returns the log lines printed meanwhile. A snippet that isn't a #library is compiled as one, so its strings resolve. It may #import a library the level already loaded (pass includeDirs for its source) and then shares that library's live functions and map vars; importing a library that isn't loaded is refused before anything is sent. open runs its OPEN scripts. Compile errors come back without touching the engine. Offline only (no server/client). Zandronum can't unload a module: one the engine rejects stays loaded, inert, and every snippet stays until the map changes. While any is loaded save_game refuses: a save would fail to load (in-game saves and leaving a hub level carry the same hazard, which this tool can't intercept).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "script": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^[^\\s;\"]+$"
+            }
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 4
+        },
+        "compiler": {
+          "type": "string",
+          "enum": [
+            "bcc",
+            "acc"
+          ],
+          "default": "bcc"
+        },
+        "includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Absolute paths; a relative one resolves against the MCP server's working directory."
+        },
+        "open": {
+          "type": "boolean"
+        },
+        "stepTics": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "screenshot",
+    "title": "Screenshot",
+    "description": "Take a screenshot of the game and return it as an image so it can be viewed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "screenshot_file",
+    "title": "Screenshot to a file",
+    "description": "Take a screenshot and leave it on disk, returning only its absolute path (no image content). For measuring pixels with a script instead of viewing the frame. A reused `name` overwrites that file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[\\w-]+$"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "menu_key",
+    "title": "Press a menu key",
+    "description": "Send a single menu navigation key (GUI key event) to the active menu.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "key": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right",
+            "enter",
+            "back",
+            "backspace"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "menu_nav",
+    "title": "Navigate a menu",
+    "description": "Send a sequence of menu keys (e.g. [\"down\",\"down\",\"enter\"]) with a small delay between each.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right",
+              "enter",
+              "back",
+              "backspace"
+            ]
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "menu_text",
+    "title": "Type into a menu text field",
+    "description": "Type a string into the active menu text-entry field (e.g. the player name box after pressing enter on it), one character at a time.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "mouse_move",
+    "title": "Move the mouse pointer",
+    "description": "Move the pointer to a screen position, in pixels from the top-left of the game window. Drives hover-only UI -- tooltips, hot states -- which nothing else here can reach.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "mouse_click",
+    "title": "Click or drag the mouse",
+    "description": "Press and release the left button at a position. Give toX/toY to DRAG: press at the first point, move through it, release at the second. `double` sends a double-click.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        },
+        "toX": {
+          "type": "integer"
+        },
+        "toY": {
+          "type": "integer"
+        },
+        "double": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "mouse_wheel",
+    "title": "Scroll the mouse wheel",
+    "description": "Wheel notches at the current pointer position. Positive scrolls up, negative down.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "notches": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "notches"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "verify_menu",
+    "title": "Open, navigate, and screenshot a menu",
+    "description": "Open a menu (via a console command like `menu_options`), apply navigation steps, then return a screenshot to verify it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "open": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right",
+              "enter",
+              "back",
+              "backspace"
+            ]
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_pause",
+    "title": "Pause or resume the game",
+    "description": "Set the engine's master pause flag directly. Use this to resume a backgrounded instance that auto-paused on focus loss, so the simulation keeps advancing while the MCP drives it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "paused": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paused"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "step",
+    "title": "Advance the game by N tics",
+    "description": "Resume the game, let it run for the given number of tics (35 tics = 1 second), then pause again. Lets you advance the simulation a deterministic-ish amount to observe time-based effects (charging, projectiles, animations) without keeping the window focused.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "tics": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 35
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "ensure_live",
+    "title": "Check that the sim is advancing",
+    "description": "Prove the simulation actually advances: list what could block it (menu, console, chat, automap, not in a level, dead/spectating player, demo, a pending map/save/demo load), then run it ~5 tics and check the map tic counter moved. A pending load is waited out first (up to ~5 s). The pause state is left as found, since `paused` is the normal driving state and `step` runs through it. With fix, first closes the menu (`closemenu`) and hides the console, chat and automap (`mcp_unblock`). Returns live plus the blockers found, fixed and remaining.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "fix": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "step_until",
+    "title": "Step until a condition holds",
+    "description": "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var or player field (x, y, z, angle, floorHeight, sector, light, health, armor) against a number, or a player field against another field (e.g. z == floorHeight). Reports the map tics that actually elapsed. Fails fast with the blocker list if a chunk doesn't advance the map tic counter.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "mapvar"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "==",
+                    "!=",
+                    "<",
+                    "<=",
+                    ">",
+                    ">="
+                  ]
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "maparray"
+                },
+                "name": {
+                  "$ref": "#/properties/condition/anyOf/0/properties/name"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "op": {
+                  "$ref": "#/properties/condition/anyOf/0/properties/op"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "name",
+                "index",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "acsvar"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "world",
+                    "global"
+                  ]
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "op": {
+                  "$ref": "#/properties/condition/anyOf/0/properties/op"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "scope",
+                "index",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "player"
+                },
+                "field": {
+                  "type": "string",
+                  "enum": [
+                    "x",
+                    "y",
+                    "z",
+                    "angle",
+                    "floorHeight",
+                    "sector",
+                    "light",
+                    "health",
+                    "armor"
+                  ]
+                },
+                "op": {
+                  "$ref": "#/properties/condition/anyOf/0/properties/op"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "$ref": "#/properties/condition/anyOf/3/properties/field"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "field",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "maxTics": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "chunkTics": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 5
+        }
+      },
+      "required": [
+        "condition",
+        "maxTics"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_acs_var",
+    "title": "Get ACS variable",
+    "description": "Read an ACS world or global variable by index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "world",
+            "global"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scope",
+        "index"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_acs_var",
+    "title": "Set ACS variable",
+    "description": "Write an ACS world or global variable by index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "world",
+            "global"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "index",
+        "value"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_acs_vars",
+    "title": "List non-zero ACS variables",
+    "description": "Run `dumpacsvars` and return all non-zero ACS world/global variables, optionally filtered by scope.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "world",
+            "global"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "acs_index",
+    "title": "Index ACS source",
+    "description": "Parse a directory of .acs source files and return symbol counts (scripts, functions, numeric defines). Reads files directly; no game needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "find_acs_symbol",
+    "title": "Find ACS symbol",
+    "description": "Resolve a script number or a script/function name to its symbol(s) — name, number, file:line. Turns a profiler 'script 1017' into a source location.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "behavior_names",
+    "title": "Read ACS names from compiled bytecode",
+    "description": "Read function and named-script names from a mod's compiled ACS (BEHAVIOR/library lumps) in a WAD or PK3 — for source-less mods. Numbered scripts have no names in bytecode (use find_acs_symbol with source for those).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_map_exports",
+    "title": "List exported map variables from compiled bytecode",
+    "description": "List each ACS module's exported map variables and arrays (MEXP/ARAY chunks) from a WAD, PK3 or compiled .o, with slot index and array size. get_map_var/get_map_array only see exported names, so check here before a launch or pk3 rebuild. `lump` narrows to modules whose name or basename matches (e.g. `mymod` for `acs/mymod.o`).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lump": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_saves",
+    "title": "List savegames",
+    "description": "List .zds savegames in the save directory with metadata (title, map, engine, game wad, creation time) read from each save's PNG text chunks. No running game needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "save_game",
+    "title": "Save the game",
+    "description": "Run `save` to write a savegame (single-player / cooperative only). NOTE: saving heavily-scripted mods can crash the engine — All-out-War crashes on save; vanilla and simple maps save fine.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "load_game",
+    "title": "Load a savegame",
+    "description": "Run `load` to restore a savegame by name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "play_demo",
+    "title": "Play a demo",
+    "description": "Run `playdemo` to play back a recorded .lmp demo. (Recording is via the -record launch arg, not a console command.)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "player_state",
+    "title": "Player state",
+    "description": "Run `currentpos` and return the player's position, angle, floor height, sector, light level, and (on a status-capable bridge) health, armor, and whether the player is alive, dead, or spectating.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "actor_state",
+    "title": "Actor state (DECORATE)",
+    "description": "Run `dumpactor` and return an actor's live state: class, health, position, angle, pitch, current DECORATE state (sprite/frame/tics, e.g. TNT1 A 0), inventory, and (for players) ready weapon + morph status. Defaults to the player; pass a TID for any actor, plus index for the nth actor sharing it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Pick the nth (0-based) actor sharing the TID; needs tid."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "read_hud",
+    "title": "Read on-screen HUD",
+    "description": "Run `dumphud` and return everything the engine painted last frame: HUD text strings (with screen x/y), images (by texture name + position), and active ACS HUD messages (full composed text, layer, position, remaining tics). Captures menus too.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "actors_near",
+    "title": "Actors near the player",
+    "description": "Run `actorsnear` and return actors within a radius (map units, default 512) of the player: class, health, position, and current sprite.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "radius": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "inspect_target",
+    "title": "Inspect aimed target",
+    "description": "Run `linetarget` and return the actor the player is aiming at (class, health, spawn health).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_view",
+    "title": "Set the player's view",
+    "description": "Point the player's view: an absolute angle (degrees, Doom convention: 0 east, 90 north) with optional pitch (degrees, negative looks up), or face an actor by tid (first actor with it) or class (nearest map actor of that class, aiming at its mid-height). Give exactly one of angle, tid, class.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "angle": {
+          "type": "number"
+        },
+        "pitch": {
+          "type": "number"
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "class": {
+          "type": "string",
+          "pattern": "^\\S+$"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_players",
+    "title": "List players",
+    "description": "Run `dumpplayers` and return every in-game player: slot, bot, spectator/dead-spectator, player state, health, armor, ready weapon, x/y/z, angle, pitch, TID, cheat bits, frags, deaths, kills/items/secrets, points, wins, team, ping and name. Bots join at slot 1+.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "find_actors",
+    "title": "Find actors map-wide",
+    "description": "Run `findactors` and list map actors (owned inventory excluded), optionally filtered by class (includes subclasses), TID and radius around the player, sorted by distance. Each has class, tid, hp/spawnhp, x/y/z, angle, pitch, dist, sprite/frame, flags (monster, friendly, corpse, dormant, shootable, solid, invulnerable, ambush) and target. detail adds master/tracer, special + args, vel, radius/height, floorz and player index. With a tid filter each result also has index, the one to pass to actor_state(tid, index) for it (the list is in distance order, not index order).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "class": {
+          "type": "string",
+          "pattern": "^\\S+$"
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "radius": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "detail": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_scripts",
+    "title": "List ACS scripts",
+    "description": "Run `dumpscripts` and return every script across loaded modules (module, number, name, type, arg count).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_functions",
+    "title": "List ACS functions",
+    "description": "Run `dumpfunctions` and return named ACS functions across loaded modules.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "profile_scripts",
+    "title": "Profile ACS scripts",
+    "description": "Run `acsprofile` and return per-script/function execution stats (total instructions, runs, avg/min/max).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "total",
+            "avg",
+            "min",
+            "max",
+            "runs"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "profile_window",
+    "title": "Profile a time window",
+    "description": "Clear ACS profiling, wait N seconds, then return what ran during that window — `what's hot right now` rather than cumulative since map start.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 3
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "total",
+            "avg",
+            "min",
+            "max",
+            "runs"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "list_modules",
+    "title": "List loaded ACS modules",
+    "description": "Run `dumpmodules` and return the loaded ACS modules (id + name). Map vars live only while a map is loaded.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_map_var",
+    "title": "Get map variable",
+    "description": "Read a map-scope ACS variable by name (searched across loaded modules).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_map_var",
+    "title": "Set map variable",
+    "description": "Write a map-scope ACS variable by name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_map_array",
+    "title": "Get map array element",
+    "description": "Read one element of a map-scope ACS array by name and index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "index"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "set_map_array",
+    "title": "Set map array element",
+    "description": "Write one element of a map-scope ACS array by name and index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "index",
+        "value"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "renderer_info",
+    "title": "Renderer info",
+    "description": "Active backend (software/opengl), GL vendor/shader model, resolution, fullscreen/vsync.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "viewport_info",
+    "title": "Viewport info",
+    "description": "The 3D view window rect (x/y/width/height) and screenblocks size.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "hud_info",
+    "title": "HUD info",
+    "description": "Status bar Y position, status bar / HUD scale, alt HUD, crosshair.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "map_info",
+    "title": "Map info",
+    "description": "Read a map from a WAD and return its format (doom/hexen/udmf) and entity counts. Reads the file directly — the game need not be running.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "map": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "map"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_sector",
+    "title": "Get sector",
+    "description": "Return one sector's properties by index (all fields, format-native keys).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "map": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "map",
+        "index"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_linedef",
+    "title": "Get linedef",
+    "description": "Return one linedef by index, with its referenced sidedefs (textures + offsets) resolved.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "map": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "map",
+        "index"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "find_sectors_by_tag",
+    "title": "Find sectors by tag",
+    "description": "Return all sectors whose tag/id matches (binary `tag` or UDMF `id`).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "map": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "integer"
+        },
+        "file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "map",
+        "tag"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "launch_instance",
+    "title": "Launch a Zandronum instance",
+    "description": "Spawn a bridge-enabled Zandronum process with the given options and attach to it. Requires ZANDRONUM_EXE to be set.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "iwad": {
+          "type": "string",
+          "description": "Path to the IWAD. Defaults to ZANDRONUM_IWAD if set, otherwise the engine's own IWAD search."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "map": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "fullscreen": {
+          "type": "boolean"
+        },
+        "width": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "attach_instance",
+    "title": "Attach to an engine you started yourself",
+    "description": "Connect to a bridge-patched Zandronum that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port. Refuses an instance whose launched engine is still running.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "port": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "kill_instance",
+    "title": "Kill a Zandronum instance",
+    "description": "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "reset",
+    "title": "Reset — reap this session's engine instances",
+    "description": "Kill every instance this session launched, and reap engines ORPHANED by earlier sessions (whose launcher is gone) that could otherwise squat bridge ports. Engines belonging to another running editor window are left alone. Pass all:true to also kill those — only do that if you know no other session is using this engine build.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also kill engines owned by other live MCP sessions using this same build."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_startup_errors",
+    "title": "Get engine startup errors",
+    "description": "Read the engine's captured console log for an instance and surface DECORATE/ACS compile errors and fatal startup errors. Works even when the bridge never came up (e.g. the engine aborted on a bad script) — exactly when the other tools can't connect.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "read_log",
+    "title": "Read the engine console log",
+    "description": "Read an instance's engine console log, which catches prints that never come back in a command reply (e.g. cheat ON/OFF messages, emitted a tic later). Correlation sentinel lines are dropped. `pattern` is a case-insensitive regex filter. Without `sinceLine` this returns the last `maxLines` matches; with it, the first `maxLines` matches after that line. Pass the returned `nextLine` as `sinceLine` to read only what was logged since.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sinceLine": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxLines": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 200
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "get_crash",
+    "title": "Get the last engine crash backtrace",
+    "description": "Return the signal, faulting address, and symbolized backtrace the bridge's crash handler captured the last time the engine crashed (segfault/abort/bus error/etc.). Use this when an instance dies unexpectedly — e.g. run_command reports the bridge closed. A report left by another engine (different PID) is named but not returned as this instance's crash; one that can't be tied to this engine (its PID is unknown, or the report has no pid line) is returned marked `Unverified:`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+]
