@@ -40,8 +40,9 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 
    > **Working on several checkouts at once?** You don't need to do anything. The
    > bridge port is derived from the engine path, so each build gets its own port
-   > range, each launched engine gets its own `-config` instead of sharing the
-   > one system-wide `zandronum.ini`, and instance numbers are scoped to your
+   > range, each checkout's launched engines run on their own `-config`
+   > (`zandronum-mcp.ini` beside the engine) instead of your system-wide
+   > `zandronum.ini`, and instance numbers are scoped to your
    > session — one editor window can never drive another's game. Set
    > `ZANDRONUM_BRIDGE_PORT` only if you want to pin a specific port.
 

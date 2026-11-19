@@ -8,6 +8,8 @@ import {
   hasHeader,
   outputText,
   failureText,
+  stripColor,
+  cleanConsoleLines,
 } from "../src/parsers/lines.js";
 
 describe("matchLines", () => {
@@ -85,5 +87,31 @@ describe("outputText / failureText", () => {
     expect(failureText(["noise", "error unknown class Imp"])).toBe("unknown class Imp");
     expect(failureText(["Unknown command"])).toBe("Unknown command");
     expect(failureText([])).toBe("(no output)");
+  });
+});
+
+describe("stripColor / cleanConsoleLines", () => {
+  it("drops letter and named colour escapes", () => {
+    expect(stripColor("\x1cGred \x1c[Gold]gold \x1c-plain")).toBe("red gold plain");
+  });
+
+  it("splits, strips bars and colours, and drops blank lines", () => {
+    const bar = "\x1d" + "\x1e".repeat(5) + "\x1f";
+    expect(cleanConsoleLines([`\n${bar}\n\n\x1c+MAP01 - entryway  \r\n`, "next\n"])).toEqual([
+      "MAP01 - entryway",
+      "next",
+    ]);
+  });
+
+  it("drops UZDoom's 40-hyphen console bar but keeps other dashed lines", () => {
+    expect(cleanConsoleLines(["\x1c-" + "-".repeat(40), "-- not a bar", "-".repeat(41)])).toEqual([
+      "-- not a bar",
+      "-".repeat(41),
+    ]);
+  });
+
+  it("returns nothing for empty output", () => {
+    expect(cleanConsoleLines([])).toEqual([]);
+    expect(cleanConsoleLines(["\n", " "])).toEqual([]);
   });
 });

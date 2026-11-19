@@ -37,7 +37,7 @@ interface PendingCommand {
 }
 
 /**
- * Talks to one bridge-patched Zandronum instance over loopback TCP.
+ * Talks to one bridge-patched engine instance over loopback TCP.
  *
  * NOTE: console output is a single shared stream with no per-command framing —
  * correlation is by unique echo sentinel, which only works if exactly one
@@ -71,6 +71,7 @@ export class BridgeClient extends EventEmitter {
   private readonly port: number;
   private readonly commandTimeoutMs: number;
   private enginePidValue?: number;
+  private engineNameValue?: string;
 
   constructor(opts: BridgeClientOptions) {
     super();
@@ -84,6 +85,13 @@ export class BridgeClient extends EventEmitter {
    *  engine that happened to still hold the port. */
   get enginePid(): number | undefined {
     return this.enginePidValue;
+  }
+
+  /** Engine name the bridge advertised in its hello (the adapter's `id`), or undefined
+   *  if it sent none. The wire is the only source of this — nothing here hardcodes
+   *  an expected engine — so it also identifies a bridge built into a fork. */
+  get engineName(): string | undefined {
+    return this.engineNameValue;
   }
 
   /** The engine-state fields from the most recent completed round trip (a real
@@ -141,6 +149,9 @@ export class BridgeClient extends EventEmitter {
             }
             if (typeof hello.pid === "number") {
               this.enginePidValue = hello.pid;
+            }
+            if (typeof hello.engine === "string") {
+              this.engineNameValue = hello.engine;
             }
             resolve(hello);
           }

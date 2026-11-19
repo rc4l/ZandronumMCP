@@ -6,6 +6,13 @@ describe("parseScriptStat", () => {
     expect(parseScriptStat(["No scripts are running."])).toEqual([]);
   });
 
+  it("ignores UZDoom's per-level header", () => {
+    expect(parseScriptStat(["Script status for MAP01", "No scripts are running."])).toEqual([]);
+    expect(parseScriptStat(["Script status for MAP01", "script 5: Running"])).toEqual([
+      { number: 5, name: null, state: "Running" },
+    ]);
+  });
+
   it("parses numbered scripts", () => {
     const scripts = parseScriptStat(["script 5: Running", "script 12: Delayed"]);
     expect(scripts).toEqual([

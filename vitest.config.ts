@@ -10,7 +10,7 @@ export default defineConfig({
       // honest measure of our own code.
       include: ["src/**", "engine-bridge/apply-bridge.core.mjs"],
       exclude: [
-        // The CLI shell only: env -> config, stdio transport, signal handlers.
+        // The CLI shell only: stdio transport, signal handlers (env -> config is configFromEnv).
         // Everything it wires up (context.ts, tools.ts) IS covered below, driven
         // through a real MCP client/server pair in test/tools.test.ts.
         "src/server.ts",

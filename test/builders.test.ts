@@ -7,8 +7,31 @@ import {
   buildPukeName,
   buildRunAcs,
   buildSave,
+  restartMissingIwad,
   UnsafeArgumentError,
 } from "../src/commands/builders.js";
+
+describe("restartMissingIwad", () => {
+  it("flags debug_restart with no usable -iwad value", () => {
+    expect(restartMissingIwad("debug_restart")).toBe(true);
+    expect(restartMissingIwad("DEBUG_RESTART -file a.pk3 +map MAP01")).toBe(true);
+    expect(restartMissingIwad("debug_restart -iwad")).toBe(true);
+    expect(restartMissingIwad("debug_restart -iwad -file a.pk3")).toBe(true);
+    expect(restartMissingIwad("debug_restart -iwad +map")).toBe(true);
+    expect(restartMissingIwad("echo hi; debug_restart -file a.pk3")).toBe(true);
+    expect(restartMissingIwad("echo hi\ndebug_restart")).toBe(true);
+    expect(restartMissingIwad("echo hi\r\ndebug_restart")).toBe(true);
+  });
+
+  it("passes debug_restart with -iwad, and other commands", () => {
+    expect(restartMissingIwad("debug_restart -iwad /w/DOOM2.WAD -file a.pk3")).toBe(false);
+    expect(restartMissingIwad('debug_restart -file a.pk3 -IWAD "/my wads/DOOM2.WAD"')).toBe(false);
+    expect(restartMissingIwad("  debug_restart   -iwad x ;")).toBe(false);
+    expect(restartMissingIwad("echo debug_restart")).toBe(false);
+    expect(restartMissingIwad('echo "a; debug_restart"')).toBe(false);
+    expect(restartMissingIwad("version")).toBe(false);
+  });
+});
 
 describe("command", () => {
   it("joins a verb with string and number tokens", () => {

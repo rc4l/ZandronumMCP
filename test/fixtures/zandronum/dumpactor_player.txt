@@ -1,0 +1,14 @@
+MCP_ACTOR
+class DoomPlayer
+health 100
+pos -800.0 700.0 8.0
+angle 90.0
+pitch 5.8
+state PLAY A -1
+weapon Pistol
+morphtics 0
+item Pistol 1 1
+item Fist 1 1
+item Clip 50 200
+item BasicArmor 0 1
+item HexenArmor 1 1

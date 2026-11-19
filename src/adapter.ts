@@ -1,0 +1,107 @@
+import type { LaunchOptions } from "./process/launch.js";
+
+/**
+ * What differs between the engines this host drives. Each repo supplies one in
+ * its own `src/engine.ts`; everything else is shared core, which reads engine
+ * identity and real engine differences only through this.
+ */
+export interface EngineAdapter {
+  /** Matches the bridge hello's `engine` field. */
+  id: string;
+  displayName: string;
+  /** Prefix of every env var the server and the engine bridge read (`<PREFIX>_EXE`, `<PREFIX>_BRIDGE_PORT`, ...). */
+  envPrefix: string;
+  /** MCP server name; also names the dedicated engine ini (`<name>.ini`, see `configPathFor`). */
+  serverName: string;
+  /** Binary inside a macOS `.app` bundle given as `<PREFIX>_EXE`. */
+  macHooksBinary: string;
+  /** Per-platform engine paths, for the "set <PREFIX>_EXE" error. */
+  exeHint: string;
+  /** Where to get a bridge-patched build, appended to "Point it at a bridge-patched build" (lead with ": " or ", "). */
+  bridgeHelp: string;
+  /** The cvar that pins windowed mode. */
+  fullscreenCvar: string;
+  /** Engine-specific `+set` pins, after the window size and before `+map`. */
+  launchPins: (o: LaunchOptions, env: NodeJS.ProcessEnv) => string[];
+  /** Extra child env; a key the launching environment already sets wins. */
+  launchEnv: (base: NodeJS.ProcessEnv, platform: NodeJS.Platform) => NodeJS.ProcessEnv;
+  /** Default savegame dir, resolved once at startup; undefined when none can be determined. */
+  resolveSaveDir: (env: NodeJS.ProcessEnv, exe: string | undefined) => string | undefined;
+  /** Metadata from one savegame file's bytes. */
+  readSaveMeta: (file: string, buf: Buffer) => SaveMeta;
+  /** list_saves also scans each immediate subfolder of the save dir (per-game save folders). */
+  saveSubdirs: boolean;
+  /** Why run_command refuses this raw console text before sending it, or undefined to send it. */
+  refuseCommand: (text: string) => string | undefined;
+  /** The engine opens files with ANSI `fopen` on Windows, so a non-ASCII path can't reach it. */
+  ansiPaths: boolean;
+  notes: EngineNotes;
+  e2e: EngineE2e;
+}
+
+/** What `scripts/e2e-smoke.mjs` can expect of a real build of this engine. */
+export interface EngineE2e {
+  /** How a save is aimed at a scratch dir: a launch flag naming the dir, or "path" when `save` takes a full path. */
+  saveInto: { flag: string } | "path";
+  /** summon_at refuses a point in the void as "outside map". */
+  summonAtVoid: boolean;
+  /** read_log pattern for the no-focus hint line logged at window creation; undefined for none. */
+  nofocusPattern: string | undefined;
+}
+
+/** Description fragments for engine caveats, each spliced into one tool's shared description. */
+export interface EngineNotes {
+  /** Appended to run_command's description; "" for none. */
+  runCommand: string;
+  /** What list_actor_classes lists, e.g. "DECORATE/actor". */
+  actorClasses: string;
+  /** When summon_at still spawns, after "even while". */
+  summonAtWhile: string;
+  /** Why summon_at refuses, after "The spawn is refused, reporting why, ". */
+  summonAtRefusals: string;
+  /** run_acs net-mode and unload caveats, before "save_game refuses". */
+  runAcs: string;
+  /** Appended to screenshot_file's description; "" for none. */
+  screenshotFile: string;
+  /** set_pause's description after "Set the engine's master pause flag directly" (lead with ". " or ", "). */
+  setPause: string;
+  /** What ensure_live checks for, before ", a pending map/save/demo load" in "list what could block it (...)". */
+  ensureLiveBlockers: string;
+  /** When ensure_live doesn't wait out a pending load, after "(up to ~5 s)" (lead with ", "); "" for none. */
+  ensureLiveLoadWait: string;
+  /** What fix's `mcp_unblock` clears, ending the sentence after "closes the menu (`closemenu`)" (lead with " and " or ", "). */
+  ensureLiveUnblock: string;
+  /** set_cheat's sentence before "Needs a bridge with the status cap". */
+  setCheat: string;
+  /** list_saves' description before "No running game needed." */
+  listSaves: string;
+  /** Appended to save_game's description; "" for none. */
+  saveGame: string;
+  /** What read_hud calls HUD messages, e.g. "ACS HUD messages". */
+  hudMessages: string;
+  /** The fields list_players returns, in order. */
+  playerFields: string;
+  /** Closes find_actors' description: how to drill into one result. */
+  findActors: string;
+  /** renderer_info's whole description. */
+  rendererInfo: string;
+}
+
+export interface SaveMeta {
+  file: string;
+  title: string | null;
+  map: string | null;
+  engine: string | null;
+  gameWad: string | null;
+  created: string | null;
+}
+
+/** The name of one of the engine's env vars, e.g. `envName(engine, "EXE")`. */
+export function envName(engine: Pick<EngineAdapter, "envPrefix">, suffix: string): string {
+  return `${engine.envPrefix}_${suffix}`;
+}
+
+/** `base`, then `note` after a space when there is one. */
+export function withNote(base: string, note: string): string {
+  return note ? `${base} ${note}` : base;
+}

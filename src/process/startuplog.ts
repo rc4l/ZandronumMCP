@@ -1,12 +1,12 @@
 import { isSentinelLine } from "../correlation/sentinel.js";
 
-// Pull the actionable errors out of an engine console log (ZANDRONUM_BRIDGE_LOG).
+// Pull the actionable errors out of an engine console log (<PREFIX>_BRIDGE_LOG).
 // The killer case is a DECORATE/ACS compile error or other fatal that aborts the
 // engine during startup, before the bridge socket ever opens — so the only trace
 // is what the engine printed to this log.
 
 /**
- * Lines the ZDoom/Zandronum console prints for script/compile and fatal load
+ * Lines the ZDoom-family console prints for script/compile and fatal load
  * failures. Kept broad on purpose — better to surface a near-miss line than to
  * hide the one that mattered.
  */
@@ -66,7 +66,7 @@ export function readLogWindow(log: string, opts: LogWindowOptions): LogWindow {
 
 /**
  * Where the bridge's crash handler writes its backtrace: the engine console-log
- * path (ZANDRONUM_BRIDGE_LOG) with a `.crash` suffix. Mirrors the default in
+ * path (<PREFIX>_BRIDGE_LOG) with a `.crash` suffix. Mirrors the default in
  * engine-bridge/overlay/mcp_crash.cpp (ResolveCrashPath), so the server reads
  * back exactly what the engine wrote on a fatal signal.
  */

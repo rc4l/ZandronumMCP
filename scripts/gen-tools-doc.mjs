@@ -1,34 +1,63 @@
 #!/usr/bin/env node
 //
-// gen-tools-doc.mjs -- auto-generate README.tools.md from src/tools.ts.
+// gen-tools-doc.mjs -- auto-generate README.tools.md from the registered tools.
 //
-// Parses the real source with the TypeScript compiler API (already a
-// devDependency), so it never runs the MCP server and never drifts from the
-// code. Tools are grouped by the `// --- section ---` header comments in
-// tools.ts, in source order. Run: `npm run docs:tools`.
+// Runs under tsx (`npm run docs:tools`): registers src/tools.ts against a
+// capturing fake server, so the listing is exactly what a client sees,
+// descriptions built at registration time included. Tools are grouped by the
+// `// --- section ---` header comments in tools.ts, matched to each tool's name
+// literal, in registration order. With `--check` (`npm run docs:tools:check`,
+// used by CI) it writes nothing and exits 1 if the files on disk are out of date.
 //
-import ts from "typescript";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerTools } from "../src/tools.ts";
+import { engine } from "../src/engine.ts";
+import { envName } from "../src/adapter.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const serverPath = join(root, "src", "tools.ts");
+const toolsPath = join(root, "src", "tools.ts");
 const outPath = join(root, "README.tools.md");
-const source = readFileSync(serverPath, "utf8");
+const args = process.argv.slice(2);
+if (args.some((a) => a !== "--check")) {
+  console.error(`Unknown argument(s): ${args.join(" ")}. The only option is --check.`);
+  process.exit(2);
+}
+const check = args.includes("--check");
+const source = readFileSync(toolsPath, "utf8");
 
-const sf = ts.createSourceFile(serverPath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const lineOf = (pos) => sf.getLineAndCharacterOfPosition(pos).line;
+// 1. Register every tool against a fake server that only records metadata.
+//    Registration reads only the engine adapter; any other context access fails loudly.
+const ctx = new Proxy(
+  { engine, env: (suffix) => envName(engine, suffix) },
+  {
+    get: (t, key) => {
+      if (key in t) return t[key];
+      throw new Error(`registerTools read ctx.${String(key)} at registration time`);
+    },
+  },
+);
+const tools = [];
+registerTools(
+  {
+    registerTool: (name, meta) =>
+      tools.push({
+        name,
+        title: meta.title ?? "",
+        description: (meta.description ?? "").replace(/\s+/g, " ").trim(),
+      }),
+  },
+  ctx,
+);
 
-// 1. `// --- label ----` comment lines become category headers (skip the
-//    non-tool "configuration" block at the top).
+// 2. `// --- label ----` comment lines become category headers; each tool takes
+//    the last header above its `register("name"` / `registerLive("name"` call.
+const lines = source.split("\n");
 const sections = [];
-source.split("\n").forEach((text, i) => {
-  // Leading whitespace allowed: the tool definitions live inside registerTools().
+lines.forEach((text, i) => {
   const m = text.match(/^\s*\/\/ ---+\s*(.*?)\s*-*\s*$/);
-  if (m && !/^configuration/i.test(m[1])) {
-    sections.push({ line: i, label: m[1].replace(/\s*\(.*\)\s*$/, "").trim() });
-  }
+  if (m) sections.push({ line: i, label: m[1].replace(/\s*\(.*\)\s*$/, "").trim() });
 });
 const categoryForLine = (line) => {
   let cat = "General";
@@ -38,65 +67,28 @@ const categoryForLine = (line) => {
   }
   return cat;
 };
-
-// 2. Resolve a string-literal value (tolerating "a" + "b" concatenation).
-const strVal = (node) => {
-  if (!node) return undefined;
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    return (strVal(node.left) ?? "") + (strVal(node.right) ?? "");
+const lineOfName = new Map();
+for (const m of source.matchAll(/\b(?:register|registerTool|registerLive)\(\s*"([a-z_]+)"/g)) {
+  lineOfName.set(m[1], source.slice(0, m.index).split("\n").length - 1);
+}
+for (const t of tools) {
+  const line = lineOfName.get(t.name);
+  if (line === undefined) {
+    console.error(`No register("${t.name}"/registerLive("${t.name}" literal in src/tools.ts to categorize it.`);
+    process.exit(1);
   }
-  return undefined;
-};
-const propVal = (obj, key) => {
-  const p = obj.properties.find(
-    (pr) => ts.isPropertyAssignment(pr) && pr.name && pr.name.getText(sf) === key,
-  );
-  return p ? strVal(p.initializer) : undefined;
-};
+  t.category = categoryForLine(line);
+}
 
-// 3. Collect every server.registerTool("name", { title, description, ... }, ...)
-//    AND every registerLive("name", { ... }, ...) — the wrapper that adds the
-//    live engine-state note to a tool's response (tools.ts) without changing
-//    its title/description shape, so it's parsed exactly the same way.
-const tools = [];
-const visit = (node) => {
-  const isRegisterTool =
-    ts.isCallExpression(node) &&
-    ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.name.text === "registerTool";
-  const isRegisterLive =
-    ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "registerLive";
-  if (isRegisterTool || isRegisterLive) {
-    const [nameArg, metaArg] = node.arguments;
-    const name = strVal(nameArg);
-    if (name && metaArg && ts.isObjectLiteralExpression(metaArg)) {
-      tools.push({
-        name,
-        title: propVal(metaArg, "title") ?? "",
-        description: (propVal(metaArg, "description") ?? "").replace(/\s+/g, " ").trim(),
-        category: categoryForLine(lineOf(node.getStart(sf))),
-      });
-    }
-  }
-  ts.forEachChild(node, visit);
-};
-visit(sf);
-
-// A hand-maintained "did it change shape" floor rather than a bare `=== 0`
-// guard: the registerLive rollout showed that a call-form the visitor doesn't
-// recognize silently drops JUST those tools (43 of them, that time) rather
-// than emitting nothing — a `length === 0` check would never have caught it.
+// A floor rather than `=== 0`, so a registration path that silently drops some
+// tools still fails. The exact set is pinned by test/tools-listing.test.ts.
 const MIN_EXPECTED_TOOLS = 66;
 if (tools.length < MIN_EXPECTED_TOOLS) {
-  console.error(
-    `Found only ${tools.length} tools (expected at least ${MIN_EXPECTED_TOOLS}) — ` +
-      `did server.registerTool()/registerLive() change shape?`,
-  );
+  console.error(`Registered only ${tools.length} tools (expected at least ${MIN_EXPECTED_TOOLS}).`);
   process.exit(1);
 }
 
-// 4. Group by category in first-seen (source) order and emit markdown.
+// 3. Group by category in first-seen (registration) order and emit markdown.
 const order = [];
 const byCat = new Map();
 for (const t of tools) {
@@ -123,15 +115,34 @@ for (const cat of order) {
   }
 }
 
-writeFileSync(outPath, md);
+// 4. Also emit the shields.io endpoint JSON for the "tools" README badge, where
+//    the repo has a .github/ to hold it.
+const githubDir = join(root, ".github");
+const outputs = [[outPath, md]];
+if (existsSync(githubDir)) {
+  outputs.push([
+    join(githubDir, "badges", "tools.json"),
+    JSON.stringify({ schemaVersion: 1, label: "tools", message: String(tools.length), color: "blueviolet" }) + "\n",
+  ]);
+}
 
-// 5. Also emit the shields.io endpoint JSON for the "tools" README badge, so the
-//    count stays in sync with the code (regenerated by this same script).
-const badgeDir = join(root, ".github", "badges");
-mkdirSync(badgeDir, { recursive: true });
-writeFileSync(
-  join(badgeDir, "tools.json"),
-  JSON.stringify({ schemaVersion: 1, label: "tools", message: String(tools.length), color: "blueviolet" }) + "\n",
-);
+const names = (list) => list.map(([path]) => relative(root, path)).join(", ");
 
-console.log(`Wrote ${outPath} + .github/badges/tools.json — ${tools.length} tools across ${order.length} categories.`);
+// 5. `--check` compares with the files on disk instead of writing them (CRLF checkouts count as fresh).
+if (check) {
+  const onDisk = (path) => readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+  const stale = outputs.filter(([path, text]) => !existsSync(path) || onDisk(path) !== text);
+  if (stale.length) {
+    console.error(`Out of date: ${names(stale)}. Run \`npm run docs:tools\` and commit the result.`);
+    process.exit(1);
+  }
+  console.log(`Up to date: ${names(outputs)} (${tools.length} tools).`);
+  process.exit(0);
+}
+
+for (const [path, text] of outputs) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+}
+
+console.log(`Wrote ${names(outputs)} — ${tools.length} tools across ${order.length} categories.`);

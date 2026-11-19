@@ -3,7 +3,9 @@ import type { RunningScript } from "../types.js";
 /**
  * Parse the output of the `scriptstat` console command.
  *
- * Format (from p_acs.cpp DumpScriptStatus / ScriptPresentation):
+ * Format (from p_acs.cpp's CCMD(scriptstat) / DumpScriptStatus):
+ *   - UZDoom only: a "Script status for MAP01" header per loaded level (ignored; it doesn't
+ *     match the per-script pattern below)
  *   - "No scripts are running." when idle
  *   - otherwise one line per running script:
  *       "script 5: Running"
@@ -25,7 +27,7 @@ export function parseScriptStat(lines: string[]): RunningScript[] {
       } else if (/^-?\d+$/.test(ref)) {
         scripts.push({ number: Number.parseInt(ref, 10), name: null, state });
       }
-      // anything else isn't a shape ScriptPresentation produces — skip it
+      // anything else isn't a shape DumpScriptStatus produces; skip it
     }
   }
   return scripts;

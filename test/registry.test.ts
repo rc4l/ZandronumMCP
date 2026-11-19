@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import { FakeBridge } from "./fakes/fake-bridge.js";
@@ -15,6 +17,9 @@ function launch(registry: InstanceRegistry, config: LaunchConfig, io: LaunchIo) 
   registry.spawn(config, io);
   return registry.attachOrKill(config, io);
 }
+import { configPathFor } from "../src/process/launch.js";
+import { envName } from "../src/adapter.js";
+import { engine } from "../src/engine.js";
 
 let bridge: FakeBridge | undefined;
 let registry: InstanceRegistry | undefined;
@@ -30,7 +35,7 @@ describe("InstanceRegistry", () => {
   it("attaches, exposes, and routes commands by id", async () => {
     bridge = await FakeBridge.start();
     bridge.respondTo("version", ["Zandronum 3.2.1"]);
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
 
     const client = await registry.attach({ id: 1, port: bridge.port });
     expect(registry.has(1)).toBe(true);
@@ -39,13 +44,13 @@ describe("InstanceRegistry", () => {
   });
 
   it("throws for an unknown id", () => {
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     expect(() => registry!.get(99)).toThrow(/No attached instance/);
   });
 
   it("closeAll clears the registry", async () => {
     bridge = await FakeBridge.start();
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await registry.attach({ id: 1, port: bridge.port });
     registry.closeAll();
     expect(registry.has(1)).toBe(false);
@@ -58,8 +63,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 7, kill: () => (killed = true) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     registry.closeAll();
     expect(killed).toBe(true);
@@ -70,6 +76,7 @@ describe("InstanceRegistry", () => {
     bridge = await FakeBridge.start();
     const spawned: Array<{ exe: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
     const dequarantined: string[] = [];
+    const configDirs: string[] = [];
     const io: LaunchIo = {
       spawn: (exe, args, _cwd, env) => {
         spawned.push({ exe, args, env });
@@ -77,27 +84,30 @@ describe("InstanceRegistry", () => {
       },
       waitForPort: async () => {},
       clearQuarantine: (exe) => void dequarantined.push(exe),
+      ensureDir: (dir) => void configDirs.push(dir),
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     const client = await launch(registry,
       { id: 1, exe: "zandronum.exe", cwd: ".", port: bridge.port, iwad: "freedoom2.wad", logFile: "C:/tmp/inst1.log" },
       io,
     );
     expect(spawned[0].exe).toBe("zandronum.exe");
-    // Each build gets its own -config, so branches can't trade cvars through
-    // the single user-level zandronum.ini they would otherwise share.
+    // A dedicated -config, separate from the user's real zandronum.ini.
     expect(spawned[0].args).toEqual([
       "-config",
-      join("zandronum-mcp.ini"),
+      configPathFor(engine, "zandronum.exe"),
       "-iwad",
       "freedoom2.wad",
       "+set",
-      "fullscreen",
+      engine.fullscreenCvar,
       "0",
+      ...engine.launchPins({}, process.env),
     ]);
-    expect(spawned[0].env.ZANDRONUM_BRIDGE_PORT).toBe(String(bridge.port));
-    expect(spawned[0].env.ZANDRONUM_BRIDGE_LOG).toBe("C:/tmp/inst1.log");
+    expect(spawned[0].env[envName(engine, "BRIDGE_PORT")]).toBe(String(bridge.port));
+    expect(spawned[0].env[envName(engine, "BRIDGE_LOG")]).toBe("C:/tmp/inst1.log");
     expect(dequarantined).toEqual(["zandronum.exe"]);
+    // The engine doesn't create its config's folder.
+    expect(configDirs).toEqual([dirname(configPathFor(engine, "zandronum.exe"))]);
     expect(registry.has(1)).toBe(true);
     expect(registry.get(1)).toBe(client);
   });
@@ -110,8 +120,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 123, kill: () => {} }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     expect(registry.has(1)).toBe(true);
   });
@@ -125,8 +136,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 123, kill: () => (killed = true) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await expect(
       launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io),
     ).rejects.toThrow(/stale instance is squatting/);
@@ -140,8 +152,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 123, kill: () => {} }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     expect(registry.has(1)).toBe(true);
   });
@@ -152,8 +165,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 123, kill: () => void killed++ }),
       waitForPort: () => Promise.reject(new Error("never opened")),
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     expect(registry.childPid(1)).toBeUndefined();
     registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
     expect(registry.childPid(1)).toBe(123);
@@ -169,8 +183,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 1, kill: () => (killed = true) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     registry.kill(1);
     expect(killed).toBe(true);
@@ -178,7 +193,7 @@ describe("InstanceRegistry", () => {
   });
 
   it("kill on an unknown id is a no-op", () => {
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     expect(() => registry!.kill(99)).not.toThrow();
   });
 
@@ -189,8 +204,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 4242, kill: () => (forced = true) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
 
     // Engine exits on its own after the first poll.
@@ -199,7 +215,7 @@ describe("InstanceRegistry", () => {
       alive: () => ++polls < 2,
       sleep: async () => {},
     });
-    expect(clean).toBe(true);
+    expect(clean).toBe("clean");
     // The send is fire-and-forget, so let the socket actually deliver it.
     const sawQuit = async () => {
       for (let i = 0; i < 100; i++) {
@@ -220,33 +236,34 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 4242, kill: () => (forced = true) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
 
     const clean = await registry.quit(1, 450, { alive: () => true, sleep: async () => {} });
-    expect(clean).toBe(false);
+    expect(clean).toBe("forced");
     expect(forced).toBe(true); // never leaves it running
     expect(registry.has(1)).toBe(false);
   });
 
-  it("quit on an unknown id is a harmless no-op", async () => {
-    registry = new InstanceRegistry();
+  it("quit on an unknown id is a harmless no-op that reports nothing there", async () => {
+    registry = new InstanceRegistry(engine);
     await expect(
       registry.quit(99, 100, { alive: () => false, sleep: async () => {} }),
-    ).resolves.toBe(false);
+    ).resolves.toBe("absent");
   });
 
   it("quit still force-kills when the engine can't be reached to ask", async () => {
     bridge = await FakeBridge.start();
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     const client = await registry.attach({ id: 1, port: bridge.port });
     // Simulate a dead/disconnected bridge: asking it to quit throws.
     (client as unknown as { sendCommand: () => void }).sendCommand = () => {
       throw new Error("Not connected");
     };
     const clean = await registry.quit(1, 100, { alive: () => true, sleep: async () => {} });
-    expect(clean).toBe(false);
+    expect(clean).toBe("forced");
     expect(registry.has(1)).toBe(false); // still cleaned up
   });
 
@@ -257,8 +274,9 @@ describe("InstanceRegistry", () => {
       spawn: () => ({ pid: 1, kill: () => killed.push(1) }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
+      ensureDir: () => {},
     };
-    registry = new InstanceRegistry();
+    registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     await registry.quitAll(300, { alive: () => false, sleep: async () => {} });
     expect(registry.has(1)).toBe(false);
@@ -289,6 +307,15 @@ describe("defaultLaunchIo", () => {
     } finally {
       child.kill();
     }
+  });
+
+  it("creates a missing config directory, and tolerates one that already exists", () => {
+    const dir = join(tmpdir(), `zandronum-mcp-test-${process.pid}-${Date.now()}`);
+    expect(existsSync(dir)).toBe(false);
+    defaultLaunchIo.ensureDir(dir);
+    expect(existsSync(dir)).toBe(true);
+    expect(() => defaultLaunchIo.ensureDir(dir)).not.toThrow();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("swallows a child 'error' event (bad exe) instead of crashing the server", async () => {

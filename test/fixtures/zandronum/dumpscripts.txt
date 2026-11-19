@@ -1,0 +1,4 @@
+MCP_SCRIPTS
+script 0 -6183 ConfLoop 1 0
+script 0 -6182 ConfHud 0 0
+script 0 901 - 0 1

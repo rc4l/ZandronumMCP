@@ -86,6 +86,35 @@ display), set it explicitly in the MCP env:
 (An explicit `DISPLAY` is always respected; the `:0` default only fills it in when
 it's missing.)
 
+### Linux / X11: window position on a specific monitor
+
+By default the launched window lands wherever the window manager places it. To
+pin it to a specific spot (e.g. a second monitor), set `ZANDRONUM_WINDOW_POS` in
+the MCP env — the server passes it through as SDL's windowed-mode position hint.
+Find your monitor's origin with `xrandr --listmonitors` (the `+X+Y` in each
+line):
+
+```json
+"env": { "ZANDRONUM_BRIDGE_PORT": "7777", "ZANDRONUM_EXE": "...", "ZANDRONUM_WINDOW_POS": "1920,0" }
+```
+
+There is no default here — unlike `DISPLAY`, a fixed position isn't safe for
+every setup (it would push a single-monitor user's window off-screen), so
+nothing moves unless you opt in. As with `DISPLAY`, an explicit
+`SDL_VIDEO_WINDOW_POS` already in the launching environment is always respected
+over `ZANDRONUM_WINDOW_POS`.
+
+### Engine config and IWAD locations
+
+Launched engines run on `zandronum-mcp.ini` beside the engine binary, so a clean
+rebuild of a build folder resets it. To keep one config across builds, point
+`ZANDRONUM_CONFIG` at an ini anywhere else. `ZANDRONUM_IWAD` is the IWAD a launch
+uses when the call names none; without it the engine searches for one itself:
+
+```json
+"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD" }
+```
+
 ### Gatekeeper / "Apple could not verify…"
 
 The app is ad-hoc signed but **not notarized** (a paid Apple Developer ID would be
@@ -153,4 +182,5 @@ Then in your client config use `"command": "node"` with the path to your
 ```bash
 npm test
 npm run coverage
+npm run docs:tools   # after adding or re-describing a tool (CI runs docs:tools:check)
 ```

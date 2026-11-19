@@ -1,0 +1,7 @@
+MCP_ACTOR
+class DoomImp
+health 60
+pos -800.0 828.0 8.0
+angle 0.0
+pitch 0.0
+state TROO A 10

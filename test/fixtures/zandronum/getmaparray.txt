@@ -1,0 +1,1 @@
+maparray confArr[2] = 33

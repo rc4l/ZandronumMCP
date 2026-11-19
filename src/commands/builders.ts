@@ -61,6 +61,44 @@ export function kvArgs(pairs: Record<string, string | number | undefined>): stri
   );
 }
 
+/** Split console text into commands of tokens, on ';'/newlines and whitespace outside quotes. */
+function splitConsole(text: string): string[][] {
+  const commands: string[][] = [];
+  let tokens: string[] = [];
+  let token = "";
+  let inQuote = false;
+  const endToken = () => {
+    if (token.length > 0) tokens.push(token);
+    token = "";
+  };
+  for (const ch of text) {
+    if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && (ch === ";" || ch === "\n" || ch === "\r")) {
+      endToken();
+      commands.push(tokens);
+      tokens = [];
+    } else if (!inQuote && /\s/.test(ch)) endToken();
+    else token += ch;
+  }
+  endToken();
+  commands.push(tokens);
+  return commands;
+}
+
+/**
+ * True if the text runs `debug_restart` without an `-iwad <path>`. UZDoom strips `-iwad` on
+ * restart and then SIGSEGVs in the IWAD picker (a stock engine bug); its adapter refuses these.
+ */
+export function restartMissingIwad(text: string): boolean {
+  return splitConsole(text).some((tokens) => {
+    if (tokens[0]?.toLowerCase() !== "debug_restart") return false;
+    // Same rule as FArgs::CheckValue: the value can't start with '-' or '+'.
+    const i = tokens.findIndex((t, n) => n > 0 && t.toLowerCase() === "-iwad");
+    const value = i < 0 ? undefined : tokens[i + 1];
+    return value === undefined || value.startsWith("-") || value.startsWith("+");
+  });
+}
+
 export function buildSave(name: string, description?: string): string {
   // The description may contain spaces, so it is quoted; safeToken still rejects
   // an embedded quote/semicolon/newline so it can't smuggle a second command.

@@ -1,4 +1,4 @@
-import { stripColor } from "./consoletext.js";
+import { stripColor } from "./lines.js";
 
 export interface ProfileEntry {
   section: "script" | "function";

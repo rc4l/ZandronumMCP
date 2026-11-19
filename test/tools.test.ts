@@ -4,9 +4,12 @@ import { startHarness, collectTools, type Harness } from "./fakes/tool-harness.j
 import { FakeBridge } from "./fakes/fake-bridge.js";
 import { InstanceRegistry } from "./../src/process/registry.js";
 import type { ContextIo, ServerConfig } from "../src/context.js";
+import { envName, type EngineAdapter } from "../src/adapter.js";
+import { engine } from "../src/engine.js";
 import { buildWad, buildZip, sectorsLump, doomLinedefsLump, sidedefsLump, vertexesLump } from "./fakes/wad-builder.js";
 import { buildBehaviorAcse, buildBehaviorExports } from "./fakes/acs-builder.js";
 import { readFileSync } from "node:fs";
+import { abs } from "./fakes/paths.js";
 
 /**
  * Drives every registered tool through a real MCP client/server pair — the
@@ -37,6 +40,7 @@ interface LiveOptions {
   responses?: Record<string, string[]>;
   config?: Partial<ServerConfig>;
   io?: Partial<ContextIo>;
+  engine?: EngineAdapter;
 }
 
 /**
@@ -57,6 +61,7 @@ async function live(opts: LiveOptions = {}): Promise<Harness> {
   harness = await startHarness({
     config: { basePort: bridge.port, ...opts.config },
     io: opts.io,
+    engine: opts.engine,
   });
   // Instance numbers are per-session now: a session must claim one before the
   // other tools will talk to it. Real callers get this from launch_instance.
@@ -112,6 +117,16 @@ describe("console, cheat and script tools", () => {
   it("runs a raw command and returns its output", async () => {
     const h = await live({ responses: { version: ["Zandronum 3.2.1"] } });
     expect(await h.text("run_command", { text: "version" })).toBe("Zandronum 3.2.1");
+  });
+
+  it("refuses what the adapter's refuseCommand flags, before sending it", async () => {
+    const refuseCommand = (text: string) => (text.startsWith("debug_restart") ? "refused: needs -iwad" : undefined);
+    const h = await live({ engine: { ...engine, refuseCommand }, responses: { version: ["v1"] } });
+    const result = await h.call("run_command", { text: "debug_restart -file a.pk3" });
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toBe("refused: needs -iwad");
+    expect(bridge!.received.some((m) => m.t === "cmd" && m.text?.includes("debug_restart"))).toBe(false);
+    expect(await h.text("run_command", { text: "version" })).toBe("v1");
   });
 
   it("reports silent commands as (no output)", async () => {
@@ -194,9 +209,9 @@ describe("console, cheat and script tools", () => {
       },
     });
     const named = await h.call("screenshot_file", { name: "wall_1" });
-    expect(named.content?.[0]).toEqual({ type: "text", text: "/shots/wall_1.png" });
-    expect(named.structuredContent).toEqual({ path: "/shots/wall_1.png" });
-    expect(await h.text("screenshot_file")).toBe("/shots/auto.png");
+    expect(named.content?.[0]).toEqual({ type: "text", text: abs("/shots/wall_1.png") });
+    expect(named.structuredContent).toEqual({ path: abs("/shots/wall_1.png") });
+    expect(await h.text("screenshot_file")).toBe(abs("/shots/auto.png"));
     expect(seen).toEqual([
       { name: "wall_1", keep: true },
       { name: undefined, keep: true },
@@ -533,25 +548,69 @@ describe("ACS source and bytecode tools", () => {
 });
 
 describe("savegame and demo tools", () => {
-  const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  function textChunk(key: string, val: string): Buffer {
-    const data = Buffer.concat([Buffer.from(key, "latin1"), Buffer.from([0]), Buffer.from(val, "latin1")]);
-    const b = Buffer.alloc(12 + data.length);
-    b.writeUInt32BE(data.length, 0);
-    b.write("tEXt", 4, "latin1");
-    data.copy(b, 8);
-    return b;
-  }
-  const save = Buffer.concat([SIG, textChunk("Title", "My Save"), textChunk("Current Map", "MAP07")]);
+  it("lists savegames with metadata from the engine's save reader", async () => {
+    // The save format is the engine's; its reader is tested in each repo's local save-reader test.
+    const reads: string[] = [];
+    const readSaveMeta: EngineAdapter["readSaveMeta"] = (file, buf) => {
+      reads.push(`${file}:${buf.toString()}`);
+      return { file, title: "My Save", map: "MAP07", engine: null, gameWad: null, created: null };
+    };
+    harness = await startHarness({
+      engine: { ...engine, readSaveMeta },
+      config: { saveDir: "/saves" },
+      io: {
+        existsSync: () => true,
+        readdirSync: () => ["a.zds", "B.ZDS", "notes.txt"],
+        readFileSync: (p) => Buffer.from(path.basename(p)),
+      },
+    });
+    const result = await harness.call("list_saves");
+    expect(result.content?.[0]?.text).toBe("2 save(s) in /saves");
+    expect(reads).toEqual(["a.zds:a.zds", "B.ZDS:B.ZDS"]);
+    expect(result.structuredContent?.saves).toMatchObject([{ file: "a.zds", title: "My Save", map: "MAP07" }, { file: "B.ZDS" }]);
+  });
 
-  it("lists savegames with metadata read from the file", async () => {
-    const h = await offline(
-      { saveDir: "/saves" },
-      { readdirSync: () => ["a.zds", "notes.txt"], readFileSync: () => save },
-    );
-    const result = await h.call("list_saves");
-    expect(result.content?.[0]?.text).toBe("1 save(s) in /saves");
-    expect(result.structuredContent?.saves).toMatchObject([{ title: "My Save", map: "MAP07" }]);
+  describe("per-game save subfolders", () => {
+    const tree: Record<string, string[]> = {
+      "/root": ["doom.id.doom2.commercial", "top.zds"],
+      [path.join("/root", "doom.id.doom2.commercial")]: ["save01.zds", "x.txt"],
+    };
+    const readSaveMeta: EngineAdapter["readSaveMeta"] = (file) =>
+      ({ file, title: null, map: null, engine: null, gameWad: null, created: null });
+    const withSubdirs = async (saveSubdirs: boolean, read: string[] = []) => {
+      harness = await startHarness({
+        engine: { ...engine, readSaveMeta, saveSubdirs },
+        config: { saveDir: "/root" },
+        io: {
+          existsSync: () => true,
+          readdirSync: (p) => tree[p]!,
+          isDirSync: (p) => p in tree,
+          readFileSync: (p) => (read.push(p), Buffer.alloc(0)),
+        },
+      });
+      return harness;
+    };
+
+    it("scans one subfolder level when the engine keeps per-game folders", async () => {
+      const read: string[] = [];
+      const result = await (await withSubdirs(true, read)).call("list_saves");
+      expect(result.content?.[0]?.text).toBe("2 save(s) in /root");
+      expect(result.structuredContent?.saves).toMatchObject([
+        { file: "top.zds" },
+        { file: path.join("doom.id.doom2.commercial", "save01.zds") },
+      ]);
+      expect(read).toEqual([path.join("/root", "top.zds"), path.join("/root", "doom.id.doom2.commercial", "save01.zds")]);
+    });
+
+    it("lists only the save dir itself otherwise", async () => {
+      const result = await (await withSubdirs(false)).call("list_saves");
+      expect(result.structuredContent?.saves).toMatchObject([{ file: "top.zds" }]);
+    });
+  });
+
+  it("reports no saves when the save dir doesn't exist yet", async () => {
+    const h = await offline({ saveDir: "/saves" });
+    expect(await h.text("list_saves")).toBe("0 save(s) in /saves");
   });
 
   it("errors when no save directory can be determined", async () => {
@@ -595,16 +654,23 @@ describe("savegame and demo tools", () => {
       expect(probes()).toHaveLength(2);
     });
 
+    it("settles on the first probe when the overlay sends no pending= field", async () => {
+      const h = await live(statusCaps);
+      bridge!.clearReceived();
+      expect(await h.text("load_map", { mapName: "MAP02" })).toBe("loaded MAP02");
+      expect(probes()).toHaveLength(1);
+    });
+
     it("returns what the engine printed after the command, e.g. a load error", async () => {
       const h = await live(statusCaps);
       bridge!.respondTo("load bad", [], ["Could not read savegame 'bad'"]);
       expect(await h.text("load_game", { name: "bad" })).toBe("Could not read savegame 'bad'");
     });
 
-    it("strips the level-start banner's bar glyphs and colour escapes", async () => {
+    it("strips UZDoom's level-start console bar and colour escapes", async () => {
       const h = await live(statusCaps);
-      const bar = "\x1d" + "\x1e".repeat(30) + "\x1f";
-      bridge!.respondTo("map MAP01", [], [`\n${bar}\n`, "\n\x1c+MAP01 - entryway\n\n"]);
+      // g_level.cpp: "\n" TEXTCOLOR_NORMAL "%s\n\n" TEXTCOLOR_BOLD "%s - %s\n\n", console_bar first.
+      bridge!.respondTo("map MAP01", [], ["\n\x1c-" + "-".repeat(40) + "\n\n\x1c+MAP01 - entryway\n\n"]);
       expect(await h.text("load_map", { mapName: "MAP01" })).toBe("MAP01 - entryway");
     });
 
@@ -622,6 +688,24 @@ describe("savegame and demo tools", () => {
       const result = await h.call("load_map", { mapName: "MAP02" });
       expect(result.content?.[0]?.text).toBe("(load still pending after ~5 s; the engine-state note may predate it)");
       expect(result.content?.at(-1)?.text).toBe("Engine state: a map/save/demo load is pending.");
+    });
+
+    it("doesn't poll while focus-paused, since no tic runs the load until pauseext clears", async () => {
+      const h = await live(statusCaps);
+      bridge!.clearReceived();
+      bridge!.setStatus({ pending: "1", pauseext: "1" });
+      const result = await h.call("load_map", { mapName: "MAP02" });
+      expect(result.content?.[0]?.text).toBe(
+        "(focus-paused (pauseext): the load runs once ensure_live fix clears it)",
+      );
+      expect(probes()).toHaveLength(0);
+    });
+
+    it("adds no pauseext caveat when the command queued nothing, e.g. an unknown map", async () => {
+      const h = await live(statusCaps);
+      bridge!.setStatus({ pauseext: "1" });
+      bridge!.respondTo("map MAP99", ["No map MAP99"]);
+      expect(await h.text("load_map", { mapName: "MAP99" })).toBe("No map MAP99");
     });
   });
 });
@@ -707,6 +791,16 @@ describe("test-session tools", () => {
   });
 
   describe("set_cheat", () => {
+    it("refuses while focus-paused, since the toggle would be deferred", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ pauseext: "1" });
+      bridge!.clearReceived();
+      const res = await h.call("set_cheat", { name: "god", on: true });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toMatch(/pauseext.*ensure_live with fix/);
+      expect(cmds().some((c) => c.startsWith("god"))).toBe(false);
+    });
+
     it("is a no-op when the bit already matches", async () => {
       const h = await withStatus();
       bridge!.setStatus({ cheats: String(1 << 1) });
@@ -972,7 +1066,13 @@ describe("test-session tools", () => {
       bridge!.clearReceived();
       const res = await h.call("ensure_live");
       expect(res.content?.[0]?.text).toBe("live (maptime 1 -> 2)");
-      expect(res.structuredContent).toEqual({ live: true, maptime: { before: 1, after: 2 }, found: [], remaining: [] });
+      expect(res.structuredContent).toEqual({
+        live: true,
+        maptime: { before: 1, after: 2 },
+        found: [],
+        remaining: [],
+        engineState: "Engine state: paused.",
+      });
       expect(bridge!.pauses.slice(-2)).toEqual([0, 1]);
       expect(cmds().some((c) => /closemenu|mcp_unblock/.test(c))).toBe(false);
     });
@@ -1000,8 +1100,19 @@ describe("test-session tools", () => {
         fixed: ["a menu is open", "console is down", "chat input is open"],
         remaining: ["automap is open"],
       });
+      expect(res.structuredContent).not.toHaveProperty("notes");
       expect(bridge!.pauses.slice(-1)).toEqual([0]);
       expect(cmds().filter((c) => /closemenu|mcp_unblock/.test(c))).toHaveLength(2);
+    });
+
+    it("with fix, also clears the focus-loss pause where the overlay reports one", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ menu: "on", pauseext: "1" });
+      bridge!.onCommand("closemenu", () => bridge!.setStatus({ menu: "off" }));
+      bridge!.onCommand("mcp_unblock", () => bridge!.setStatus({ pauseext: "0" }));
+      ticking();
+      const res = await h.call("ensure_live", { fix: true });
+      expect(res.content?.[0]?.text).toBe("live (maptime 3 -> 4); fixed: paused by focus loss (pauseext), a menu is open");
     });
 
     it("asks for a retry, not a rebuild, when the second status read comes back empty", async () => {
@@ -1040,6 +1151,86 @@ describe("test-session tools", () => {
       const res = await h.call("ensure_live");
       expect(res.content?.[0]?.text).toBe("live (maptime 1 -> 6); waited for a pending map/save/demo load first");
       expect(res.structuredContent).toMatchObject({ live: true, found: [] });
+    });
+
+    it("asks for a retry when the status reads during the load wait all come back empty", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ pending: "1" });
+      let n = 0;
+      bridge!.onCommand("", () => {
+        if (++n > 1) bridge!.blankStatus();
+      });
+      const res = await h.call("ensure_live");
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe(
+        "can't check liveness: status read timed out (engine busy, e.g. loading a map); retry",
+      );
+    });
+
+    it("doesn't wait out a load the focus-loss pause stalls, without fix", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ pending: "1", pauseext: "1" });
+      bridge!.clearReceived();
+      const res = await h.call("ensure_live");
+      expect(res.content?.[0]?.text).toBe(
+        "NOT live (maptime 0 -> 0); blockers: paused by focus loss (pauseext), a map/save/demo load is pending",
+      );
+      expect(cmds().filter((c) => /^mcp_status /.test(c))).toHaveLength(2);
+    });
+
+    it("with fix, clears pauseext first and then waits out the load it released", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ pending: "1", pauseext: "1", maptime: "40" });
+      bridge!.onCommand("mcp_unblock", () => {
+        bridge!.setStatus({ pauseext: "0", pending: "0", maptime: "6" });
+        bridge!.queueStatus({ pending: "1", maptime: "40" }, { maptime: "1" });
+      });
+      const res = await h.call("ensure_live", { fix: true });
+      expect(res.content?.[0]?.text).toBe(
+        "live (maptime 1 -> 6); waited for a pending map/save/demo load first; " +
+          "fixed: paused by focus loss (pauseext), a map/save/demo load is pending",
+      );
+      expect(res.structuredContent).toMatchObject({
+        found: ["paused by focus loss (pauseext)", "a map/save/demo load is pending"],
+        remaining: [],
+        notes: ["waited for a pending map/save/demo load first"],
+      });
+    });
+
+    it("with fix, waits out an unstalled load before fixing, and reads found and pause state after it", async () => {
+      const h = await withStatus();
+      // One snapshot per status-bearing message: read, load probe, closemenu, mcp_unblock, final read.
+      const steps = [
+        { pending: "1", paused: "1", maptime: "40" },
+        { pending: "0", paused: "0", maptime: "1" },
+        {},
+        {},
+        { maptime: "6" },
+      ];
+      let n = 0;
+      bridge!.onCommand("", () => bridge!.setStatus(steps[n++] ?? {}));
+      const p0 = bridge!.pauses.length;
+      const res = await h.call("ensure_live", { fix: true });
+      expect(res.content?.[0]?.text).toBe("live (maptime 1 -> 6); waited for a pending map/save/demo load first");
+      expect(res.structuredContent).toMatchObject({ found: [], fixed: [], remaining: [] });
+      expect(bridge!.pauses.slice(p0)).toEqual([0]);
+    });
+
+    it("with fix, asks for a retry when the load wait after unblocking reads nothing", async () => {
+      const h = await withStatus();
+      bridge!.setStatus({ pending: "1", pauseext: "1" });
+      // Messages: read, closemenu, mcp_unblock, then the load probes.
+      let n = 0;
+      bridge!.onCommand("", () => {
+        n++;
+        if (n === 3) bridge!.setStatus({ pauseext: "0" });
+        if (n >= 4) bridge!.blankStatus();
+      });
+      const res = await h.call("ensure_live", { fix: true });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe(
+        "can't check liveness: status read timed out (engine busy, e.g. loading a map); retry",
+      );
     });
 
     it("needs the time cap and a maptime= field", async () => {
@@ -1308,7 +1499,7 @@ describe("process management tools", () => {
     const h = await offline();
     const result = await h.call("launch_instance");
     expect(result.isError).toBe(true);
-    expect(result.content?.[0]?.text).toMatch(/Set ZANDRONUM_EXE/);
+    expect(result.content?.[0]?.text).toContain(`Set ${envName(engine, "EXE")} to the engine path (${engine.exeHint})`);
   });
 
   it("refuses to launch an engine path that doesn't exist", async () => {
@@ -1320,7 +1511,7 @@ describe("process management tools", () => {
   it("refuses to launch a build without the MCP bridge", async () => {
     const h = await offline(
       { exe: "/engine/zandronum" },
-      { existsSync: () => true, hasBridge: () => false },
+      { existsSync: () => true, hasBridge: (_exe, marker) => marker !== envName(engine, "BRIDGE_PORT") },
     );
     const result = await h.call("launch_instance");
     expect(result.content?.[0]?.text).toMatch(/has no MCP bridge/);
@@ -1328,7 +1519,7 @@ describe("process management tools", () => {
 
   it("launches, attaches, and remembers the port it picked", async () => {
     bridge = await FakeBridge.start();
-    const registry = new InstanceRegistry();
+    const registry = new InstanceRegistry(engine);
     harness = await startHarness({
       config: { exe: "/engine/zandronum", basePort: bridge.port },
       io: {
@@ -1339,6 +1530,7 @@ describe("process management tools", () => {
           spawn: () => ({ pid: undefined, kill: () => {} }),
           waitForPort: () => Promise.resolve(),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
       registry,
@@ -1346,6 +1538,67 @@ describe("process management tools", () => {
     const result = await harness.call("launch_instance");
     expect(result.content?.[0]?.text).toBe(`launched instance 1 on bridge port ${bridge.port}`);
     expect(harness.ctx.logPathFor(1)).toBe(path.join("/engine", `mcp-bridge-${bridge.port}.log`));
+  });
+
+  it("falls back to the configured IWAD when none is passed", async () => {
+    bridge = await FakeBridge.start();
+    const registry = new InstanceRegistry(engine);
+    let spawnArgs: string[] = [];
+    harness = await startHarness({
+      config: {
+        exe: "/engine/zandronum",
+        basePort: bridge.port,
+        iwad: "/wads/DOOM2.WAD",
+      },
+      io: {
+        existsSync: () => true,
+        hasBridge: () => true,
+        findFreePort: (start) => Promise.resolve(start),
+        launchIo: {
+          spawn: (_exe, args) => {
+            spawnArgs = args;
+            return { pid: undefined, kill: () => {} };
+          },
+          waitForPort: () => Promise.resolve(),
+          clearQuarantine: () => {},
+          ensureDir: () => {},
+        },
+      },
+      registry,
+    });
+    await harness.call("launch_instance");
+    expect(spawnArgs).toContain("-iwad");
+    expect(spawnArgs[spawnArgs.indexOf("-iwad") + 1]).toBe("/wads/DOOM2.WAD");
+  });
+
+  it("prefers an explicit iwad argument over the configured one", async () => {
+    bridge = await FakeBridge.start();
+    const registry = new InstanceRegistry(engine);
+    let spawnArgs: string[] = [];
+    harness = await startHarness({
+      config: {
+        exe: "/engine/zandronum",
+        basePort: bridge.port,
+        iwad: "/wads/DOOM2.WAD",
+      },
+      io: {
+        existsSync: () => true,
+        hasBridge: () => true,
+        findFreePort: (start) => Promise.resolve(start),
+        launchIo: {
+          spawn: (_exe, args) => {
+            spawnArgs = args;
+            return { pid: undefined, kill: () => {} };
+          },
+          waitForPort: () => Promise.resolve(),
+          clearQuarantine: () => {},
+          ensureDir: () => {},
+        },
+      },
+      registry,
+    });
+    await harness.call("launch_instance", { iwad: "/other/PLUTONIA.WAD" });
+    expect(spawnArgs[spawnArgs.indexOf("-iwad") + 1]).toBe("/other/PLUTONIA.WAD");
   });
 
   it("surfaces compile errors from the engine log when the bridge never opens", async () => {
@@ -1359,6 +1612,7 @@ describe("process management tools", () => {
           spawn: () => ({ pid: 1234, kill: () => {} }),
           waitForPort: () => Promise.reject(new Error("bridge port never opened")),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     );
@@ -1378,6 +1632,7 @@ describe("process management tools", () => {
           // A non-Error rejection must still be reported, not swallowed.
           waitForPort: () => Promise.reject("boom"),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     );
@@ -1396,6 +1651,7 @@ describe("process management tools", () => {
           spawn: () => ({ pid: 1234, kill: () => {} }),
           waitForPort: () => Promise.reject(new Error("timeout")),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     );
@@ -1415,6 +1671,7 @@ describe("process management tools", () => {
           spawn: () => ({ pid: 0x7ffffff0, kill: () => {} }),
           waitForPort: () => Promise.resolve(),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     });
@@ -1427,17 +1684,24 @@ describe("process management tools", () => {
   });
 
   it("reports an instance that had to be force-killed", async () => {
-    const registry = new InstanceRegistry();
-    harness = await startHarness({ registry });
-    // Nothing launched: quit() finds no child and reports a forced stop.
+    bridge = await FakeBridge.start();
+    harness = await startHarness({ config: { basePort: bridge.port } });
+    // Attached, not launched: no child pid to watch exit, so quit() forces it.
+    await harness.call("attach_instance");
     expect(await harness.text("kill_instance")).toBe(
       "instance 1 did not quit on request — force-killed",
     );
   });
 
+  it("reports an instance id with nothing attached instead of a force-kill", async () => {
+    const registry = new InstanceRegistry(engine);
+    harness = await startHarness({ registry });
+    expect(await harness.text("kill_instance")).toBe("no instance 1 attached, nothing to kill");
+  });
+
   it("resets without an orphan sweep when no engine is configured", async () => {
     const h = await offline();
-    expect(await h.text("reset")).toMatch(/ZANDRONUM_EXE unset, so no orphan sweep/);
+    expect(await h.text("reset")).toContain(`${envName(engine, "EXE")} unset, so no orphan sweep`);
   });
 
   it("resets and reports reaped orphans", async () => {
@@ -1563,6 +1827,7 @@ describe("diagnostic tools", () => {
           waitForPort: () =>
             bridgeOpens ? Promise.resolve() : Promise.reject(new Error("timeout")),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     });
@@ -1596,6 +1861,7 @@ describe("progress reporting on slow tools", () => {
           spawn: () => ({ pid: undefined, kill: () => {} }),
           waitForPort: () => Promise.resolve(),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     });
@@ -1677,6 +1943,7 @@ describe("launch_instance's child PID and attach_instance", () => {
           spawn: () => ({ pid, kill: () => void killed.push(CHILD) }),
           waitForPort: () => (opts.opens === false ? Promise.reject(new Error("timeout")) : Promise.resolve()),
           clearQuarantine: () => {},
+          ensureDir: () => {},
         },
       },
     });
@@ -1883,16 +2150,39 @@ describe("engine-state note (registerLive)", () => {
 
   const cmdsSent = () => bridge!.received.filter((m) => m.t === "cmd");
 
-  it("appends the note after content without touching structuredContent", async () => {
+  it("appends the note after content and mirrors it into structuredContent as engineState", async () => {
+    const h = await liveStatus({ responses: { getacsvar: ["acsvar world 5 = 42"] } });
+    const result = await h.call("get_acs_var", { scope: "world", index: 5 });
+    expect(result.structuredContent).toEqual({ scope: "world", index: 5, value: 42, engineState: "Engine state: paused." });
+    expect(result.content?.at(-1)).toEqual({ type: "text", text: "Engine state: paused." });
+  });
+
+  it("adds no engineState key to a reply that prints no note", async () => {
+    const h = await liveStatus({ responses: { getacsvar: ["acsvar world 5 = 42"] } });
+    const read = () => h.call("get_acs_var", { scope: "world", index: 5 });
+    await read();
+    expect((await read()).structuredContent).toEqual({ scope: "world", index: 5, value: 42 });
+    bridge!.setStatus({ paused: "0" });
+    expect((await read()).structuredContent?.engineState).toBe("Engine state: back to normal.");
+    expect((await read()).structuredContent).toEqual({ scope: "world", index: 5, value: 42 });
+  });
+
+  it("allows engineState in a tool's outputSchema, so a validating client accepts the reply", async () => {
     const h = await liveStatus({
       responses: { dumpactors: ["DoomImp\t3001\t5\tDoom\tzandronum.pk3:actors/imp.txt"] },
     });
+    // Listing the tools is what makes the SDK client check structuredContent against the schema.
+    const { tools } = await h.client.listTools();
+    const schema = tools.find((t) => t.name === "list_actor_classes")?.outputSchema;
+    expect(Object.keys(schema?.properties ?? {})).toEqual(["actors", "engineState", "notes"]);
+    expect(schema?.required).toEqual(["actors"]);
     const result = await h.call("list_actor_classes");
-    expect(result.structuredContent?.actors).toEqual([
-      { name: "DoomImp", edNum: 3001, spawnId: 5, filter: "Doom", source: "zandronum.pk3:actors/imp.txt" },
-    ]);
-    const content = result.content ?? [];
-    expect(content[content.length - 1]).toEqual({ type: "text", text: "Engine state: paused." });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({
+      actors: [{ name: "DoomImp", edNum: 3001, spawnId: 5, filter: "Doom", source: "zandronum.pk3:actors/imp.txt" }],
+      engineState: "Engine state: paused.",
+    });
+    expect((await h.call("list_actor_classes")).structuredContent).not.toHaveProperty("engineState");
   });
 
   it("appends the note after image content via a bare refresh probe (the stub capture runs no command)", async () => {
@@ -1950,6 +2240,51 @@ describe("engine-state note (registerLive)", () => {
     expect(result.content).toHaveLength(1);
     expect(cmdsSent()).toHaveLength(0);
   });
+
+  /** A command tool's reply: one block of its own, plus the note when one is printed. */
+  const version = (h: Harness) => h.call("run_command", { text: "version" });
+  const acstemp = (n: number) =>
+    `Engine state: paused, ${n} run_acs snippet module(s) loaded (saves refused until the map changes).`;
+
+  it("says nothing on a second call whose note is unchanged", async () => {
+    const h = await liveStatus();
+    expect((await version(h)).content).toHaveLength(2);
+    expect((await version(h)).content).toHaveLength(1);
+  });
+
+  it("prints the whole note again whenever it changes", async () => {
+    const h = await liveStatus();
+    await version(h);
+    bridge!.setStatus({ acstemp: "1" });
+    expect((await version(h)).content?.at(-1)?.text).toBe(acstemp(1));
+    bridge!.setStatus({ acstemp: "2" });
+    expect((await version(h)).content?.at(-1)?.text).toBe(acstemp(2));
+  });
+
+  it("says back to normal once when the note clears, then nothing", async () => {
+    const h = await liveStatus();
+    await version(h);
+    bridge!.setStatus({ paused: "0" });
+    expect((await version(h)).content?.at(-1)?.text).toBe("Engine state: back to normal.");
+    expect((await version(h)).content).toHaveLength(1);
+  });
+
+  it("keeps an unchanged note on an isError result", async () => {
+    const h = await liveStatus();
+    await version(h);
+    const result = await h.call("get_acs_var", { scope: "world", index: 0 });
+    expect(result.isError).toBe(true);
+    expect(result.content?.at(-1)?.text).toBe("Engine state: paused.");
+    expect((await version(h)).content).toHaveLength(1);
+  });
+
+  it("reads an unanswered probe as unknown, not as back to normal", async () => {
+    const h = await liveStatus();
+    await version(h);
+    bridge!.swallowProbes(1);
+    expect((await h.call("screenshot")).content).toEqual([{ type: "image", data: "UE5H", mimeType: "image/png" }]);
+    expect((await version(h)).content).toHaveLength(1);
+  });
 });
 
 describe("run_acs", () => {
@@ -1980,7 +2315,7 @@ describe("run_acs", () => {
     const h = await live({ responses: { mcp_runacs: ["runacs ok", "", REPLY] }, io: c.io });
     const res = await h.call("run_acs", { source: "script 1 (void) {}", script: 1, args: [5, -2] });
     expect(res.isError).toBeFalsy();
-    expect(c.requests).toEqual([{ compiler: "bcc", exe: undefined, source: "script 1 (void) {}", includeDirs: undefined }]);
+    expect(c.requests).toEqual([{ compiler: "bcc", exe: undefined, source: "script 1 (void) {}", includeDirs: undefined, engine }]);
     expect(c.removed).toEqual(["/tmp/mcp-runacs-1"]);
     expect(cmds()[0]).toMatch(/^mcp_runacs \/tmp\/mcp-runacs-1\/snippet\.o 1 5 -2 ;/);
     const text = res.content?.[0]?.text ?? "";

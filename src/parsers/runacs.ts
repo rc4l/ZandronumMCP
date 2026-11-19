@@ -1,5 +1,4 @@
-import { matchLines } from "./lines.js";
-import { cleanConsoleLines } from "./consoletext.js";
+import { cleanConsoleLines, matchLines } from "./lines.js";
 
 const TAG = "MCP_RUNACS";
 const REPLY = new RegExp(`^${TAG} module=(\\d+) scripts=(\\d+) started=(\\S+) deferred=([01])$`);
