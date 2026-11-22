@@ -28,7 +28,7 @@ const TEXT_RE = /^text (-?\d+) (-?\d+) (.*)$/;
 const IMAGE_RE = /^image (-?\d+) (-?\d+) (\S+)$/;
 const MSG_RE = /^msg (\d+) (-?[\d.]+) (-?[\d.]+) (-?\d+) (.*)$/;
 
-/** Parse `dumphud` output into on-screen strings, images, and ACS HUD messages. */
+/** Parse `dumphud` output into on-screen strings, images, and HUD messages (ACS on Zandronum, ACS/native on UZDoom). */
 export function parseHud(lines: string[]): HudCapture {
   const out: HudCapture = { text: [], images: [], messages: [] };
   for (const raw of lines) {

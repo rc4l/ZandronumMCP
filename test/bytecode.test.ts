@@ -1,13 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import {
-  parseBehaviorNames,
-  parseMapExports,
-  isAcsObject,
-  hasAcsMagic,
-  parseLoadNames,
-  missingImports,
-} from "../src/acs/bytecode.js";
+import { parseBehaviorNames, parseMapExports, isAcsObject, hasAcsMagic, parseLoadNames, missingImports } from "../src/acs/bytecode.js";
 import {
   buildBehaviorAcse,
   buildBehaviorAcs0Enhanced,
@@ -69,15 +62,15 @@ describe("parseMapExports", () => {
     expect(parseMapExports(buildBehaviorExports(["a"]))).toEqual([{ name: "a", index: 0, isArray: false }]);
   });
 
-  it("returns empty without an MEXP chunk or chunked bytecode", () => {
-    expect(parseMapExports(buildBehaviorAcse(["f"], []))).toEqual([]);
-    expect(parseMapExports(buildBehaviorAcs0Plain())).toEqual([]);
-  });
-
   it("reads only the ARAY pairs actually present when its size overstates them", () => {
     const lump = buildBehaviorExports(["credits"], [{ index: 0, size: 17 }]);
     lump.writeUInt32LE(0xffff, lump.indexOf("ARAY") + 4);
     expect(parseMapExports(lump)).toEqual([{ name: "credits", index: 0, isArray: true, size: 17 }]);
+  });
+
+  it("returns empty without an MEXP chunk or chunked bytecode", () => {
+    expect(parseMapExports(buildBehaviorAcse(["f"], []))).toEqual([]);
+    expect(parseMapExports(buildBehaviorAcs0Plain())).toEqual([]);
   });
 });
 
@@ -103,16 +96,16 @@ describe("isAcsObject / parseLoadNames", () => {
     expect(isAcsObject(bad)).toBe(false);
     expect(isAcsObject(buildBehaviorAcse([], []))).toBe(true);
   });
+});
 
+describe("hasAcsMagic / missingImports", () => {
   it("knows the three magics, however short the rest is", () => {
     for (const magic of ["ACS\0", "ACSE", "ACSe"]) expect(hasAcsMagic(Buffer.from(magic, "latin1"))).toBe(true);
     expect(hasAcsMagic(Buffer.from("ACSX"))).toBe(false);
     expect(hasAcsMagic(Buffer.from("ACS"))).toBe(false);
   });
-});
 
-describe("missingImports", () => {
-  it("matches the first 8 characters, case-insensitively", () => {
+  it("matches imports on the first 8 characters, case-insensitively", () => {
     expect(missingImports(["mcplib", "LongLibraryName"], ["MCPLIB", "LONGLIBR"])).toEqual([]);
     expect(missingImports(["mcplib", "other"], ["MCPLIB"])).toEqual(["other"]);
     expect(missingImports(["LongLibraryName"], ["LONGLIBRARYNAME"])).toEqual(["LongLibraryName"]);

@@ -1,137 +1,79 @@
 #!/usr/bin/env node
 //
-// gen-tools-doc.mjs -- auto-generate README.tools.md from src/tools.ts.
+// gen-tools-doc.mjs -- auto-generate README.tools.md from the tools as registered, so it lists exactly what a client sees.
 //
-// Parses the real source with the TypeScript compiler API (already a
-// devDependency), so it never runs the MCP server and never drifts from the
-// code. Tools are grouped by the `// --- section ---` header comments in
-// tools.ts, in source order. Run: `npm run docs:tools`.
+// Run: `npm run docs:tools`, or `npm run docs:tools:check` (CI) to exit 1 on stale files.
 //
-import ts from "typescript";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerTools } from "../src/tools.ts";
+import { engine } from "../src/engine.ts";
+import { envName } from "../src/adapter.ts";
+import { categorize, renderToolsDoc, staleOutputs } from "./gen-tools-doc.core.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const serverPath = join(root, "src", "tools.ts");
+const toolsPath = join(root, "src", "tools.ts");
 const outPath = join(root, "README.tools.md");
-const source = readFileSync(serverPath, "utf8");
+const args = process.argv.slice(2);
+if (args.some((a) => a !== "--check")) {
+  console.error(`Unknown argument(s): ${args.join(" ")}. The only option is --check.`);
+  process.exit(2);
+}
+const check = args.includes("--check");
+const source = readFileSync(toolsPath, "utf8");
 
-const sf = ts.createSourceFile(serverPath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const lineOf = (pos) => sf.getLineAndCharacterOfPosition(pos).line;
-
-// 1. `// --- label ----` comment lines become category headers (skip the
-//    non-tool "configuration" block at the top).
-const sections = [];
-source.split("\n").forEach((text, i) => {
-  // Leading whitespace allowed: the tool definitions live inside registerTools().
-  const m = text.match(/^\s*\/\/ ---+\s*(.*?)\s*-*\s*$/);
-  if (m && !/^configuration/i.test(m[1])) {
-    sections.push({ line: i, label: m[1].replace(/\s*\(.*\)\s*$/, "").trim() });
-  }
-});
-const categoryForLine = (line) => {
-  let cat = "General";
-  for (const s of sections) {
-    if (s.line < line) cat = s.label;
-    else break;
-  }
-  return cat;
-};
-
-// 2. Resolve a string-literal value (tolerating "a" + "b" concatenation).
-const strVal = (node) => {
-  if (!node) return undefined;
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    return (strVal(node.left) ?? "") + (strVal(node.right) ?? "");
-  }
-  return undefined;
-};
-const propVal = (obj, key) => {
-  const p = obj.properties.find(
-    (pr) => ts.isPropertyAssignment(pr) && pr.name && pr.name.getText(sf) === key,
-  );
-  return p ? strVal(p.initializer) : undefined;
-};
-
-// 3. Collect every server.registerTool("name", { title, description, ... }, ...)
-//    AND every registerLive("name", { ... }, ...) — the wrapper that adds the
-//    live engine-state note to a tool's response (tools.ts) without changing
-//    its title/description shape, so it's parsed exactly the same way.
+// Registration may read only the engine adapter, so any other ctx access throws.
+const ctx = new Proxy(
+  { engine, env: (suffix) => envName(engine, suffix) },
+  {
+    get: (t, key) => {
+      if (key in t) return t[key];
+      throw new Error(`registerTools read ctx.${String(key)} at registration time`);
+    },
+  },
+);
 const tools = [];
-const visit = (node) => {
-  const isRegisterTool =
-    ts.isCallExpression(node) &&
-    ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.name.text === "registerTool";
-  const isRegisterLive =
-    ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "registerLive";
-  if (isRegisterTool || isRegisterLive) {
-    const [nameArg, metaArg] = node.arguments;
-    const name = strVal(nameArg);
-    if (name && metaArg && ts.isObjectLiteralExpression(metaArg)) {
+registerTools(
+  {
+    registerTool: (name, meta) =>
       tools.push({
         name,
-        title: propVal(metaArg, "title") ?? "",
-        description: (propVal(metaArg, "description") ?? "").replace(/\s+/g, " ").trim(),
-        category: categoryForLine(lineOf(node.getStart(sf))),
-      });
-    }
-  }
-  ts.forEachChild(node, visit);
-};
-visit(sf);
-
-// A hand-maintained "did it change shape" floor rather than a bare `=== 0`
-// guard: the registerLive rollout showed that a call-form the visitor doesn't
-// recognize silently drops JUST those tools (43 of them, that time) rather
-// than emitting nothing — a `length === 0` check would never have caught it.
-const MIN_EXPECTED_TOOLS = 66;
-if (tools.length < MIN_EXPECTED_TOOLS) {
-  console.error(
-    `Found only ${tools.length} tools (expected at least ${MIN_EXPECTED_TOOLS}) — ` +
-      `did server.registerTool()/registerLive() change shape?`,
-  );
-  process.exit(1);
-}
-
-// 4. Group by category in first-seen (source) order and emit markdown.
-const order = [];
-const byCat = new Map();
-for (const t of tools) {
-  if (!byCat.has(t.category)) {
-    byCat.set(t.category, []);
-    order.push(t.category);
-  }
-  byCat.get(t.category).push(t);
-}
-const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-
-let md = `# Tools
-
-> **Auto-generated** from \`src/tools.ts\` by \`scripts/gen-tools-doc.mjs\` — do not
-> edit by hand; run \`npm run docs:tools\` to regenerate.
-
-The MCP server exposes **${tools.length} tools**. Your agent also discovers them at
-runtime via each tool's \`description\`, so this is mainly for browsing.
-`;
-for (const cat of order) {
-  md += `\n## ${cap(cat)}\n\n`;
-  for (const t of byCat.get(cat)) {
-    md += `- **\`${t.name}\`** — ${t.description}\n`;
-  }
-}
-
-writeFileSync(outPath, md);
-
-// 5. Also emit the shields.io endpoint JSON for the "tools" README badge, so the
-//    count stays in sync with the code (regenerated by this same script).
-const badgeDir = join(root, ".github", "badges");
-mkdirSync(badgeDir, { recursive: true });
-writeFileSync(
-  join(badgeDir, "tools.json"),
-  JSON.stringify({ schemaVersion: 1, label: "tools", message: String(tools.length), color: "blueviolet" }) + "\n",
+        title: meta.title ?? "",
+        description: (meta.description ?? "").replace(/\s+/g, " ").trim(),
+      }),
+  },
+  ctx,
 );
 
-console.log(`Wrote ${outPath} + .github/badges/tools.json — ${tools.length} tools across ${order.length} categories.`);
+const categorized = categorize(source, tools);
+const md = renderToolsDoc(categorized);
+
+// The shields.io endpoint JSON behind the "tools" README badge.
+const githubDir = join(root, ".github");
+const outputs = [[outPath, md]];
+if (existsSync(githubDir)) {
+  outputs.push([
+    join(githubDir, "badges", "tools.json"),
+    JSON.stringify({ schemaVersion: 1, label: "tools", message: String(tools.length), color: "blueviolet" }) + "\n",
+  ]);
+}
+
+const names = (list) => list.map(([path]) => relative(root, path)).join(", ");
+
+if (check) {
+  const stale = staleOutputs(outputs, (path) => (existsSync(path) ? readFileSync(path, "utf8") : undefined));
+  if (stale.length) {
+    console.error(`Out of date: ${names(stale)}. Run \`npm run docs:tools\` and commit the result.`);
+    process.exit(1);
+  }
+  console.log(`Up to date: ${names(outputs)} (${tools.length} tools).`);
+  process.exit(0);
+}
+
+for (const [path, text] of outputs) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+}
+
+console.log(`Wrote ${names(outputs)} — ${tools.length} tools across ${new Set(categorized.map((t) => t.category)).size} categories.`);

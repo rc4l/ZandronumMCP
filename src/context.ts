@@ -1,7 +1,12 @@
 import path from "node:path";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { InstanceRegistry, defaultLaunchIo, defaultQuitIo, type LaunchIo } from "./process/registry.js";
-import { findFreePort } from "./process/launch.js";
+import {
+  deriveBasePort,
+  findFreePort,
+  resolveEngineExe,
+  resolveScreenshotDir,
+} from "./process/launch.js";
 import { reapOrphanEngines, defaultIo as defaultReapIo, type ReapResult, type ReapOptions } from "./process/reap.js";
 import { hasBridge } from "./process/verify.js";
 import { buildIndex, type AcsIndex } from "./acs/symbols.js";
@@ -10,6 +15,7 @@ import { readMapFromContainer, type MapData } from "./map/index.js";
 import { captureScreenshot } from "./screenshot/capture.js";
 import { crashLogPath } from "./process/startuplog.js";
 import type { BridgeClient } from "./bridge/transport.js";
+import { envName, type EngineAdapter } from "./adapter.js";
 
 /** Everything the tools need from the environment, resolved once at startup. */
 export interface ServerConfig {
@@ -20,10 +26,31 @@ export interface ServerConfig {
   screenshotDir: string;
   iwad?: string;
   acsSrc?: string;
+  /** Savegame dir: `<PREFIX>_SAVE_DIR`, else the engine's default (`resolveSaveDir`). */
   saveDir?: string;
   /** `run_acs` compilers; default to `zt-bcc`/`bcc` or `acc` on PATH. */
   bcc?: string;
   acc?: string;
+}
+
+/** The server's config from `<PREFIX>_*` env vars, so MCP clients can pass it in their config. */
+export function configFromEnv(engine: EngineAdapter, env: NodeJS.ProcessEnv): ServerConfig {
+  const get = (suffix: string) => env[envName(engine, suffix)];
+  // Accept either the macOS .app bundle or the binary directly.
+  const raw = get("EXE");
+  const exe = raw ? resolveEngineExe(raw, engine) : undefined;
+  return {
+    host: get("BRIDGE_HOST") ?? "127.0.0.1",
+    // Derived from the engine path unless pinned, so separate checkouts don't all fight over 7777.
+    basePort: deriveBasePort(exe, get("BRIDGE_PORT")),
+    exe,
+    screenshotDir: resolveScreenshotDir(exe, get("SCREENSHOT_DIR")),
+    iwad: get("IWAD"),
+    acsSrc: get("ACS_SRC"),
+    saveDir: engine.resolveSaveDir(env, exe),
+    bcc: get("BCC"),
+    acc: get("ACC"),
+  };
 }
 
 /**
@@ -35,6 +62,7 @@ export interface ContextIo {
   readFileSync: (p: string) => Buffer;
   readTextSync: (p: string) => string;
   readdirSync: (p: string) => string[];
+  isDirSync: (p: string) => boolean;
   /** Change-detection stamp for a file; used to invalidate parse caches. */
   stampOf: (p: string) => string;
   mtimeOf: (p: string) => Date;
@@ -49,7 +77,7 @@ export interface ContextIo {
     opts?: { name?: string; keep?: boolean },
   ) => Promise<{ base64: string; path: string }>;
   findFreePort: (start: number) => Promise<number>;
-  hasBridge: (exe: string) => boolean;
+  hasBridge: (exe: string, marker: string) => boolean;
   reap: (exe: string, opts?: ReapOptions) => Promise<ReapResult>;
   launchIo: LaunchIo;
   compileAcs: (req: CompileRequest) => CompileResult;
@@ -61,6 +89,7 @@ export const defaultContextIo: ContextIo = {
   readFileSync: (p) => readFileSync(p),
   readTextSync: (p) => readFileSync(p, "utf8"),
   readdirSync: (p) => readdirSync(p),
+  isDirSync: (p) => statSync(p).isDirectory(),
   stampOf: (p) => {
     const s = statSync(p);
     return `${s.mtimeMs}:${s.size}`;
@@ -76,7 +105,7 @@ export const defaultContextIo: ContextIo = {
   },
   capture: (client, dir, opts) => captureScreenshot(client, { dir, ...opts }),
   findFreePort: (start) => findFreePort(start),
-  hasBridge: (exe) => hasBridge(exe),
+  hasBridge: (exe, marker) => hasBridge(exe, marker),
   reap: (exe, opts) => reapOrphanEngines(exe, defaultReapIo, opts),
   launchIo: defaultLaunchIo,
   compileAcs: (req) => compileAcs(req),
@@ -103,7 +132,7 @@ export class ServerContext {
    * instance is an error, not a guess.
    */
   private readonly boundPorts = new Map<number, number>();
-  /** Per-instance engine console logfile (ZANDRONUM_BRIDGE_LOG). */
+  /** Per-instance engine console logfile (<PREFIX>_BRIDGE_LOG). */
   private readonly logFiles = new Map<number, string>();
   /** In-flight attaches, keyed by instance — see `clientFor`. */
   private readonly attaching = new Map<number, Promise<BridgeClient>>();
@@ -113,10 +142,16 @@ export class ServerContext {
   private readonly acsIndexes = new Map<string, { stamp: string; index: AcsIndex }>();
 
   constructor(
+    readonly engine: EngineAdapter,
     readonly config: ServerConfig,
     readonly io: ContextIo = defaultContextIo,
-    readonly registry: InstanceRegistry = new InstanceRegistry(),
+    readonly registry: InstanceRegistry = new InstanceRegistry(engine),
   ) {}
+
+  /** The name of one of the engine's env vars, e.g. `ctx.env("EXE")`. */
+  env(suffix: string): string {
+    return envName(this.engine, suffix);
+  }
 
   /** The conventional port for an instance: instance 1 gets the base port. */
   portFor(instance: number): number {
@@ -260,7 +295,7 @@ export class ServerContext {
    */
   loadMap(file: string | undefined, map: string): MapData {
     const wad = file ?? this.config.iwad;
-    if (!wad) throw new Error("No WAD specified. Pass `file` or set ZANDRONUM_IWAD.");
+    if (!wad) throw new Error(`No WAD specified. Pass \`file\` or set ${this.env("IWAD")}.`);
     const key = `${wad}|${map.toUpperCase()}`;
     const stamp = this.io.stampOf(wad);
     const hit = this.maps.get(key);
@@ -278,7 +313,7 @@ export class ServerContext {
    */
   loadAcsIndex(dir: string | undefined): AcsIndex {
     const src = dir ?? this.config.acsSrc;
-    if (!src) throw new Error("No ACS source dir. Pass `dir` or set ZANDRONUM_ACS_SRC.");
+    if (!src) throw new Error(`No ACS source dir. Pass \`dir\` or set ${this.env("ACS_SRC")}.`);
     const names = this.io
       .readdirSync(src)
       .filter((f) => f.toLowerCase().endsWith(".acs"))
@@ -292,10 +327,20 @@ export class ServerContext {
     return index;
   }
 
-  /** Where savegames live: explicit arg, then env, then next to the engine. */
+  /** Where savegames live: explicit arg, else the configured dir. */
   resolveSaveDir(dir?: string): string {
-    const d = dir ?? this.config.saveDir ?? (this.config.exe ? path.dirname(this.config.exe) : undefined);
-    if (!d) throw new Error("No save dir. Pass `dir`, or set ZANDRONUM_SAVE_DIR or ZANDRONUM_EXE.");
+    const d = dir ?? this.config.saveDir;
+    if (!d) throw new Error(`No save dir. Pass \`dir\`, or set ${this.env("SAVE_DIR")} or ${this.env("EXE")}.`);
     return d;
+  }
+
+  /** The `.zds` files in a save dir, relative to it; one subfolder level deep when the engine nests saves. */
+  saveFiles(dir: string): string[] {
+    const names = this.io.readdirSync(dir);
+    const subs = this.engine.saveSubdirs ? names.filter((f) => this.io.isDirSync(path.join(dir, f))) : [];
+    return [
+      ...names.filter((f) => !subs.includes(f)),
+      ...subs.flatMap((s) => this.io.readdirSync(path.join(dir, s)).map((f) => path.join(s, f))),
+    ].filter((f) => f.toLowerCase().endsWith(".zds"));
   }
 }

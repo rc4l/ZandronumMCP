@@ -1,0 +1,9 @@
+// Snippet for the mcp_runacs capture: mcp_runacs <this dir>/probe.o ConfProbe 5
+// A #library, like run_acs builds, so Log(s:) reads this module's strings.
+#library "confprobe"
+#include "zcommon.acs"
+
+script "ConfProbe" (int a)
+{
+    Log(s:"ConfProbe ", d:a);
+}

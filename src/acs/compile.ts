@@ -2,6 +2,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { accessSync, constants, existsSync, mkdtempSync, realpathSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { envName, type EngineAdapter } from "../adapter.js";
 
 /** Host-side compile of a `run_acs` snippet into a temp dir the engine can read. */
 
@@ -9,10 +10,11 @@ export type AcsCompiler = "bcc" | "acc";
 
 export interface CompileRequest {
   compiler: AcsCompiler;
-  /** Configured executable (ZANDRONUM_BCC/ZANDRONUM_ACC); unset searches PATH. */
+  /** Configured executable (<PREFIX>_BCC/<PREFIX>_ACC); unset searches PATH. */
   exe?: string;
   source: string;
   includeDirs?: string[];
+  engine: Pick<EngineAdapter, "envPrefix" | "ansiPaths">;
 }
 
 /** `token` is `object` as a console token; a failure names the executable that ran, if one was found. */
@@ -33,6 +35,7 @@ export interface CompileDeps {
   /** Canonical path (symlinks resolved), or `p` itself if that fails. */
   realpath: (p: string) => string;
   exists: (p: string) => boolean;
+  platform: NodeJS.Platform;
 }
 
 /** Executable suffixes to try; execFile won't run a .cmd/.bat wrapper. */
@@ -85,12 +88,12 @@ export const defaultCompileDeps: CompileDeps = {
     }
   },
   exists: (p) => existsSync(p),
+  platform: process.platform,
 };
 
 const LIBRARY = /^\s*#library\b/im;
 // zt-bcc's and acc's own wording for a missing zcommon.acs.
 const NO_ZCOMMON = /failed to load file: "zcommon\.acs"|Couldn't find include file "zcommon\.acs"/;
-const ENV: Record<AcsCompiler, string> = { bcc: "ZANDRONUM_BCC", acc: "ZANDRONUM_ACC" };
 // zt-bcc first: Debian's `bcc` package is Bruce's C compiler, also installed as `bcc`.
 const DEFAULT_NAMES: Record<AcsCompiler, string[]> = { bcc: ["zt-bcc", "bcc"], acc: ["acc"] };
 const HOME: Record<AcsCompiler, string> = {
@@ -100,7 +103,7 @@ const HOME: Record<AcsCompiler, string> = {
 
 /** The executable to run and its resolved file, or why there is none. */
 function locate(req: CompileRequest, deps: CompileDeps): { exe: string; real: string } | { missing: string } {
-  const env = ENV[req.compiler];
+  const env = envName(req.engine, req.compiler.toUpperCase());
   const exeOnly = deps.exeExts.includes(".exe") ? " Only .exe files run, not .cmd/.bat wrappers." : "";
   if (req.exe !== undefined) {
     // A bare name is looked up on PATH, as execFile would; anything else is a path.
@@ -153,14 +156,18 @@ function diagnosticsOf(err: unknown, compiler: AcsCompiler, exe: string): string
 /**
  * `p` as one console token, or why not: a bare token ends at a byte <= 0x20 (UTF-8 too, where char is signed) and
  * expands a leading `$`, a quoted one reads `\"` `\\` `\c` as escapes, and Windows gets `/` separators and no
- * non-ASCII (ANSI fopen).
+ * non-ASCII for an `ansiPaths` engine (ANSI fopen).
  */
-export function consolePath(p: string, platform: NodeJS.Platform = process.platform): { token: string } | { refused: string } {
+export function consolePath(
+  p: string,
+  ansiPaths: boolean,
+  platform: NodeJS.Platform = process.platform,
+): { token: string } | { refused: string } {
   const s = platform === "win32" ? p.replaceAll("\\", "/") : p;
   // Control characters other than tab don't survive the bridge's JSON text decoding.
   const bad = /[";\x00-\x08\x0a-\x1f]/.exec(s);
   if (bad) return { refused: `it contains ${JSON.stringify(bad[0])}` };
-  const wide = platform === "win32" ? /[^\x00-\x7f]/u.exec(s) : null;
+  const wide = platform === "win32" && ansiPaths ? /[^\x00-\x7f]/u.exec(s) : null;
   if (wide) return { refused: `the engine can't open a non-ASCII path (${JSON.stringify(wide[0])}) on Windows` };
   if (!/[^\x21-\x7e]|^\$/.test(s)) return { token: s };
   if (s.includes("\\")) return { refused: "it needs quoting and has a \\, which the console reads as an escape" };
@@ -171,7 +178,7 @@ export function consolePath(p: string, platform: NodeJS.Platform = process.platf
 export function compileAcs(req: CompileRequest, deps: CompileDeps = defaultCompileDeps): CompileResult {
   const dir = deps.mkdtemp(path.join(tmpdir(), "mcp-runacs-"));
   const object = path.join(dir, "snippet.o");
-  const tok = consolePath(object);
+  const tok = consolePath(object, req.engine.ansiPaths, deps.platform);
   if ("refused" in tok) {
     return {
       ok: false,

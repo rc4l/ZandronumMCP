@@ -1,0 +1,30 @@
+// Library behind the Step 6 conformance captures (test/conformance.test.ts).
+// Build: acc mcpconf.acs res/acs/mcpconf.o; load with -file <this dir>/res.
+#library "mcpconf"
+#include "zcommon.acs"
+
+int confVar = 42;
+int confArr[4];
+world int 1:confWorld;
+global int 2:confGlobal;
+
+function int confAdd(int a, int b) { return a + b; }
+
+script "ConfLoop" OPEN
+{
+    confArr[2] = 33;
+    confWorld = 7;
+    confGlobal = 9;
+    while (true) Delay(35);
+}
+
+script 901 (int a)
+{
+    confVar = confAdd(confVar, a);
+}
+
+script "ConfHud" (void)
+{
+    SetFont("SMALLFONT");
+    HudMessage(s:"conformance hud"; HUDMSG_PLAIN, 77, CR_GREEN, 0.5, 0.25, 0);
+}
