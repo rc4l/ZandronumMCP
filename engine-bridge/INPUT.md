@@ -25,7 +25,8 @@ type/code, sequencing, timing) lives in the MCP server.
   subtype, data1, data2)` (it includes the doom headers; kept separate from the
   winsock code in `mcp_bridge.cpp` to avoid `windows.h` vs engine-header
   clashes). `mcp_bridge.cpp` queues inbound `event` messages and calls it from
-  the poll. No new call-site hooks.
+  the poll. Menu and key events need no call-site hook; scripted gameplay
+  input (below) adds one.
 - Protocol: new inbound message `{v,t:"event",evtype,subtype,data1,data2}`. The
   `hello` advertises `caps:["cmd","event"]` so the client can detect support and
   degrade; old bridges simply ignore unknown messages (no version bump).
@@ -40,10 +41,17 @@ type/code, sequencing, timing) lives in the MCP server.
 Pure + tested: `menuKeyEvent`, caps handling, `sendEvent`. The C++ addition stays
 untested (consistent with the bridge), covered by a live smoke.
 
+## Scripted gameplay input
+Posted key events can't hold a key for an exact number of tics, so gameplay
+input replaces the tic's command instead. `mcp_input.cpp` holds an `mcp_input`
+timeline (segments of one input for N tics), and `MCP_Input_Override` swaps it
+in inside `G_Ticker` (anchors.md rows 6-7). The `input` cap advertises it;
+`input_timeline` drives it. Contract: PROTOCOL.md, Scripted input.
+
 ## Phases
-1. Generic event primitive + `menu_key`/`menu_nav`/`verify_menu`. (this)
+1. Generic event primitive + `menu_key`/`menu_nav`/`verify_menu`. Done.
 2. Menu text entry (`EV_GUI_Char`).
-3. Gameplay input (held keys + timing).
+3. Gameplay input (held keys + timing). Done, as the timeline above.
 
 ## Risk to confirm live
 Post `EV_GUI_Event/EV_GUI_KeyDown/GK_DOWN` and screenshot to confirm the menu

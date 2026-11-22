@@ -2,6 +2,7 @@ import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { envName, type EngineAdapter } from "../adapter.js";
 
 /**
@@ -74,8 +75,8 @@ export function clearQuarantine(
  * never opens a window (see issue #6). We only fill it in when missing, so a real
  * `DISPLAY` (e.g. `:1`, or a remote one) is always respected.
  *
- * The engine adds its own extras (`launchEnv`, e.g. window placement); a key
- * the launching environment already sets always wins.
+ * The engine's `launchEnv` extras and `<PREFIX>_BRIDGE_GAMELOG` (its native logfile, not the
+ * `<PREFIX>_BRIDGE_LOG` console tee) fill in only what the launching environment leaves unset.
  *
  * Pure and parameterised so every branch is unit-testable off-platform.
  */
@@ -105,7 +106,35 @@ export function buildLaunchEnv(
   for (const [key, value] of Object.entries(engine.launchEnv(base, platform))) {
     if (!env[key]) env[key] = value;
   }
+  env[envName(engine, "BRIDGE_GAMELOG")] = launchGamelog(engine, exe, env);
   return env;
+}
+
+/** The gamelog prefix a launch of `exe` passes the engine: `<PREFIX>_BRIDGE_GAMELOG` when set, else the engine's default. */
+export function launchGamelog(
+  engine: Pick<EngineAdapter, "envPrefix" | "gamelogDefault">,
+  exe: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  return env[envName(engine, "BRIDGE_GAMELOG")] || engine.gamelogDefault(exe);
+}
+
+/** `launchGamelog`, or with no engine configured only an explicit `<PREFIX>_BRIDGE_GAMELOG`. */
+export function gamelogPrefix(
+  engine: Pick<EngineAdapter, "envPrefix" | "gamelogDefault">,
+  exe: string | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  return exe === undefined ? env[envName(engine, "BRIDGE_GAMELOG")] || undefined : launchGamelog(engine, exe, env);
+}
+
+/** A per-user dir under the OS temp dir: `<tmp>/<name>-<uid>`, or `<tmp>/<name>` with no uid (Windows' is per-user). */
+export function userTempDir(
+  name: string,
+  tmp: string = tmpdir(),
+  proc: { getuid?: () => number } = process,
+): string {
+  return join(tmp, proc.getuid ? `${name}-${proc.getuid()}` : name);
 }
 
 /**
@@ -155,6 +184,11 @@ export function configPathFor(
   return resolve(dirname(exe), env[envName(engine, "CONFIG")] || `${engine.serverName}.ini`);
 }
 
+/** A `config: "isolated"` instance's copy of the shared ini, keyed by bridge port since instance ids repeat across sessions. */
+export function isolatedConfigPathFor(engine: Pick<EngineAdapter, "serverName">, shared: string, port: number): string {
+  return join(dirname(shared), `${engine.serverName}-${port}.ini`);
+}
+
 /** Game options that map to engine command-line arguments. */
 export interface LaunchOptions {
   iwad?: string;
@@ -169,7 +203,7 @@ export interface LaunchOptions {
   config?: string;
 }
 
-/** Where engine args carry `flag` (`-config`; case-insensitive), or -1. */
+/** Where engine args carry `flag` (`-config`, `+name`, `-host`; case-insensitive), or -1. */
 function argIndex(args: readonly string[] | undefined, flag: string): number {
   const want = flag.toLowerCase();
   return args?.findIndex((a) => a.toLowerCase() === want) ?? -1;
@@ -178,6 +212,12 @@ function argIndex(args: readonly string[] | undefined, flag: string): number {
 /** Whether engine args carry `flag`. */
 export function hasArg(args: readonly string[] | undefined, flag: string): boolean {
   return argIndex(args, flag) >= 0;
+}
+
+/** The value after `flag` in engine args, if any. */
+export function argValue(args: readonly string[] | undefined, flag: string): string | undefined {
+  const i = argIndex(args, flag);
+  return i >= 0 ? args![i + 1] : undefined;
 }
 
 /** Build the engine argv from structured options; `env` feeds the engine's own pins. */
@@ -240,16 +280,26 @@ export async function findFreePort(
   throw new Error(`no free bridge port in [${start}, ${start + span})`);
 }
 
-/** Poll until host:port accepts a connection, or throw after `attempts` tries. */
-export async function waitForPort(
-  host: string,
-  port: number,
-  attempts = 60,
-  intervalMs = 700,
-  connect: (h: string, p: number) => Promise<boolean> = tryConnect,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
-): Promise<void> {
+export interface WaitForPortOptions {
+  attempts?: number;
+  intervalMs?: number;
+  connect?: (h: string, p: number) => Promise<boolean>;
+  sleep?: (ms: number) => Promise<void>;
+  /** Stops the polling once fired, e.g. when the engine already exited. */
+  signal?: AbortSignal;
+}
+
+/** Poll until host:port accepts a connection, or throw after `attempts` tries or on abort. */
+export async function waitForPort(host: string, port: number, opts: WaitForPortOptions = {}): Promise<void> {
+  const {
+    attempts = 60,
+    intervalMs = 700,
+    connect = tryConnect,
+    sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+    signal,
+  } = opts;
   for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) throw new Error(`stopped waiting for bridge port ${host}:${port}`);
     if (await connect(host, port)) return;
     if (i < attempts - 1) await sleep(intervalMs);
   }

@@ -8,7 +8,7 @@ import { ServerContext, configFromEnv } from "../dist/context.js";
 import { registerTools } from "../dist/tools.js";
 import { envName } from "../dist/adapter.js";
 import { engine } from "../dist/engine.js";
-import { writeSync, mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { writeSync, mkdtempSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -59,6 +59,8 @@ const textOf = (r) => r.content.map((c) => c.text ?? `<${c.type}>`).join(" | ");
 const say = (s) => void writeSync(1, `${s}\n`);
 
 let failures = 0;
+// The mcp_mark screenshot this run queued, removed at the end.
+let markShot;
 function check(label, ok, detail) {
   say(`${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  -- ${detail}` : ""}`);
   if (!ok) failures++;
@@ -150,10 +152,16 @@ try {
   // Overlay tools (dumpactor/actorsnear/dumprenderer).
   const actorState = await call("actor_state");
   check(
-    "actor_state reads the console player",
-    !actorState.isError && actorState.structuredContent?.class != null,
+    "actor_state reads the console player, with a weapon psprite layer",
+    !actorState.isError &&
+      actorState.structuredContent?.class != null &&
+      (actorState.structuredContent?.player?.psprites ?? []).some((p) => p.layer === "weapon"),
     textOf(actorState),
   );
+
+  const mark = await call("run_command", { text: "mcp_mark e2e" });
+  check("mcp_mark logs mark 1", !mark.isError && /^MCP_MARK n=1 .*note=e2e$/m.test(textOf(mark)), textOf(mark));
+  markShot = textOf(mark).match(/ shot=(\S+)/)?.[1];
 
   const actorsNear = await call("actors_near");
   check(
@@ -258,7 +266,7 @@ try {
   const p0 = players.structuredContent?.players?.[0];
   check(
     "list_players shows slot 0 as the human player",
-    p0?.slot === 0 && p0?.bot === 0,
+    p0?.slot === 0 && p0?.bot === 0 && p0?.host === 1,
     textOf(players),
   );
 
@@ -267,6 +275,14 @@ try {
     "find_actors finds the summoned imp map-wide",
     !imps.isError && imps.structuredContent?.actors?.length >= 1,
     textOf(imps),
+  );
+  const monsters = await call("find_actors", { flags: { monster: true, alive: true } });
+  const monsterRows = monsters.structuredContent?.actors ?? [];
+  check(
+    "find_actors flags lists only live monsters, the imp among them",
+    monsterRows.some((a) => a.class === "DoomImp") &&
+      monsterRows.every((a) => a.flags.split(",").includes("monster") && a.hp > 0),
+    textOf(monsters),
   );
   const faced = await call("set_view", { class: "DoomImp" });
   check("set_view faces the imp", faced.structuredContent?.class === "DoomImp", textOf(faced));
@@ -291,9 +307,19 @@ try {
   );
   const placedState = await call("actor_state", { tid: p.tid });
   check("actor_state resolves the returned tid", placedState.structuredContent?.class === "DoomImp", textOf(placedState));
+  const feet = await call("check_sight", { from: { player: 0 }, to: { x: p0.x, y: p0.y } });
+  check("check_sight sees a point at the player's feet", !feet.isError && feet.structuredContent?.visible === true, textOf(feet));
 
   const onPlayer = await call("summon_at", { className: "DoomImp", x: p0.x, y: p0.y });
   check("summon_at on the player is blocked by player0", onPlayer.isError && /blocked by player0/.test(textOf(onPlayer)), textOf(onPlayer));
+  const nearPlayer = await call("summon_at", { className: "DoomImp", x: p0.x, y: p0.y, findSpot: 128 });
+  const movedBy = nearPlayer.structuredContent?.moved;
+  // The search is its own bridge cap: an overlay without it gets the host's refusal instead.
+  if (client.supports("spawnfind")) {
+    check("summon_at findSpot moves off the blocked spot", !nearPlayer.isError && movedBy > 0 && movedBy <= 128, textOf(nearPlayer));
+  } else {
+    check("summon_at findSpot is refused without the spawnfind cap", nearPlayer.isError && /no free-spot search/.test(textOf(nearPlayer)), textOf(nearPlayer));
+  }
   const forced = await call("summon_at", { className: "DoomImp", x: p0.x, y: p0.y, force: true });
   check("summon_at force succeeds on the same spot", !forced.isError && forced.structuredContent?.forced === 1, textOf(forced));
   if (engine.e2e.summonAtVoid) {
@@ -306,6 +332,34 @@ try {
   }
   const noClass = await call("summon_at", { className: "NoSuchClass", x: spot.x, y: spot.y });
   check("summon_at reports an unknown class", noClass.isError && /unknown class/.test(textOf(noClass)), textOf(noClass));
+
+  // set_actor_prop, on the placed imp.
+  const prop = (args) => call("set_actor_prop", { tid: p.tid, ...args });
+  const speedRead = await prop({ prop: "speed" });
+  check(
+    "set_actor_prop reads the imp's speed without writing it",
+    !speedRead.isError && speedRead.structuredContent?.old === 8 && speedRead.structuredContent?.new === undefined,
+    textOf(speedRead),
+  );
+  const speedSet = await prop({ prop: "speed", value: 20 });
+  check(
+    "set_actor_prop writes speed 20, reporting old and new",
+    speedSet.structuredContent?.old === 8 && speedSet.structuredContent?.new === 20,
+    textOf(speedSet),
+  );
+  const noGravity = await prop({ prop: "flag:NOGRAVITY", value: true });
+  const noGravityRead = await prop({ prop: "flag:NOGRAVITY" });
+  check(
+    "set_actor_prop sets flag:NOGRAVITY and the read form agrees",
+    noGravity.structuredContent?.old === 0 && noGravity.structuredContent?.new === 1 && noGravityRead.structuredContent?.old === 1,
+    `${textOf(noGravity)} / ${textOf(noGravityRead)}`,
+  );
+  const alpha = await prop({ prop: "alpha", value: 0.5 });
+  check("set_actor_prop writes alpha 0.5", alpha.structuredContent?.new === 0.5, textOf(alpha));
+  const afterProps = await call("find_actors", { tid: p.tid });
+  check("find_actors still resolves the edited imp", afterProps.structuredContent?.actors?.length === 1, textOf(afterProps));
+  const bogusFlag = await prop({ prop: "flag:BOGUS", value: true });
+  check("set_actor_prop reports an unknown flag", bogusFlag.isError && /unknown flag/.test(textOf(bogusFlag)), textOf(bogusFlag));
 
   await call("run_command", { text: "menu_main" });
   const blocked = await call("ensure_live");
@@ -327,6 +381,14 @@ try {
   });
   check("step_until on a player field", landed.structuredContent?.met === true, textOf(landed));
 
+  const watched = await call("watch_actors", { tid: p.tid, tics: 10 });
+  const watchRows = watched.structuredContent?.table?.rows ?? [];
+  check(
+    "watch_actors samples the placed imp by tid with rising maptime",
+    !watched.isError && watchRows.length > 0 && watchRows.every((r, i) => i === 0 || r[0] > watchRows[i - 1][0]),
+    textOf(watched),
+  );
+
   const shotFile = await call("screenshot_file", { name: "e2e_shot" });
   const shotPath = shotFile.structuredContent?.path;
   check(
@@ -337,6 +399,19 @@ try {
 
   const log = await call("read_log", { pattern: "degreeless" });
   check("read_log sees the god-mode prints", /Degreelessness/i.test(textOf(log)), textOf(log));
+  const logPath = log.structuredContent?.path;
+  check("read_log names a log file that exists", !!logPath && existsSync(logPath), textOf(log).split("\n")[0]);
+  const counted = await call("read_log", { pattern: "degreeless", count: true });
+  check(
+    "read_log count matches the lines it returns",
+    counted.structuredContent?.count === log.structuredContent?.lines?.length,
+    textOf(counted),
+  );
+  const waited = await call("wait_for_log", { pattern: "degreeless" });
+  check("wait_for_log matches a line already printed this launch", waited.structuredContent?.reason === "matched", textOf(waited));
+  const timedOut = await call("wait_for_log", { pattern: "e2e_never_printed", timeoutSec: 0.5 });
+  check("wait_for_log times out on a line never printed", !timedOut.isError && timedOut.structuredContent?.reason === "timeout", textOf(timedOut));
+
   // Checks only that the no-focus hints landed, since bare Xvfb has no EWMH WM to show the outcome.
   if (engine.e2e.nofocusPattern) {
     const nofocus = await call("read_log", { pattern: engine.e2e.nofocusPattern });
@@ -351,16 +426,24 @@ try {
   const img = shot.content.find((c) => c.type === "image");
   check("screenshot returns PNG bytes", !!img && img.data.length > 1000, `${img?.data.length ?? 0} b64 chars`);
 
+  // mcp_mark's shot lands a tic after the mark, long before this.
+  const marked = await call("read_marks", { mark: 1 });
+  check("read_marks returns mark 1 with its screenshot", marked.content.some((c) => c.type === "image"), textOf(marked));
+
   const errs = await call("get_startup_errors");
   check("get_startup_errors reads the log", !errs.isError, textOf(errs).slice(0, 120));
 
   const crash = await call("get_crash");
   check("get_crash reports no crash", textOf(crash).toLowerCase().includes("no crash"), textOf(crash));
 
-  // The save CCMD only flags a save for a next tic that never runs while paused, so the step below lets it land.
-  const saved = await call("run_command", { text: `save ${saveName("e2esmoke")}` });
+  // stepTics lets the save land, since the save CCMD only flags it for a next tic that never runs while paused.
+  const saved = await call("run_command", { text: `save ${saveName("e2esmoke")}`, stepTics: 5, logPattern: "game saved" });
   check("save command accepted", !saved.isError, textOf(saved));
-  await call("step", { tics: 5 });
+  check(
+    "run_command stepTics returns the save's later print",
+    saved.structuredContent?.log?.some((l) => /game saved/i.test(l)) === true,
+    textOf(saved),
+  );
 
   const saves = await call("list_saves", { dir: saveDir });
   const meta = saves.structuredContent?.saves?.find((s) => s.file === "e2esmoke.zds");
@@ -371,9 +454,9 @@ try {
   );
 
   // Two snippets load, so the second's Log() string must resolve in module 1, not module 0.
-  const first = await call("run_acs", { compiler: "bcc", source: 'script 1 (void) { Log(s:"e2e first"); }', script: 1 });
+  const first = await call("run_acs", { compiler: "bcc", stepTics: 0, source: 'script 1 (void) { Log(s:"e2e first"); }', script: 1 });
   check("run_acs loads and runs a snippet in the call", !first.isError && /\ne2e first\n/.test(textOf(first)), textOf(first));
-  const second = await call("run_acs", { compiler: "bcc",
+  const second = await call("run_acs", { compiler: "bcc", stepTics: 0,
     source: 'script 1 (void) { Log(s:"e2e second"); } script 2 (void) { Delay(1); Log(s:"e2e later"); }',
     script: 1,
   });
@@ -382,8 +465,85 @@ try {
     !second.isError && second.structuredContent?.module === first.structuredContent?.module + 1 && /\ne2e second\n/.test(textOf(second)),
     textOf(second),
   );
-  const bad = await call("run_acs", { compiler: "bcc", source: "script 1 (void) { Log(s:\"x\") }", script: 1 });
+  // MAP01 line 242 crosses a 32-unit step; use 64 to isolate its player-only blocking flag.
+  const blockPlayers = await call("run_acs", {
+    compiler: "bcc", source: 'special 55:Line_SetBlocking(3); script "E2eBlockPlayers" (int flags) { Line_SetBlocking(6, flags, 1023 ^ flags); }',
+    script: "E2eBlockPlayers", args: [0],
+  });
+  const stepHeight = await call("set_actor_prop", { prop: "maxstepheight" });
+  const oldStep = stepHeight.structuredContent?.old;
+  const probeMover = await call("summon_at", { className: "MapSpot", x: 352, y: 672 });
+  const probeTid = probeMover.structuredContent?.tid;
+  check("player-blocking probe fixture loads", !blockPlayers.isError && typeof oldStep === "number" && !!probeTid,
+    `${textOf(blockPlayers)} / ${textOf(stepHeight)} / ${textOf(probeMover)}`);
+  if (!blockPlayers.isError && typeof oldStep === "number" && probeTid) {
+    const route = { from: { x: 352, y: 672 }, to: { x: 416, y: 672 }, actors: false };
+    await call("set_actor_prop", { prop: "maxstepheight", value: 64 });
+    await call("set_actor_prop", { tid: probeTid, prop: "maxstepheight", value: 64 });
+    await call("set_actor_prop", { tid: probeTid, prop: "maxdropoffheight", value: 64 });
+    try {
+      for (const mover of [{ player: 0 }, { tid: probeTid }]) {
+        const clear = await call("trace_move", { ...route, mover });
+        check("unflagged line is clear to the probe mover", clear.structuredContent?.ok === true, textOf(clear));
+      }
+      await call("run_script", { name: "E2eBlockPlayers", args: [4], always: true });
+      const playerTrace = await call("trace_move", { ...route, mover: { player: 0 } });
+      const fit = await call("point_info", { x: 384, y: 672, mover: { player: 0 } });
+      const monsterTrace = await call("trace_move", { ...route, mover: { tid: probeTid } });
+      check("player trace stops at player-only line 242", playerTrace.structuredContent?.ok === false &&
+        playerTrace.structuredContent?.reason === "line" && playerTrace.structuredContent?.line === 242, textOf(playerTrace));
+      check("player fit stops at player-only line 242", fit.structuredContent?.fit?.ok === false &&
+        fit.structuredContent?.fit?.reason === "line" && fit.structuredContent?.fit?.line === 242, textOf(fit));
+      check("non-player trace ignores the player-only line", monsterTrace.structuredContent?.ok === true, textOf(monsterTrace));
+      // The railing raises the opening 32 more units; leave enough step and ceiling clearance.
+      await call("set_actor_prop", { prop: "maxstepheight", value: 96 });
+      for (const flags of [65, 96]) {
+        await call("run_script", { name: "E2eBlockPlayers", args: [flags], always: true });
+        const railingTrace = await call("trace_move", { ...route, mover: { player: 0 } });
+        const railingFit = await call("point_info", { x: 384, y: 672, mover: { player: 0 } });
+        check("two-sided railing overrides blocking flags for player trace", railingTrace.structuredContent?.ok === true, textOf(railingTrace));
+        check("two-sided railing overrides blocking flags for player fit", railingFit.structuredContent?.fit?.ok === true, textOf(railingFit));
+      }
+    } finally {
+      await call("run_script", { name: "E2eBlockPlayers", args: [0], always: true });
+      await call("set_actor_prop", { prop: "maxstepheight", value: oldStep });
+    }
+  }
+  const stepped = await call("run_acs", { compiler: "bcc", source: 'script 7 (void) { Delay(1); Log(s:"e2e later"); }', script: 7, stepTics: 3 });
+  check("run_acs stepTics returns what the script logged later", stepped.structuredContent?.log?.includes("e2e later"), textOf(stepped));
+  const digits = await call("run_acs", { compiler: "bcc", stepTics: 0,
+    source: 'script "123" (void) { Log(s:"e2e named"); } script 123 (void) { Log(s:"e2e numbered"); }',
+    script: "123",
+  });
+  // name=1 is its own bridge cap: an overlay without it gets the host's refusal instead.
+  if (client.supports("runacsname")) {
+    check("run_acs runs a script name made of digits as a name", /\ne2e named\n/.test(textOf(digits)), textOf(digits));
+  } else {
+    check("run_acs refuses a digits-only name without the runacsname cap", digits.isError && /made of digits/.test(textOf(digits)), textOf(digits));
+  }
+  const bad = await call("run_acs", { compiler: "bcc", stepTics: 0, source: "script 1 (void) { Log(s:\"x\") }", script: 1 });
   check("run_acs returns compile errors", bad.isError && /compile failed/.test(textOf(bad)), textOf(bad));
+  // The snippet loads unstarted, so each script's first run is run_script's own.
+  if (client.supports("runscript")) {
+    const lib = await call("run_acs", { compiler: "bcc", stepTics: 0,
+      source: 'script "E2eAnswer" (void) { SetResultValue(42); } script "E2eLater" (void) { SetResultValue(7); Delay(35); SetResultValue(9); }',
+    });
+    const answer = await call("run_script", { name: "E2eAnswer" });
+    const got = answer.structuredContent;
+    check(
+      "run_script returns a finished script's SetResultValue and its module",
+      !lib.isError && got?.result === 42 && got?.finished === true && got?.module === lib.structuredContent?.module,
+      textOf(answer),
+    );
+    const later = await call("run_script", { name: "E2eLater" });
+    check(
+      "run_script reports a script paused at a delay as unfinished, with the value so far",
+      later.structuredContent?.result === 7 && later.structuredContent?.finished === false,
+      textOf(later),
+    );
+  } else {
+    say("SKIP  run_script result value (bridge has no runscript cap)");
+  }
   const refused = await call("save_game", { name: saveName("e2etaint") });
   check("save_game refuses while a snippet is loaded", refused.isError && /run_acs/.test(textOf(refused)), textOf(refused));
   await call("load_map", { mapName: "MAP01" });
@@ -391,10 +551,38 @@ try {
   const allowed = await call("save_game", { name: saveName("e2eclean") });
   check("save_game works again after load_map", !allowed.isError, textOf(allowed));
 
+  const timedStart = (await call("player_state")).structuredContent;
+  const timed = await call("input_timeline", { segments: [{ tics: 5, forward: 1 }] });
+  const timedEnd = (await call("player_state")).structuredContent;
+  check(
+    "input_timeline runs a 5-tic forward segment and the player moves",
+    !timed.isError && timed.structuredContent?.reason === "done" && Math.hypot(timedEnd.x - timedStart.x, timedEnd.y - timedStart.y) > 1,
+    textOf(timed),
+  );
+
+  // Last before the relaunch, which drops the bot again.
+  const bot = await call("add_bot");
+  const joined = bot.structuredContent?.bots ?? [];
+  check("add_bot steps until a bot joins at slot 1+", !bot.isError && joined.length === 1 && joined[0].slot >= 1, textOf(bot));
+
+  const oldPid = ctx.attachedClient(1)?.enginePid;
+  const relaunchStart = Date.now();
+  const relaunched = await call("relaunch_instance", { map: "MAP01" });
+  say(`relaunch took ${Date.now() - relaunchStart} ms`);
+  const newPid = ctx.attachedClient(1)?.enginePid;
+  check(
+    "relaunch_instance starts a new engine",
+    !relaunched.isError && newPid !== undefined && newPid !== oldPid,
+    `${textOf(relaunched)} (PID ${oldPid} -> ${newPid})`,
+  );
+
   const killed = await call("kill_instance");
   check("kill_instance", !killed.isError, textOf(killed));
 } finally {
   ctx.registry.closeAll();
+  // mcp_mark keeps its shots by design; drop this run's, or the build dir gains one per run.
+  const markPng = markShot && markShot !== "none" ? path.join(config.screenshotDir, `${markShot}.png`) : undefined;
+  if (markPng && existsSync(markPng)) unlinkSync(markPng);
 }
 
 say(failures ? `\n${failures} check(s) failed` : "\nall checks passed");

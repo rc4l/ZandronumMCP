@@ -84,9 +84,13 @@ void MCP_PostInputEvent( int type, int subtype, int data1, int data2 );
 // Snapshot the just-drawn HUD frame (implemented in mcp_hud.cpp).
 void MCP_HUD_BeginFrame();
 
+// Opens/redirects the engine's log file (c_cmds.cpp, behind the "logfile" CCMD), so a
+// bridge-driven instance can redirect its own log.
+void StartLogging( const char *szFileName );
+
 namespace
 {
-	// One queued inbound message: either a console command or an input event.
+	// One queued inbound message: a console command, an input event or a pause.
 	struct InboundMsg
 	{
 		bool        isEvent;
@@ -98,6 +102,7 @@ namespace
 
 	bool             g_initialized = false;
 	bool             g_enabled     = false;
+	int              g_replyDepth  = 0; // main thread only
 	mcp_socket_t     g_listen      = MCP_INVALID_SOCKET;
 	mcp_socket_t     g_client      = MCP_INVALID_SOCKET;
 	std::mutex       g_lock;
@@ -288,7 +293,7 @@ namespace
 			// to the process it just spawned (and not a stale bridge on the same port).
 			char hello[256];
 			snprintf( hello, sizeof( hello ),
-				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.5.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\"]}",
+				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.7.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\"]}",
 				mcp_getpid() );
 			SendLine( hello );
 
@@ -354,6 +359,26 @@ namespace
 		int port = BridgePort();
 		if ( port == 0 ) return; // opt-in: only runs with ZANDRONUM_BRIDGE_PORT set
 
+		// Log to the launcher's bridge-session folder, so agent test runs never mix into the
+		// user's real-play gamelogs.
+		const char *gamelogPrefix = getenv( "ZANDRONUM_BRIDGE_GAMELOG" );
+		if ( gamelogPrefix != NULL && gamelogPrefix[0] != '\0' )
+			StartLogging( gamelogPrefix );
+
+		// Settings the tools rely on, applied after autoexec.cfg/config so they always win.
+		{
+			MCPBridgeReplyGuard reply;
+			static const char *const startupCmds[] =
+			{
+				"screenshot_quiet 1",
+			};
+			for ( const char *c : startupCmds )
+			{
+				std::string cmd( c );
+				AddCommandString( const_cast<char *>( cmd.c_str() ), 0 );
+			}
+		}
+
 		// Arm the parent-death watchdog before anything else. Start it even if the
 		// bind below fails (e.g. a stale engine already holds the port): a bridgeless
 		// engine is exactly the kind that must still self-exit when the MCP dies.
@@ -391,6 +416,12 @@ namespace
 	}
 }
 
+void MCP_Bridge_ReplyBegin() { ++g_replyDepth; }
+void MCP_Bridge_ReplyEnd() { --g_replyDepth; }
+bool MCP_Bridge_ShowInNotify( const char * ) { return g_replyDepth == 0; }
+MCPBridgeReplySuspendGuard::MCPBridgeReplySuspendGuard() : depth( g_replyDepth ) { g_replyDepth = 0; }
+MCPBridgeReplySuspendGuard::~MCPBridgeReplySuspendGuard() { g_replyDepth = depth; }
+
 void MCP_Bridge_Poll()
 {
 	MCP_Crash_Init(); // belt-and-suspenders: also arm from the frame loop (idempotent)
@@ -413,7 +444,10 @@ void MCP_Bridge_Poll()
 		else if ( msg.isEvent )
 			MCP_PostInputEvent( msg.evtype, msg.subtype, msg.d1, msg.d2 );
 		else
+		{
+			MCPBridgeReplyGuard reply;
 			AddCommandString( const_cast<char *>( msg.text.c_str() ), 0 );
+		}
 	}
 }
 
@@ -431,9 +465,9 @@ void MCP_Bridge_TeeOutput( const char *text )
 	SendLine( json );
 }
 
-bool MCP_Bridge_ShowInNotify( const char *text )
+void MCP_Bridge_LogLine( const char *text )
 {
-	return text == NULL || strncmp( text, "__MCPDONE_", 10 ) != 0;
+	if ( text != NULL ) LogWrite( text );
 }
 
 void MCP_Bridge_Shutdown()

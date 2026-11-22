@@ -5,3 +5,4 @@ pos -800.0 828.0 8.0
 angle 0.0
 pitch 0.0
 state TROO A 10
+stateid DoomImp.0 Spawn

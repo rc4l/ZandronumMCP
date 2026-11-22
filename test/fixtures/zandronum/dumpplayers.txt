@@ -1,2 +1,2 @@
 MCP_PLAYERS
-player slot=0 bot=0 spec=0 deadspec=0 state=live hp=100 armor=0 weapon=Pistol x=-800.0 y=700.0 z=8.0 angle=90.0 pitch=5.8 tid=0 cheats=10 frags=0 deaths=0 kills=0 items=0 secrets=0 points=0 wins=0 ping=0 name=player
+player slot=0 bot=0 host=1 spec=0 deadspec=0 state=live hp=100 armor=0 weapon=Pistol x=-800.0 y=700.0 z=8.0 angle=90.0 pitch=5.8 tid=0 cheats=10 frags=0 deaths=0 kills=0 items=0 secrets=0 points=0 wins=0 ping=0 name=player

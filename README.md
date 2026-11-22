@@ -42,7 +42,8 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
    > bridge port is derived from the engine path, so each build gets its own port
    > range, each checkout's launched engines run on their own `-config`
    > (`zandronum-mcp.ini` beside the engine) instead of your system-wide
-   > `zandronum.ini`, and instance numbers are scoped to your
+   > `zandronum.ini` (launch with `config: "isolated"` to give one instance a
+   > private copy of it), and instance numbers are scoped to your
    > session — one editor window can never drive another's game. Set
    > `ZANDRONUM_BRIDGE_PORT` only if you want to pin a specific port.
 
@@ -55,6 +56,17 @@ Let an AI assistant supercharge Zandronum development from your editor: Write C+
 The server exposes tools (run, ACS, DECORATE, scripts, map & render inspection, saves,
 process control, etc). Your agent discovers them automatically; for a browsable list see
 [README.tools.md](https://github.com/rc4l/ZandronumMCP/blob/main/README.tools.md).
+
+## Playtest marks
+
+While playing on an MCP-launched instance, mark the moments you want to talk about:
+
+1. Once, in that instance's console: `bind <key> mcp_mark`. It is saved to the MCP instance's own
+   config, not your normal one. `mcp_mark <note>` typed in the console works too.
+2. Optional, for a mod with rounds: `set mcp_mark_round <ScriptName>`, an ACS script that returns
+   the round number with `SetResultValue` and doesn't `Delay`. Each mark then records the round.
+3. Each press logs the tic, map, position and round, and saves a screenshot. Then ask your agent
+   to "read mark 3": its `read_marks` tool lists the marks and shows a mark's screenshot.
 
 ## Advanced
 

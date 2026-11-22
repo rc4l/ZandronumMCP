@@ -105,6 +105,11 @@ export function statusBlockers(status: EngineStatus | undefined): string[] {
     .map((u) => u.note);
 }
 
+/** Whether a snapshot shows the sim paused: any non-zero `paused` (a focus pause reads -1), or no snapshot. */
+export function isPaused(status: EngineStatus | undefined): boolean {
+  return status?.paused !== "0";
+}
+
 /** The snapshot once it carries `field`, or why it doesn't (`supported` is the bridge's status cap). */
 export function requireField(
   status: EngineStatus | undefined,

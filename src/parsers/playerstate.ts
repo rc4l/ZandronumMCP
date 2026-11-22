@@ -1,4 +1,10 @@
 import type { EngineStatus } from "./status.js";
+import { hasHeader, parseKvLines, type KvRecord } from "./lines.js";
+
+/** A `dumpplayers` reply's player rows, or undefined when it didn't run (no `MCP_PLAYERS` header). */
+export function playersReply(lines: string[]): KvRecord[] | undefined {
+  return hasHeader(lines, "MCP_PLAYERS") ? parseKvLines(lines, "player") : undefined;
+}
 
 export interface PlayerState {
   x: number;

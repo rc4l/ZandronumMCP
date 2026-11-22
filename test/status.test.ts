@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseStatus, describeStatus, footerNote, statusBlockers, requireField } from "../src/parsers/status.js";
+import { parseStatus, describeStatus, footerNote, isPaused, statusBlockers, requireField } from "../src/parsers/status.js";
 
 const SENTINEL = "__MCPDONE_a1__";
 
@@ -148,5 +148,11 @@ describe("statusBlockers / requireField", () => {
     expect(requireField(undefined, true, "maptime")).toEqual({
       error: "status read timed out (engine busy, e.g. loading a map); retry",
     });
+  });
+});
+
+describe("isPaused", () => {
+  it("reads any non-zero pause, a focus pause's -1 included, and no snapshot as paused", () => {
+    expect([{ paused: "0" }, { paused: "1" }, { paused: "-1" }, {}, undefined].map(isPaused)).toEqual([false, true, true, true, true]);
   });
 });

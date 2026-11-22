@@ -1,6 +1,6 @@
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { describe, it, expect, afterEach } from "vitest";
 import net from "node:net";
 import { FakeBridge } from "./fakes/fake-bridge.js";
@@ -8,17 +8,17 @@ import {
   InstanceRegistry,
   defaultLaunchIo,
   defaultQuitIo,
-  LaunchSetupError,
   type LaunchConfig,
   type LaunchIo,
 } from "../src/process/registry.js";
+import { EngineExitedError, LaunchSetupError, type ChildExit } from "../src/process/registry.js";
 
 /** launch_instance's sequence: spawn, then attach (reaping the child on failure). */
 function launch(registry: InstanceRegistry, config: LaunchConfig, io: LaunchIo) {
   registry.spawn(config, io);
   return registry.attachOrKill(config, io);
 }
-import { configPathFor } from "../src/process/launch.js";
+import { configPathFor, isolatedConfigPathFor } from "../src/process/launch.js";
 import { envName } from "../src/adapter.js";
 import { engine } from "../src/engine.js";
 
@@ -65,6 +65,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -86,6 +87,9 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: (exe) => void dequarantined.push(exe),
       ensureDir: (dir) => void configDirs.push(dir),
+      seedConfig: () => {
+        throw new Error("a shared-config launch must not seed");
+      },
     };
     registry = new InstanceRegistry(engine);
     const client = await launch(registry,
@@ -107,32 +111,59 @@ describe("InstanceRegistry", () => {
     expect(spawned[0].env[envName(engine, "BRIDGE_PORT")]).toBe(String(bridge.port));
     expect(spawned[0].env[envName(engine, "BRIDGE_LOG")]).toBe("C:/tmp/inst1.log");
     expect(dequarantined).toEqual(["zandronum.exe"]);
-    // The engine doesn't create its config's folder.
-    expect(configDirs).toEqual([dirname(configPathFor(engine, "zandronum.exe"))]);
+    // The config's folder, then the gamelog's: the engine creates neither.
+    const gamelog = String(spawned[0].env[envName(engine, "BRIDGE_GAMELOG")]);
+    expect(configDirs).toEqual([dirname(configPathFor(engine, "zandronum.exe")), dirname(resolve(".", gamelog))]);
     expect(registry.has(1)).toBe(true);
     expect(registry.get(1)).toBe(client);
   });
 
-  it("fails a launch whose config folder can't be made before spawning, naming the env var that moves it", () => {
+  it("an isolated launch seeds its per-port copy first, then runs on it", async () => {
+    bridge = await FakeBridge.start();
+    const calls: string[] = [];
+    let args: string[] = [];
+    const io: LaunchIo = {
+      spawn: (_exe, a) => {
+        args = a;
+        return { kill: () => {} };
+      },
+      waitForPort: async () => {},
+      clearQuarantine: () => {},
+      ensureDir: (dir) => void calls.push(`dir ${dir}`),
+      seedConfig: (from, to) => void calls.push(`seed ${from} -> ${to}`),
+    };
+    registry = new InstanceRegistry(engine);
+    await launch(registry, { id: 1, exe: "/w/z", cwd: "/w", port: bridge.port, isolateConfig: true }, io);
+    const shared = configPathFor(engine, "/w/z");
+    const own = isolatedConfigPathFor(engine, shared, bridge.port);
+    // Then the gamelog's folder, checked in the launch test.
+    expect(calls.slice(0, 2)).toEqual([`dir ${dirname(shared)}`, `seed ${shared} -> ${own}`]);
+    expect(args.slice(0, 2)).toEqual(["-config", own]);
+  });
+
+  it("fails a launch whose folders can't be made before spawning, naming the env var that moves them", () => {
     const spawned: string[][] = [];
-    const io = (err: unknown): LaunchIo => ({
+    const io = (bad: (dir: string) => boolean, err: unknown = new Error("EACCES")): LaunchIo => ({
       spawn: (_exe, a) => (spawned.push(a), { kill: () => {} }),
       waitForPort: async () => {},
       clearQuarantine: () => {},
-      ensureDir: () => {
-        throw err;
+      ensureDir: (dir) => {
+        if (bad(dir)) throw err;
       },
+      seedConfig: () => {},
     });
     registry = new InstanceRegistry(engine);
-    const cfg = `can't create the config folder (${envName(engine, "CONFIG")} moves it)`;
-    expect(() => registry!.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1 }, io(new Error("EACCES")))).toThrow(
-      new LaunchSetupError(`${cfg}: EACCES`),
-    );
-    // A non-Error throw still reads as text.
-    expect(() => registry!.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1 }, io("EROFS"))).toThrow(new LaunchSetupError(`${cfg}: EROFS`));
+    // cwd off the exe's folder: UZDoom's gamelog lands in cwd, which would share the config folder.
+    const shared = dirname(configPathFor(engine, "/w/z"));
+    const cfg = `can't create the config folder (${envName(engine, "CONFIG")} moves it): EACCES`;
+    expect(() => registry!.spawn({ id: 1, exe: "/w/z", cwd: "/run", port: 1 }, io((d) => d === shared))).toThrow(new LaunchSetupError(cfg));
     // A caller's own -config never touches the default folder.
-    registry.spawn({ id: 1, exe: "/w/z", cwd: "/w", port: 1, extraArgs: ["-config", "/t/my.ini"] }, io(new Error("EACCES")));
+    registry.spawn({ id: 1, exe: "/w/z", cwd: "/run", port: 1, extraArgs: ["-config", "/t/my.ini"] }, io((d) => d === shared));
     expect(spawned).toHaveLength(1);
+    // A non-Error throw still reads as text.
+    expect(() => registry!.spawn({ id: 2, exe: "/w/z", cwd: "/run", port: 2 }, io((d) => d !== shared, "EROFS"))).toThrow(
+      /^can't create the gamelog folder \(\w+_BRIDGE_GAMELOG moves it\): EROFS$/,
+    );
   });
 
   it("accepts the attach when the engine's hello pid matches the spawned child", async () => {
@@ -144,6 +175,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -160,6 +192,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await expect(
@@ -176,27 +209,11 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
     expect(registry.has(1)).toBe(true);
-  });
-
-  it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
-    let killed = 0;
-    const io: LaunchIo = {
-      spawn: () => ({ pid: 123, kill: () => void killed++ }),
-      waitForPort: () => Promise.reject(new Error("never opened")),
-      clearQuarantine: () => {},
-      ensureDir: () => {},
-    };
-    registry = new InstanceRegistry(engine);
-    expect(registry.childPid(1)).toBeUndefined();
-    registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
-    expect(registry.childPid(1)).toBe(123);
-    await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
-    expect(killed).toBe(1);
-    expect(registry.childPid(1)).toBeUndefined();
   });
 
   it("kill stops the process and detaches", async () => {
@@ -207,6 +224,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -228,6 +246,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -260,6 +279,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -290,6 +310,115 @@ describe("InstanceRegistry", () => {
     expect(registry.has(1)).toBe(false); // still cleaned up
   });
 
+  describe("an engine that exits during startup", () => {
+    /** A LaunchIo whose port never opens until `openPort`, recording what spawn and the poll were handed. */
+    function exitingIo(exited: Promise<ChildExit> | undefined) {
+      const seen: { stderrPath?: string; signal?: AbortSignal; killed: boolean } = { killed: false };
+      let openPort = () => {};
+      const io: LaunchIo = {
+        spawn: (_exe, _args, _cwd, _env, stderrPath) => {
+          seen.stderrPath = stderrPath;
+          return { pid: 5, kill: () => (seen.killed = true), exited };
+        },
+        waitForPort: (_host, _port, signal) => {
+          seen.signal = signal;
+          return new Promise<void>((r) => (openPort = r));
+        },
+        clearQuarantine: () => {},
+        ensureDir: () => {},
+        seedConfig: () => {},
+      };
+      return { io, seen, openPort: () => openPort() };
+    }
+
+    it("fails fast with the exit code, reaps the child and stops the poll", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = exitingIo(Promise.resolve({ code: 255, signal: null }));
+      const err = await launch(registry, { id: 1, exe: "z", cwd: "/w", port: 1, logFile: "/w/mcp-bridge-1.log" }, io).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(EngineExitedError);
+      expect((err as EngineExitedError).message).toBe("engine exited during startup (exit code 255)");
+      expect((err as EngineExitedError).exit).toEqual({ code: 255, signal: null });
+      expect(seen.stderrPath).toBe("/w/mcp-bridge-1.log.stderr");
+      expect(seen.signal?.aborted).toBe(true);
+      expect(seen.killed).toBe(true);
+      expect(registry.has(1)).toBe(false);
+    });
+
+    it("names a fatal signal and a spawn failure", async () => {
+      registry = new InstanceRegistry(engine);
+      const launchExit = (exit: ChildExit) =>
+        launch(registry!, { id: 1, exe: "z", cwd: ".", port: 1 }, exitingIo(Promise.resolve(exit)).io);
+      await expect(launchExit({ code: null, signal: "SIGSEGV" })).rejects.toThrow(
+        "engine exited during startup (signal SIGSEGV)",
+      );
+      await expect(launchExit({ code: null, signal: null, error: "spawn z ENOENT" })).rejects.toThrow(
+        "engine exited during startup (could not start: spawn z ENOENT)",
+      );
+    });
+
+    it("hands spawn no stderr path without a logFile", async () => {
+      bridge = await FakeBridge.start();
+      registry = new InstanceRegistry(engine);
+      const { io, seen, openPort } = exitingIo(undefined);
+      const launched = launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+      openPort();
+      await launched;
+      expect(seen.stderrPath).toBeUndefined();
+    });
+
+    it("a clean exit (a wrapper that backgrounds the engine) keeps waiting for the port", async () => {
+      bridge = await FakeBridge.start();
+      registry = new InstanceRegistry(engine);
+      const { io, openPort } = exitingIo(Promise.resolve({ code: 0, signal: null }));
+      const launched = launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+      await new Promise((r) => setTimeout(r, 20));
+      openPort();
+      await launched;
+      expect(registry.has(1)).toBe(true);
+    });
+
+    it("an engine dying after the port opened is no unhandled rejection", async () => {
+      bridge = await FakeBridge.start();
+      registry = new InstanceRegistry(engine);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        let die = (_e: ChildExit) => {};
+        const { io, openPort } = exitingIo(new Promise<ChildExit>((r) => (die = r)));
+        const launched = launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+        openPort();
+        await launched;
+        die({ code: 1, signal: null });
+        await new Promise((r) => setTimeout(r, 50));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+      expect(unhandled).toEqual([]);
+      expect(registry.has(1)).toBe(true);
+    });
+  });
+
+  it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
+    let killed = 0;
+    const io: LaunchIo = {
+      spawn: () => ({ pid: 123, kill: () => void killed++ }),
+      waitForPort: () => Promise.reject(new Error("never opened")),
+      clearQuarantine: () => {},
+      ensureDir: () => {},
+      seedConfig: () => {},
+    };
+    registry = new InstanceRegistry(engine);
+    expect(registry.childPid(1)).toBeUndefined();
+    registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+    expect(registry.childPid(1)).toBe(123);
+    await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
+    expect(killed).toBe(1);
+    expect(registry.childPid(1)).toBeUndefined();
+  });
+
   it("quitAll graceful-quits every launched instance", async () => {
     bridge = await FakeBridge.start();
     const killed: number[] = [];
@@ -298,6 +427,7 @@ describe("InstanceRegistry", () => {
       waitForPort: async () => {},
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     };
     registry = new InstanceRegistry(engine);
     await launch(registry, { id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
@@ -341,6 +471,24 @@ describe("defaultLaunchIo", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("seedConfig copies the shared ini over a stale copy, and removes the copy when there's none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zandronum-mcp-seed-"));
+    const shared = join(dir, "shared.ini");
+    const own = join(dir, "own.ini");
+    try {
+      writeFileSync(own, "stale");
+      writeFileSync(shared, "[GlobalSettings]\nalias=1\n");
+      defaultLaunchIo.seedConfig(shared, own);
+      expect(readFileSync(own, "utf8")).toBe("[GlobalSettings]\nalias=1\n");
+      rmSync(shared);
+      defaultLaunchIo.seedConfig(shared, own);
+      expect(existsSync(own)).toBe(false);
+      expect(() => defaultLaunchIo.seedConfig(shared, own)).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("swallows a child 'error' event (bad exe) instead of crashing the server", async () => {
     const writes: string[] = [];
     const orig = process.stderr.write.bind(process.stderr);
@@ -362,10 +510,38 @@ describe("defaultLaunchIo", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
       child.kill(); // no-op on a process that never spawned; must not throw
+      const exit = await child.exited;
+      expect(exit).toMatchObject({ code: null, signal: null });
+      expect(exit?.error).toMatch(/ENOENT/);
     } finally {
       process.stderr.write = orig;
     }
     expect(writes.join("")).toMatch(/engine process .* error:/);
+  });
+
+  it("writes the child's stderr to the given file and reports its exit code", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "zandronum-mcp-stderr-"));
+    const file = join(dir, "mcp-bridge-1.log.stderr");
+    try {
+      const child = defaultLaunchIo.spawn(
+        process.execPath,
+        ["-e", "process.stdout.write('chatter');process.stderr.write('boom');process.exit(3)"],
+        process.cwd(),
+        process.env,
+        file,
+      );
+      expect(await child.exited).toEqual({ code: 3, signal: null });
+      expect(readFileSync(file, "utf8")).toBe("boom");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still spawns, uncaptured, when the stderr file can't be opened", async () => {
+    const file = join(tmpdir(), `zandronum-mcp-missing-${process.pid}-${Date.now()}`, "x.stderr");
+    const child = defaultLaunchIo.spawn(process.execPath, ["-e", "process.exit(3)"], process.cwd(), process.env, file);
+    expect(await child.exited).toEqual({ code: 3, signal: null });
+    expect(existsSync(file)).toBe(false);
   });
 });
 

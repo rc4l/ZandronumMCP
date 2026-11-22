@@ -104,15 +104,21 @@ nothing moves unless you opt in. As with `DISPLAY`, an explicit
 `SDL_VIDEO_WINDOW_POS` already in the launching environment is always respected
 over `ZANDRONUM_WINDOW_POS`.
 
-### Engine config and IWAD locations
+### Engine config, IWAD and gamelog locations
 
 Launched engines run on `zandronum-mcp.ini` beside the engine binary, so a clean
 rebuild of a build folder resets it. To keep one config across builds, point
-`ZANDRONUM_CONFIG` at an ini anywhere else. `ZANDRONUM_IWAD` is the IWAD a launch
-uses when the call names none; without it the engine searches for one itself:
+`ZANDRONUM_CONFIG` at an ini anywhere else (`config: "isolated"` copies sit beside
+it). `ZANDRONUM_IWAD` is the IWAD a launch uses when the call names none; without
+it the engine searches for one itself. Each launch logs the console to a timestamped
+gamelog (the bridge log `read_marks` and log waits read is rewritten each launch;
+`read_marks gamelog=` reads an earlier session's marks from these), by default under a per-user folder in
+the system temp dir; `ZANDRONUM_BRIDGE_GAMELOG` sets the path prefix instead. Set it
+to keep playtest marks across reboots (temp dirs get cleaned), and on Windows when the
+temp path has non-ASCII characters (the engine can't open those):
 
 ```json
-"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD" }
+"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD", "ZANDRONUM_BRIDGE_GAMELOG": "/path/to/logs/zagamelog" }
 ```
 
 ### Gatekeeper / "Apple could not verify…"
@@ -164,6 +170,44 @@ The compiled snippet goes in the system temp folder. On Windows the game can't o
 if that path has non-ASCII characters (a user folder like `C:\Users\José`). If `run_acs`
 refuses its temp folder, set `TEMP` in the MCP env to an existing plain-ASCII folder, e.g.
 `"TEMP": "C:\\mcp-temp"` (`TMPDIR` on Linux and macOS).
+
+### Per-project profiles
+
+One server usually serves every mod, so per-project settings go in a profile file kept in
+that project, not in the server's env. `ZANDRONUM_RUNACS_PROFILES` lists the profile files,
+separated like `PATH` (`:` on Linux and macOS, `;` on Windows):
+
+```json
+"env": { "ZANDRONUM_RUNACS_PROFILES": "/path/to/mymod/scripts/mcp-run-acs.json" }
+```
+
+A profile applies itself to a snippet that `#import`s one of the libraries it lists (compared
+by file name, in any case), so no call needs an extra argument and a snippet for another mod
+never picks it up. The files are read on every call, so an edit applies right away.
+
+```json
+{ "imports": ["mylib.acs"],
+  "includeDirs": ["."],
+  "rawDefines": true,
+  "defineFiles": ["mydefs.acs"],
+  "defines": { "MCP_PROBE": "1" } }
+```
+
+- `imports` (required): library file names that select the profile.
+- `includeDirs`: added after the call's own `includeDirs`, before zt-bcc's `lib/`.
+- `defineFiles`: headers whose `#define` and `#libdefine` lines are copied ahead of the
+  snippet. `#import` doesn't carry a library's `#define`s, and including the header again
+  fails on its enums, so the server copies only the define lines. A define inside an `#if`
+  block (other than the header's include guard) is refused, since the server can't evaluate
+  conditionals.
+- `defines`: extra `NAME: value` defines. A name a defineFile also defines is an error.
+- `rawDefines`: puts `#pragma raw define on` first (zt-bcc only), for libraries whose
+  headers use it. Raw defines are case-sensitive, and so are the snippet's own `#define`s
+  while such a profile applies.
+
+Relative paths resolve against the profile file's folder. The reply names each profile it
+applied (`profile: <file>`), and a compile error in a copied define points at its own file
+and line, not at the generated prelude.
 
 ## Run the server from source
 

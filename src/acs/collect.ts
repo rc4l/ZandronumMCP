@@ -7,6 +7,8 @@ export interface AcsModule {
   /** Zip entry name, `<wad>:<map marker>` for a map BEHAVIOR, or the caller's raw-file name. */
   name: string;
   data: Buffer;
+  /** The map marker, set only for a map's BEHAVIOR lump. */
+  map?: string;
 }
 
 // A map's marker is the lump right before its THINGS (binary) or TEXTMAP (UDMF).
@@ -19,7 +21,7 @@ function behaviorModules(wadBuf: Buffer, prefix: string): AcsModule[] {
   lumps.forEach((l, i) => {
     if (MAP_FIRST_LUMPS.has(lumps[i + 1]?.name ?? ""))marker = l.name;
     if (l.name === "BEHAVIOR" && l.size > 0) {
-      out.push({ name: prefix + marker, data: wadBuf.subarray(l.offset, l.offset + l.size) });
+      out.push({ name: prefix + marker, data: wadBuf.subarray(l.offset, l.offset + l.size), map: marker });
     }
   });
   return out;
@@ -43,12 +45,14 @@ export function collectAcsModules(buffer: Buffer, rawName = "BEHAVIOR"): AcsModu
   return out;
 }
 
-/** The modules whose name or extension-less basename is `lump` (case-insensitive), or all of them without one. */
+/** The modules whose name or extension-less basename is `lump` (a BEHAVIOR also by `behavior` or its map, case-insensitive), or all. */
 export function pickModules(modules: AcsModule[], lump?: string): AcsModule[] {
   const want = lump?.toLowerCase();
   return modules.filter((m) => {
     const full = m.name.toLowerCase();
-    return !want || full === want || path.basename(full).replace(/\.[^.]*$/, "") === want;
+    const keys = [full, path.basename(full).replace(/\.[^.]*$/, "")];
+    if (m.map) keys.push("behavior", m.map.toLowerCase());
+    return !want || keys.includes(want);
   });
 }
 

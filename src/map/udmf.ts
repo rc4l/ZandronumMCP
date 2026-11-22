@@ -59,6 +59,17 @@ export function parseTextmap(text: string): UdmfMap {
   return map;
 }
 
+/** A `moreids` value as the engine reads it: leading whitespace-separated integers up to the first non-number, zeros skipped. */
+export function parseMoreIds(raw: unknown): number[] {
+  const ids: number[] = [];
+  for (const tok of String(raw ?? "").trim().split(/\s+/)) {
+    if (!/^[+-]?\d+$/.test(tok)) break;
+    const n = Number(tok);
+    if (n !== 0) ids.push(n);
+  }
+  return ids;
+}
+
 function bucketFor(map: UdmfMap, kind: string): MapEntity[] | null {
   switch (kind) {
     case "vertex": return map.vertices;

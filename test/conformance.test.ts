@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { parseStatus } from "../src/parsers/status.js";
 import { parsePlayerState, parseTarget } from "../src/parsers/playerstate.js";
 import { parseActorState, parseActorsNear, parseFindActors } from "../src/parsers/actorstate.js";
-import { hasHeader, parseKvLines } from "../src/parsers/lines.js";
+import { firstError, hasHeader, parseKvLines } from "../src/parsers/lines.js";
 import { isCorrelatorLine } from "../src/correlation/sentinel.js";
 import { parseRenderInfo } from "../src/parsers/renderinfo.js";
 import { parseMapArray, parseMapVar, parseModules } from "../src/parsers/mapvars.js";
@@ -11,7 +11,10 @@ import { parseAcsVars } from "../src/parsers/acsvars.js";
 import { parseScriptStat } from "../src/parsers/scriptstat.js";
 import { parseAcsProfile } from "../src/parsers/acsprofile.js";
 import { parseHud } from "../src/parsers/hud.js";
-import { parseRunAcs } from "../src/parsers/runacs.js";
+import { parseRunAcs, parseRunScript, scriptOutput } from "../src/parsers/runacs.js";
+import { parseInputArmed, parseInputStatus, parseInputTrail, type InputRow } from "../src/parsers/input.js";
+import { splitLog } from "../src/input/timeline.js";
+import { parseMarks } from "../src/parsers/marks.js";
 import { ENGINES, engineFixture, type Engine } from "./fakes/fixtures.js";
 
 // The PROTOCOL.md contract, checked against one real captured reply per CCMD from each engine in ENGINES.
@@ -88,6 +91,15 @@ const CONTRACT: Contract<unknown>[] = [
     expect: ([s]) => expect(s).toMatchObject({ class: "DoomImp", hp: 60, x: -800, y: 828, flags: "mso" }),
   }),
   contract({
+    capture: "spawnat_find",
+    parse: (l) => parseKvLines(l, "spawned"),
+    expect: ([s]) => {
+      expect(s).toMatchObject({ class: "DoomImp", hp: 60, flags: "mso" });
+      expect(s.moved).toBeGreaterThan(0);
+      expect(s.moved).toBeLessThanOrEqual(128);
+    },
+  }),
+  contract({
     capture: "setview",
     parse: (l) => parseKvLines(l, "view"),
     expect: ([v]) => expect(v).toMatchObject({ angle: 90, class: "DoomImp" }),
@@ -103,8 +115,10 @@ const CONTRACT: Contract<unknown>[] = [
     parse: parseActorState,
     expect: (a) => {
       expect(a).toMatchObject({ class: "DoomPlayer", health: 100, weapon: "Pistol", morphTics: 0 });
-      expect(a.state).toEqual({ sprite: "PLAY", frame: "A", tics: -1 });
+      expect(a.state).toMatchObject({ id: "DoomPlayer.0", label: "Spawn" });
       expect(a.inventory).toContainEqual({ class: "Clip", amount: 50, maxAmount: 200 });
+      expect(a.player).toMatchObject({ input: { buttons: [] }, modInput: { buttons: [] }, refire: 0 });
+      expect(a.player!.psprites).toContainEqual(expect.objectContaining({ layer: "weapon", id: "Pistol.0", label: "Ready" }));
     },
   }),
   contract({
@@ -116,8 +130,19 @@ const CONTRACT: Contract<unknown>[] = [
         class: "DoomImp",
         health: 60,
         pos: { x: -800, y: 828, z: 8 },
-        state: { sprite: "TROO", frame: "A", tics: 10 },
+        state: { id: "DoomImp.0", label: "Spawn" },
       }),
+  }),
+  contract({
+    capture: "dumpactor_firing",
+    header: "MCP_ACTOR",
+    parse: parseActorState,
+    expect: (a) => {
+      expect(a.player!.input!.buttons).toContain("attack");
+      expect(a.player!.psprites).toContainEqual(
+        expect.objectContaining({ layer: "weapon", id: expect.any(String), label: expect.any(String) }),
+      );
+    },
   }),
   contract({
     capture: "dumpactor_missing",
@@ -150,10 +175,28 @@ const CONTRACT: Contract<unknown>[] = [
     expect: (f) => expect(f.actors).toEqual([expect.objectContaining({ class: "DoomImp", dist: 128, index: 0 })]),
   }),
   contract({
+    capture: "setprop_write",
+    parse: (l) => parseKvLines(l, "setprop"),
+    expect: ([p]) => expect(p).toMatchObject({ prop: "health", old: 60, new: 50, hp: 50, class: "DoomImp" }),
+  }),
+  contract({
+    capture: "setprop_read",
+    parse: (l) => parseKvLines(l, "setprop"),
+    expect: ([p]) => {
+      expect(p).toMatchObject({ prop: "speed", old: 8 });
+      expect(p).not.toHaveProperty("new");
+    },
+  }),
+  contract({
+    capture: "setprop_error",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("no actor with tid 9999 index 0"),
+  }),
+  contract({
     capture: "dumpplayers",
     header: "MCP_PLAYERS",
     parse: (l) => parseKvLines(l, "player"),
-    expect: ([p]) => expect(p).toMatchObject({ slot: 0, bot: 0, state: "live", hp: 100, weapon: "Pistol", name: "player" }),
+    expect: ([p]) => expect(p).toMatchObject({ slot: 0, bot: 0, host: 1, state: "live", hp: 100, weapon: "Pistol", name: "player" }),
     only: { zandronum: ["spec", "deadspec", "deaths", "points", "wins", "ping"] },
   }),
   contract({
@@ -260,10 +303,103 @@ const CONTRACT: Contract<unknown>[] = [
   }),
   contract({
     capture: "runacs",
-    parse: (l) => parseRunAcs(l)?.reply,
+    parse: parseRunAcs,
     expect: (r) => expect(r).toEqual({ module: 1, scripts: 1, started: "ConfProbe", deferred: false }),
   }),
+  contract({
+    capture: "runscript",
+    parse: (l) => ({ reply: parseRunScript(l), printed: scriptOutput(l, "MCP_RUNSCRIPT").printed }),
+    expect: (r) =>
+      // result 42 is the probe's SetResultValue(a * 6), not the engine default of 1; module 1
+      // is the snippet `runacs` loaded.
+      expect(r).toEqual({
+        reply: { script: "ConfProbe", started: true, result: 42, finished: true, module: 1 },
+        printed: ["ConfProbe 7"],
+      }),
+  }),
+  contract({
+    capture: "pointinfo",
+    header: "MCP_POINT",
+    parse: (l) => ({ point: parseKvLines(l, "point")[0], fit: parseKvLines(l, "fit")[0] }),
+    expect: ({ point, fit }) => {
+      expect(point.sector).toEqual(expect.any(Number));
+      // Zandronum prints inmap only with GL nodes, so its capture runs on the OpenGL renderer.
+      expect(point.inmap).toBe(1);
+      expect(fit.ok).toBe(1);
+    },
+  }),
+  contract({
+    capture: "checksight",
+    header: "MCP_SIGHT",
+    parse: (l) => parseKvLines(l, "sight")[0],
+    expect: (s) => expect(s).toMatchObject({ visible: 1, from: "player0" }),
+  }),
+  contract({
+    capture: "tracemove",
+    header: "MCP_TRACE",
+    parse: (l) => parseKvLines(l, "trace")[0],
+    expect: (t) => expect(t).toMatchObject({ ok: 0, reason: "line", line: 334 }),
+  }),
+  contract({
+    capture: "mcp_mark",
+    parse: (l) => parseMarks(l.map((text, i) => ({ line: i + 1, text }))),
+    expect: (m) => expect(m).toEqual([expect.objectContaining({ n: 1, map: "MAP01", note: "conf note" })]),
+  }),
   contract({ capture: "unblock", parse: (l) => l, expect: (l) => expect(l).toEqual(["unblock ok"]) }),
+  contract({ capture: "input_clear", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_INPUT cleared"]) }),
+  contract({ capture: "input_seg", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_INPUT seg 1 total=5"]) }),
+  contract({
+    capture: "input_seg_bad",
+    parse: firstError,
+    expect: (e) =>
+      expect(e).toMatch(
+        /^unknown button 'nosuch' \(known: attack,altattack,use,jump,crouch,reload,zoom,speed,strafe,turn180,user1,user2,user3,user4\)$/,
+      ),
+  }),
+  contract({
+    capture: "input_go_bad",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("bad timeline: a seg failed, mcp_input clear first"),
+  }),
+  contract({
+    // The run's segment and end markers land in the bridge log after the armed line.
+    capture: "input_go",
+    parse: (l) => ({ armed: parseInputArmed(l)!, segs: [...splitLog(l).keys()], end: parseKvLines(l, "MCP_INPUT_END")[0] }),
+    expect: ({ armed, segs, end }) => {
+      expect(armed).toMatchObject({ segs: 2, tics: 5 });
+      expect(segs).toEqual([1, 2]);
+      expect(end).toEqual({ reason: "done", consumed: 5, maptime: armed.maptime + 5 });
+    },
+  }),
+  contract({
+    capture: "input_status",
+    parse: (l) => parseInputStatus(l)!,
+    expect: (s) => expect(s).toMatchObject({ active: false, consumed: 5, total: 5, seg: 2, reason: "done" }),
+  }),
+  contract({
+    capture: "input_trail",
+    header: "MCP_INPUT_TRAIL",
+    parse: parseInputTrail,
+    expect: ({ start, rows }: { start: InputRow; rows: InputRow[] }) => {
+      expect(start).toMatchObject({ seg: 0, health: 100, buttons: [] });
+      // One row per tic, on consecutive map tics from the armed one.
+      expect(rows.map((r) => [r.seg, r.maptime - start.maptime, r.buttons])).toEqual([
+        [1, 0, []],
+        [1, 1, []],
+        [1, 2, []],
+        [2, 3, ["attack"]],
+        [2, 4, ["attack"]],
+      ]);
+      expect(Math.hypot(rows[2].x - start.x, rows[2].y - start.y)).toBeGreaterThan(1);
+    },
+  }),
+  contract({
+    capture: "input_trail_ends",
+    header: "MCP_INPUT_TRAIL",
+    parse: parseInputTrail,
+    expect: ({ rows }: { rows: InputRow[] }) => expect(rows.map((r) => r.seg)).toEqual([1, 2]),
+  }),
+  contract({ capture: "input_stop", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_INPUT idle"]) }),
 ];
 
 describe("bridge contract (PROTOCOL.md) over the captured replies", () => {

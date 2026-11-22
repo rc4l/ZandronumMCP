@@ -44,6 +44,7 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
       waitForPort: () => Promise.resolve(),
       clearQuarantine: () => {},
       ensureDir: () => {},
+      seedConfig: () => {},
     },
     compileAcs: nope("compileAcs"),
     removeDir: nope("removeDir"),

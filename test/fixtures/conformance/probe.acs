@@ -1,4 +1,5 @@
 // Snippet for the mcp_runacs capture: mcp_runacs <this dir>/probe.o ConfProbe 5
+// and the mcp_runscript one after it: mcp_runscript ConfProbe name=1 7
 // A #library, like run_acs builds, so Log(s:) reads this module's strings.
 #library "confprobe"
 #include "zcommon.acs"
@@ -6,4 +7,6 @@
 script "ConfProbe" (int a)
 {
     Log(s:"ConfProbe ", d:a);
+    // Not the engine default of 1, so the mcp_runscript capture proves the result is read.
+    SetResultValue(a * 6);
 }

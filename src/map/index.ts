@@ -1,7 +1,7 @@
 import { parseWad } from "./wad.js";
 import { findMapLumps, type MapFormat } from "./locate.js";
 import { parseSectors, parseLinedefs, parseSidedefs, parseVertexes, type MapEntity } from "./binary.js";
-import { parseTextmap } from "./udmf.js";
+import { parseTextmap, parseMoreIds } from "./udmf.js";
 import { isZip, listZipEntries, readZipEntry } from "./zip.js";
 
 export type { MapFormat } from "./locate.js";
@@ -13,6 +13,12 @@ export interface MapData {
   linedefs: MapEntity[];
   sidedefs: MapEntity[];
   vertices: MapEntity[];
+}
+
+/** Every tag a sector answers to: binary `tag`, or UDMF `id` plus `moreids`. */
+export function sectorTags(sector: MapEntity): number[] {
+  const first = [sector.tag, sector.id].filter((v): v is number => typeof v === "number");
+  return [...first, ...parseMoreIds(sector.moreids)];
 }
 
 /**

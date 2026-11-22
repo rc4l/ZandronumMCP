@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parsePlayerState, parseTarget, withLiveStatus } from "../src/parsers/playerstate.js";
+import { parsePlayerState, parseTarget, playersReply, withLiveStatus } from "../src/parsers/playerstate.js";
 import type { PlayerState } from "../src/parsers/playerstate.js";
 
 // Captured currentpos replies: Zandronum's single "lightlevel", UZDoom's sector + actor pair.
@@ -83,5 +83,13 @@ describe("withLiveStatus", () => {
 
   it("reads spectating=1 as true", () => {
     expect(withLiveStatus(base, { spectating: "1" }).spectating).toBe(true);
+  });
+});
+
+describe("playersReply", () => {
+  it("returns the player rows under MCP_PLAYERS, else undefined", () => {
+    expect(playersReply(["MCP_PLAYERS", "player slot=0 name=Player"])).toEqual([{ slot: 0, name: "Player" }]);
+    expect(playersReply(["MCP_PLAYERS"])).toEqual([]);
+    expect(playersReply(["Unknown command \"dumpplayers\""])).toBeUndefined();
   });
 });
