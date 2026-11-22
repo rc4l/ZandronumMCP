@@ -293,7 +293,7 @@ namespace
 			// to the process it just spawned (and not a stale bridge on the same port).
 			char hello[256];
 			snprintf( hello, sizeof( hello ),
-				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.7.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\"]}",
+				"{\"v\":1,\"t\":\"hello\",\"engine\":\"zandronum\",\"bridge\":\"0.8.0\",\"pid\":%d,\"caps\":[\"cmd\",\"event\",\"time\",\"status\",\"input\",\"runscript\",\"spawnfind\",\"runacsname\",\"mapslot\"]}",
 				mcp_getpid() );
 			SendLine( hello );
 

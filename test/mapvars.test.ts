@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseMapVar, parseMapArray, parseModules } from "../src/parsers/mapvars.js";
+import { parseMapVar, parseMapArray, parseMapSlot, parseModules } from "../src/parsers/mapvars.js";
 
 describe("parseMapVar", () => {
   it("returns the value", () => {
@@ -17,6 +17,24 @@ describe("parseMapArray", () => {
   });
   it("returns null when not found", () => {
     expect(parseMapArray(["maparray Nope not found"])).toBeNull();
+  });
+});
+
+describe("parseMapSlot", () => {
+  it("parses the scalar and element forms, name last with the rest of the line", () => {
+    expect(parseMapSlot(["MCP_MAPSLOT module=1 slot=4 value=-7 name=MAPSLOT"])).toEqual({ module: 1, slot: 4, value: -7, name: "MAPSLOT" });
+    expect(parseMapSlot(["noise\nMCP_MAPSLOT module=0 slot=6 index=5 value=104 name=MY LIB"])).toEqual({
+      module: 0,
+      slot: 6,
+      index: 5,
+      value: 104,
+      name: "MY LIB",
+    });
+  });
+
+  it("returns undefined without a reply line", () => {
+    expect(parseMapSlot(["error no module matches map=MAP01 modules=2"])).toBeUndefined();
+    expect(parseMapSlot(["MCP_MAPSLOT module=0 slot=x value=1 name=A"])).toBeUndefined();
   });
 });
 

@@ -1,0 +1,22 @@
+#library "mapslotn"
+#nocompact
+#import "zcommon.bcs"
+
+struct MnPtT { int x; int y; };
+
+// Public: reachable by name too.
+int mn_pub = 201;
+int mn_pub_arr[4] = { 0, 202, 0, 0 };
+// Never touched by this library's code: swapping them changes only MEXP.
+int mn_quiet_a;
+int mn_quiet_b;
+
+internal int mn_hid = 203;
+internal int mn_hid_zero;
+internal int mn_hid_arr[5] = { 0, 0, 204, 0, 0 };
+internal MnPtT mn_hid_pts[3] = { { 0, 0 }, { 0, 205 }, { 0, 0 } };
+
+script "mn_get_hid" (void) { SetResultValue(mn_hid); }
+script "mn_get_hid_zero" (void) { SetResultValue(mn_hid_zero); }
+script "mn_get_hid_arr" (int i) { SetResultValue(mn_hid_arr[i]); }
+script "mn_get_hid_pts_y" (int i) { SetResultValue(mn_hid_pts[i].y); }

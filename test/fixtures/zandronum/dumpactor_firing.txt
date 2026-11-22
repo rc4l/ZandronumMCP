@@ -2,7 +2,7 @@ view angle=270.0 pitch=5.8
 MCP_ACTOR
 class DoomPlayer
 health 100
-pos -800.0 746.5 8.0
+pos -800.0 746.8 8.0
 angle 270.0
 pitch 5.8
 state PLAY E 12
@@ -12,8 +12,7 @@ morphtics 0
 input buttons=1 oldbuttons=1 forward=0 side=0 up=0 yaw=0 pitch=0 roll=0
 modinput buttons=1 oldbuttons=1 forward=0 side=0 up=0 yaw=0 pitch=0 roll=0
 weaponinfo refire=1 flags=128
-psprite layer=1 sprite=PISG frame=C tics=4 x=0.0 y=32.4 id=Pistol.5 label=Fire+2
-psprite layer=1000 sprite=PISF frame=A tics=1 x=0.0 y=32.4 id=Pistol.7 label=Flash
+psprite layer=1 sprite=PISG frame=C tics=3 x=0.0 y=32.4 id=Pistol.5 label=Fire+2
 item Pistol 1 1
 item Fist 1 1
 item Clip 48 200

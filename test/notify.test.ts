@@ -32,21 +32,19 @@ ${body}
   return lf(execFileSync(exe, { encoding: "utf8" }));
 }
 
-it.skipIf(!compiler)("synchronous flag-change output is visible, but its reply remains filtered", () => {
+it.skipIf(!compiler)("synchronous damage output is visible, but its reply remains filtered", () => {
   const actor = readFileSync(join(overlay, "mcp_actorstate.cpp"), "utf8");
-  const setprop = actor.slice(actor.indexOf("CCMD( mcp_setprop )"));
-  const call = setprop.match(/^\t+if \( isFlag \) MCP_GameCall\( .*MCP_ChangeFlag\( a, fd, v\.num != 0 \).*;$/m)?.[0];
+  const damage = actor.slice(actor.indexOf("CCMD( mcp_damage )"), actor.indexOf("static void MCP_TakeInv"));
+  const call = damage.match(/^\t.*P_DamageMobj\( a, NULL, source, amount, type \).*;$/m)?.[0];
   expect(call).toBeDefined();
-  runNative("setflag", 'static void MCP_ChangeFlag(int, int, bool) { assert(MCP_Bridge_ShowInNotify("game flag")); }', `
+  runNative("damage", 'static void P_DamageMobj(int, void *, int, int, int) { assert(MCP_Bridge_ShowInNotify("game death")); }', `
   assert(MCP_Bridge_ShowInNotify("console"));
   {
     MCPBridgeReplyGuard reply;
     MCPBridgeReplyGuard nestedReply;
-    int a = 0, fd = 0;
-    bool isFlag = true;
-    struct { int num; } v = { 1 };
+    int a = 0, source = 0, amount = 1, type = 0;
     ${call}
-    assert(!MCP_Bridge_ShowInNotify("flagged reply"));
+    assert(!MCP_Bridge_ShowInNotify("damaged reply"));
     assert(g_replyDepth == 2);
     assert(MCP_GameCall([] { return 7; }) == 7);
     try { MCP_GameCall([] { throw std::runtime_error("game callback"); }); }

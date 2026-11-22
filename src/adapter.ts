@@ -35,6 +35,8 @@ export interface EngineAdapter {
   consoleBar?: RegExp;
   /** The engine opens files with ANSI `fopen` on Windows, so a non-ASCII path can't reach it. */
   ansiPaths: boolean;
+  /** Whether the engine's walk of a -file directory on `platform` leaves out an entry, by its own name, at any depth. */
+  dirWalkSkips: (name: string, isDir: boolean, platform: NodeJS.Platform) => boolean;
   /** LAN roles and their pause caveats; undefined for an engine with no netgame support here. */
   netgame?: NetgameCaps;
   notes: EngineNotes;
@@ -79,6 +81,14 @@ export interface EngineNotes {
   summonAtRefusals: string;
   /** Closes set_actor_prop's description: where it is refused. */
   setActorProp: string;
+  /** Where place_actor, remove_actor, damage_actor and give/take with a tid are refused. */
+  actorWrites: string;
+  /** place_actor's engine caveats (the void, a netgame player body); "" for none. */
+  placeActor: string;
+  /** remove_actor's engine caveats; "" for none. */
+  removeActor: string;
+  /** give/take's engine caveats, on either path; "" for none. */
+  inventory: string;
   /** run_acs net-mode and unload caveats, before "save_game refuses". */
   runAcs: string;
   /** Appended to screenshot_file's description; "" for none. */
@@ -105,6 +115,8 @@ export interface EngineNotes {
   findActors: string;
   /** renderer_info's whole description. */
   rendererInfo: string;
+  /** Appended to profile_scripts' and profile_window's descriptions: what the engine leaves out of the profile; "" for none. */
+  profileScripts: string;
 }
 
 export interface SaveMeta {

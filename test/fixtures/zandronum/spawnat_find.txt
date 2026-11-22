@@ -1,1 +1,1 @@
-spawned class=DoomImp tid=1479026444 hp=60 spawnhp=60 x=-760.0 y=716.2 z=8.0 angle=0.0 pitch=0.0 flags=mso moved=40
+spawned class=DoomImp tid=1794228346 hp=60 spawnhp=60 x=-760.0 y=700.0 z=8.0 angle=0.0 pitch=0.0 flags=mso moved=40

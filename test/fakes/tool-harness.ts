@@ -18,12 +18,15 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
   const nope = (what: string) => () => {
     throw new Error(`unexpected ${what} in test`);
   };
-  return {
+  const io: ContextIo = {
     existsSync: () => false,
     readFileSync: nope("readFileSync"),
     readTextSync: nope("readTextSync"),
+    // The head of whatever readFileSync serves, so a test faking files fakes both.
+    readHeadSync: (p, bytes) => io.readFileSync(p).subarray(0, bytes),
     readdirSync: nope("readdirSync"),
     isDirSync: () => false,
+    realpathSync: (p) => p,
     stampOf: () => "stamp",
     mtimeOf: nope("mtimeOf"),
     sleep: () => Promise.resolve(), // tests never wait on real time
@@ -37,6 +40,7 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
     capture: (_client, dir, opts) =>
       Promise.resolve({ base64: "UE5H", path: `${dir}/${opts?.name ?? "mcp_shot"}.png` }),
     findFreePort: (start) => Promise.resolve(start),
+    portOpen: nope("portOpen"),
     hasBridge: () => true,
     reap: () => Promise.resolve({ found: [], killed: [], survivors: [] }),
     launchIo: {
@@ -48,8 +52,10 @@ export function stubIo(overrides: Partial<ContextIo> = {}): ContextIo {
     },
     compileAcs: nope("compileAcs"),
     removeDir: nope("removeDir"),
+    resolveMapSlot: nope("resolveMapSlot"),
     ...overrides,
   };
+  return io;
 }
 
 export interface HarnessOptions {

@@ -1,22 +1,30 @@
 import type { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import { z } from "zod";
+import { z, type ZodRawShape } from "zod";
 import path from "node:path";
-import type { LaunchArgs, ServerContext } from "./context.js";
+import type { LastLaunch, LaunchArgs, ServerContext } from "./context.js";
 import { parseStartupErrors, tailLines, crashLogPath, crashReportPid, crashReportText, readLogWindow } from "./process/startuplog.js";
 import { stderrLogPath, stderrSection, startupFailureText } from "./process/startuplog.js";
 import { EngineExitedError, LaunchSetupError } from "./process/registry.js";
+import { parseProcMemory, procMismatch, procName, procStatusPath } from "./process/procstatus.js";
 import type { LogWindow, LogWindowOptions } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
-import { parseMapVar, parseMapArray, parseModules } from "./parsers/mapvars.js";
+import { parseMapVar, parseMapArray, parseMapSlot, parseMapSlotNoMatch, parseModules } from "./parsers/mapvars.js";
 import { parseScripts, parseFunctions } from "./parsers/scripts.js";
-import { parseAcsProfile } from "./parsers/acsprofile.js";
+import {
+  DEFAULT_PROFILE_LIMIT,
+  isTruncated,
+  parseAcsProfile,
+  rankProfile,
+  resolveProfileNames,
+  type ProfileSort,
+} from "./parsers/acsprofile.js";
 import { parsePlayerState, parseTarget, playersReply, withLiveStatus, type PlayerState } from "./parsers/playerstate.js";
 import { pollUntil } from "./poll.js";
-import { parseActorState, parseActorsNear, parseFoundReply, expandFlags } from "./parsers/actorstate.js";
-import { FLAG_NAMES, FIND_ACTORS_LIMIT, filterFound } from "./parsers/actorstate.js";
+import { parseActorState, parseActorsNear, parseFoundReply, expandFlags, describeRemoved } from "./parsers/actorstate.js";
+import { FLAG_NAMES, FIND_ACTORS_LIMIT, filterFound, type FoundActors } from "./parsers/actorstate.js";
 import { joinedBots, allHaveTid, addBotReport, botKey, type JoinedBot } from "./parsers/players.js";
 import { parseKvLines, firstError, stripColor, cleanConsoleLines, hasHeader, failureText, outputText, markerText } from "./parsers/lines.js";
 import type { KvRecord } from "./parsers/lines.js";
@@ -26,12 +34,12 @@ import { describeStatus, footerNote, isPaused, statusBlockers, requireField } fr
 import type { BridgeClient } from "./bridge/transport.js";
 import { findSymbol } from "./acs/symbols.js";
 import { sectorTags } from "./map/index.js";
-import { collectAcsLumps, collectAcsModules, pickModules } from "./acs/collect.js";
+import { collectAcsLumps, pickModules, type AcsModule } from "./acs/collect.js";
 import { parseBehaviorNames, parseMapExports, isAcsObject, parseLoadNames, missingImports } from "./acs/bytecode.js";
 import { parseRunAcs, parseRunScript, runAcsCaveats, runAcsText, scriptOutput } from "./parsers/runacs.js";
 import { PROP_NAMES, FLAG_PROP, FORCEABLE_PROPS, encodePropValue } from "./actorprops.js";
 import { parseRenderInfo, pick } from "./parsers/renderinfo.js";
-import { command, kvArgs, realToken, buildPuke, buildPukeName, buildRunAcs, buildSave } from "./commands/builders.js";
+import { command, kvArgs, realToken, isPlainToken, buildPuke, buildPukeName, buildRunAcs, buildSave } from "./commands/builders.js";
 import { buildPrelude, type Prelude, type RunAcsProfile } from "./acs/profiles.js";
 import { buildRunScript, buildAddBot, refToken, type RefArg } from "./commands/builders.js";
 import { appendNote } from "./adapter.js";
@@ -61,12 +69,38 @@ import {
 } from "./input/timeline.js";
 import { parseInputStatus, parseInputArmed, parseInputTrail, type InputRow, type InputStatus } from "./parsers/input.js";
 import { netRole, joinAction, joinState, type NetInfo, type JoinState } from "./netgame.js";
+import { ToolRegistry, type ToolHandler } from "./scenario/dispatch.js";
 import { ToolRefusal } from "./types.js";
+import { scenarioShape, SCENARIO_REFUSALS, MAX_STEPS, MAX_CALLS, MAX_ITERATIONS } from "./scenario/schema.js";
+import { runScenario, describeScenario, scenarioRefusal, type ScenarioPort } from "./scenario/run.js";
+import { STEP_TEXT_CHARS, STEP_ROWS, STEP_JSON_CHARS, REPLY_CHARS, SUMMARY_CHARS } from "./scenario/run.js";
 
 const instanceArg = z.number().int().positive().default(1);
 const acsScope = z.enum(["world", "global"]);
 const acsSrcArg = z.string().optional();
 const acsName = z.string().min(1);
+// The map-var tools' sourceFile selectors.
+const sourceFileArgs = {
+  sourceFile: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed.",
+    ),
+  object: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("With sourceFile: the deployed WAD, PK3, directory or .o to find the source's build in, instead of the instance's launch files (needed for an attached instance)."),
+  includeDirs: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."),
+};
+type SourceFileArgs = { instance: number; name: string; index?: number; value?: number } & {
+  [K in keyof typeof sourceFileArgs]?: z.infer<(typeof sourceFileArgs)[K]>;
+};
 // Fresh per field, like mapCoord: run_acs's `name` alias must not be a $ref into `script`.
 const runAcsName = () => z.string().regex(/^[^\s;"]+$/, "a script name has no spaces");
 const mapFileArg = z.string().optional();
@@ -104,7 +138,7 @@ const actorRef = oneRef(
 /** An actor only. */
 const moverRef = oneRef(z.object(refFields).strict(), "{tid, index?}, {player} or {class}");
 
-/** The target of a tool that acts on one live actor, as `mcp_setprop` takes it. */
+/** The target of a tool that acts on one live actor, as `mcp_setprop` and the CCMDs after it take it. */
 const targetArgs = {
   tid: z.number().int().min(0).optional().describe("The actor's TID; omitted or 0 = the console player's body."),
   index: z
@@ -118,6 +152,11 @@ const targetArgs = {
 /** Why a target can't be sent: index picks among actors sharing a tid, and tid 0 is one body. */
 function targetRefusal(tid: number | undefined, index: number | undefined): string | undefined {
   return index !== undefined && !tid ? "index needs a tid" : undefined;
+}
+
+/** Why a one-token arg can't be sent as typed (see `isPlainToken`), if it can't. */
+function tokenRefusal(name: string, value: string | undefined): string | undefined {
+  return value !== undefined && !isPlainToken(value) ? `bad ${name} ${JSON.stringify(value)}` : undefined;
 }
 
 /** `set_cheat` names: each is its own stock toggle CCMD, keyed to its `CF_*` bit (d_player.h). */
@@ -188,6 +227,8 @@ const PLAYER_FIELDS = [
   "armor",
 ] as const;
 const playerField = z.enum(PLAYER_FIELDS);
+/** find_actors' flag filter: a flag name or the derived alive, true = must have, false = must not. */
+const actorFlags = z.object(Object.fromEntries([...FLAG_NAMES, "alive"].map((n) => [n, z.boolean().optional()]))).strict();
 const conditionArg = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("mapvar"), name: acsName, op: compareOp, value: z.number() }),
   z.object({
@@ -211,6 +252,16 @@ const conditionArg = z.discriminatedUnion("kind", [
     // A second field compares against the same live read, e.g. z == floorHeight.
     value: z.union([z.number(), playerField]),
   }),
+  z.object({
+    kind: z.literal("actors"),
+    class: classArg.optional(),
+    tid: z.number().int().min(1).optional(),
+    radius: z.number().int().positive().optional(),
+    flags: actorFlags.optional(),
+    op: compareOp,
+    value: z.number(),
+  }),
+  z.object({ kind: z.literal("log"), pattern: regexArg() }),
 ]);
 type Condition = z.infer<typeof conditionArg>;
 
@@ -219,12 +270,37 @@ const MENU_KEYS = ["up", "down", "left", "right", "enter", "back", "backspace"] 
 const profileSort = z.enum(["total", "avg", "min", "max", "runs"]).optional();
 const profileLimit = z.number().int().positive().optional();
 
-/** `acsprofile` with its optional sort key and row limit. Shared by the
- *  cumulative and windowed profiling tools so the arg shaping lives in one place. */
-function profileCommand(sort?: string, limit?: number): string {
-  if (!sort) return "acsprofile";
-  return command("acsprofile", sort, ...(limit !== undefined ? [limit] : []));
+/** Every profiled row, ranked and limited host-side, with the shown rows' truncated names resolved
+ *  from the dumps, fetched only when one needs it. */
+async function profileEntries(client: BridgeClient, over: string, sort: ProfileSort = "total", limit = DEFAULT_PROFILE_LIMIT) {
+  const ranked = rankProfile(parseAcsProfile(await client.runCommand("acsprofile total 0")), sort, limit);
+  const cut = ranked.entries.filter(isTruncated);
+  const entries =
+    cut.length === 0
+      ? ranked.entries
+      : resolveProfileNames(
+          ranked.entries,
+          parseModules(await client.runCommand("dumpmodules")),
+          cut.some((e) => e.section === "script") ? parseScripts(await client.runCommand("dumpscripts")) : [],
+          cut.some((e) => e.section === "function") ? parseFunctions(await client.runCommand("dumpfunctions")) : [],
+        );
+  const { scripts, functions } = ranked.profiled;
+  return {
+    content: [{ type: "text" as const, text: `${entries.length} of ${scripts + functions} profiled${over} (top ${limit} per section by ${sort})` }],
+    // limit and sort ride along: Claude Code shows only the structured half, and they say the list is a slice.
+    structuredContent: { entries, profiled: ranked.profiled, limit, sort },
+  };
 }
+
+/** What both profiling tools' descriptions say about the rows they return. */
+const profileRows = (note: string) =>
+  appendNote(
+    `Rows are the top ${DEFAULT_PROFILE_LIMIT} per section (scripts, functions) by \`sort\` (default total, all descending); ` +
+      "`limit` raises that, and the reply counts every profiled row. A name the engine's 20-character column cuts " +
+      "(a script name over 18 characters, since it prints quoted, or a function name over 20) is resolved from dumpscripts/dumpfunctions when exactly one name fits, else kept as the printed prefix " +
+      "with truncated: true.",
+    note,
+  );
 
 /** `script`, or its string-only alias `name` (a client may send a digits-only string as a number); null when both are given. */
 function scriptOrName<S>(script: S | undefined, name: string | undefined): S | string | undefined | null {
@@ -275,6 +351,15 @@ function blockText(r: KvRecord): string {
  */
 const PROGRESS_INTERVAL_MS = 1000;
 
+/** A tool's registration; `scenario` (a SCENARIO_REFUSALS reason) makes run_scenario refuse it. */
+interface ToolConfig<Input extends ZodRawShapeCompat> {
+  title?: string;
+  description?: string;
+  inputSchema: Input;
+  outputSchema?: ZodRawShapeCompat;
+  scenario?: string;
+}
+
 /** The slice of the SDK's handler `extra` that progress reporting needs. */
 interface ToolExtra {
   _meta?: { progressToken?: string | number };
@@ -303,6 +388,8 @@ const CAP_REFUSALS = {
     "This engine build has no free-spot search for findSpot (rebuild the engine with the latest overlay, or retry without findSpot).",
   runacsname:
     "This engine build would run a script name made of digits as a script number (rebuild the engine with the latest overlay, or rename the script); nothing sent to the engine.",
+  mapslot:
+    "This engine build has no slot-addressed map var access for sourceFile (rebuild the engine with the latest overlay, or retry without sourceFile for an exported name); nothing compiled or sent.",
 };
 type OptionalCap = keyof typeof CAP_REFUSALS;
 
@@ -358,6 +445,12 @@ function launchArgsSchemaFor(ctx: ServerContext) {
       .optional()
       .describe(
         `"shared" (default) runs on ${ctx.env("CONFIG")}, else ${engine.serverName}.ini beside the engine. "isolated" copies that ini to ${engine.serverName}-<port>.ini beside it and runs on the copy, so this instance never writes the shared one (netgame peers, parallel sessions). The copy is redone on every launch and relaunch, dropping what the previous run saved there. Can't be combined with a -config in extraArgs.`,
+      ),
+    wait: z
+      .boolean()
+      .optional()
+      .describe(
+        "true (default) waits for the engine's bridge and attaches. false returns once the process is spawned; the instance attaches on its first tool call, which waits for the bridge then. For an engine whose bridge opens late, e.g. a netgame host waiting for its lobby to fill.",
       ),
   };
 }
@@ -422,6 +515,22 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     .describe("The engine-state note, present only on a reply that prints one.");
   const errorField = z.string().optional().describe("An error reply's text.");
 
+  type CallExtra = Parameters<ToolCallback<ZodRawShapeCompat>>[1];
+  // Every tool by name, for run_scenario to call server-side.
+  const tools = new ToolRegistry<CallExtra>();
+
+  /** Register a tool with the server, and in `tools` under `raw` (registerLive's handler without the note); `scenario` is why run_scenario refuses it. */
+  function register<Input extends ZodRawShapeCompat>(
+    name: string,
+    config: ToolConfig<Input>,
+    handler: ToolCallback<Input>,
+    raw: unknown = handler,
+  ): void {
+    const { scenario, ...sdkConfig } = config;
+    tools.add(name, config.inputSchema as ZodRawShape, raw as ToolHandler<CallExtra>, scenario);
+    server.registerTool(name, sdkConfig, handler);
+  }
+
   /**
    * Register a tool that talks to a live engine, so its response carries a
    * short "engine state" note when something about the game is unusual
@@ -451,12 +560,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
    */
   function registerLive<Input extends ZodRawShapeCompat & { instance: typeof instanceArg }>(
     name: string,
-    config: {
-      title?: string;
-      description?: string;
-      inputSchema: Input;
-      outputSchema?: ZodRawShapeCompat;
-    },
+    config: ToolConfig<Input>,
     handler: ToolCallback<Input>,
   ): void {
     // TS can't carry an abstract `Input` through the SDK's own generic
@@ -477,12 +581,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       return { ...r, structuredContent: { ...r.structuredContent, error: text } };
     };
 
-    const wrapped = async (args: Args, extra: Extra): Promise<Result> => {
+    const fresh = async (args: Args, extra: Extra): Promise<Result> => {
       const instance = args.instance;
       const prior = ctx.attachedClient(instance);
       const before = prior?.commandCount;
       const eventsBefore = prior?.eventCount ?? 0;
-      const result = withError(await rawHandler(args, extra));
+      const result = await rawHandler(args, extra);
       const client = ctx.attachedClient(instance);
       const advanced = before !== undefined && client !== undefined && client.commandCount > before;
       if (client && !advanced) {
@@ -490,6 +594,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         if (client.eventCount > eventsBefore) await sleep(INPUT_SETTLE_MS);
         await client.refreshStatus();
       }
+      return result;
+    };
+
+    const wrapped = async (args: Args, extra: Extra): Promise<Result> => {
+      const result = withError(await fresh(args, extra));
+      const client = ctx.attachedClient(args.instance);
       const status = client?.lastStatus;
       // No snapshot (a failed read, a capless bridge) says nothing and keeps the remembered note.
       if (!client || !status) return result;
@@ -510,7 +620,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           outputSchema: { ...config.outputSchema, engineState: engineStateField, error: errorField },
         }
       : config;
-    server.registerTool(name, liveConfig, wrapped as unknown as ToolCallback<Input>);
+    register(name, liveConfig, wrapped as unknown as ToolCallback<Input>, fresh);
   }
 
   /**
@@ -571,13 +681,18 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return log === undefined ? undefined : readLogWindow(log, opts);
   }
 
-  /** Mark an instance's engine log now; the returned reader gives the window it gained since,
-   *  capped at `maxLines`, or undefined without a log. */
-  function logSince(instance: number) {
-    const since = readInstanceLog(instance, { maxLines: 1 })?.nextLine;
+  /** Where an instance's engine log ends now, as a read_log sinceLine; undefined without a log. */
+  function logMark(instance: number): number | undefined {
+    return readInstanceLog(instance, { maxLines: 1 })?.nextLine;
+  }
+
+  /** Mark an instance's engine log now (or at `since`); the returned reader gives the window it
+   *  gained since, capped at `maxLines`, or undefined without a log. */
+  function logSince(instance: number, since = logMark(instance)) {
     return (maxLines: number, pattern?: string) =>
       since === undefined ? undefined : readInstanceLog(instance, { sinceLine: since, maxLines, pattern });
   }
+  type LogReader = ReturnType<typeof logSince>;
 
   /** An instance's netgame role from its stored launch args; undefined offline or attached. */
   const netInfo = (instance: number) => netRole(ctx.launchArgsFor(instance)?.args.extraArgs, engine.netgame);
@@ -722,11 +837,32 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return parsed;
   }
 
-  /** Both sides of a `step_until` condition, or why they can't be read. */
+  /** `findactors` with find_actors' filters, or its output when it failed. */
+  async function findActors(
+    client: BridgeClient,
+    f: { class?: string; tid?: number; radius?: number; limit?: number; detail?: boolean; flags?: z.infer<typeof actorFlags> },
+  ): Promise<{ found: FoundActors } | { output: string[] }> {
+    // The engine cuts to its limit before the host sees rows, so a flag filter
+    // fetches every row (limit=0 is unlimited) and cuts after filtering.
+    const want = f.flags && Object.keys(f.flags).length > 0 ? f.flags : undefined;
+    const args = kvArgs({ class: f.class, tid: f.tid, radius: f.radius, limit: want ? 0 : f.limit, detail: f.detail ? 1 : undefined });
+    const output = await client.runCommand(command("findactors", ...args));
+    const parsed = parseFoundReply(output);
+    if (!parsed) return { output };
+    return { found: want ? filterFound(parsed, want, f.limit ?? FIND_ACTORS_LIMIT) : parsed };
+  }
+
+  /** Both sides of a comparing condition, or why they can't be read. */
   async function readCondition(
     client: BridgeClient,
-    c: Condition,
+    c: Exclude<Condition, { kind: "log" }>,
   ): Promise<{ left: number; right: number } | { error: string }> {
+    if (c.kind === "actors") {
+      // limit=1 is enough: past it the engine, or the flag filter, still reports the total.
+      const got = await findActors(client, { class: c.class, tid: c.tid, radius: c.radius, limit: 1, flags: c.flags });
+      if ("output" in got) return { error: failureText(got.output) };
+      return { left: got.found.truncated?.total ?? got.found.actors.length, right: c.value };
+    }
     if (c.kind === "player") {
       const state = await readPlayerState(client);
       if (!state) return { error: "no player (not in a level?)" };
@@ -744,6 +880,25 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           ? await readMapArray(client, c.name, c.index)
           : await readAcsVar(client, c.scope, c.index);
     return "error" in read ? read : { left: read.value, right: c.value };
+  }
+
+  /** Whether a condition holds, with both sides and the comparison as text; a log condition reads `log`'s window. */
+  async function checkCondition(
+    client: BridgeClient,
+    c: Condition,
+    log: LogReader,
+  ): Promise<{ met: boolean; left: number; right: number; text: string } | { error: string }> {
+    if (c.kind === "log") {
+      // It runs no command, so no sentinel would refresh the maptime a stepping caller counts by.
+      await client.refreshStatus();
+      const win = log(1, c.pattern);
+      if (!win) return { error: `no engine log to match /${c.pattern}/ in (launch_instance writes one)` };
+      const n = win.lines.length + win.omitted;
+      return { met: n > 0, left: n, right: 1, text: `${n} line(s) matching /${c.pattern}/` };
+    }
+    const r = await readCondition(client, c);
+    if ("error" in r) return r;
+    return { ...r, met: COMPARE[c.op](r.left, r.right), text: `${r.left} ${c.op} ${r.right}` };
   }
 
   function postMenuKey(
@@ -947,6 +1102,136 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   registerLive(
+    "place_actor",
+    {
+      title: "Move, turn or launch an actor",
+      description:
+        "Run `mcp_place`: move, turn and/or launch any live actor in one call and report it after (fromx/fromy/fromz: where it was). Target: tid and index, as set_actor_prop's. " +
+        "x/y/z in map units: a missing x or y keeps the current one; without z, a given x or y puts the actor on the floor there, else z stays. " +
+        "The move is Thing_Move's fit-tested teleport, judged as summon_at judges a spawn, and never telefrags: where the actor wouldn't fit it is refused, reporting what blocks (an actor, a line or the floor/ceiling fit), and then nothing is applied, angle and velocity included. force skips that test; fog spawns teleport fog at both spots. " +
+        "The test is a real collision check, as summon_at's: an overlapped TOUCHY actor dies, a BUMPSPECIAL actor's special can fire and a missile damages what it overlaps. " +
+        "angle and pitch in degrees (0 east, 90 north; pitch negative looks up). vx/vy/vz in map units per tic set the velocity (a missing axis keeps its own), or add to it with addVelocity. " +
+        "Applied in that order (position, facing, velocity), so a move-and-launch isn't stopped. " +
+        appendNote(`The write is direct, so it works while paused, but the actor only acts on it once the sim runs. ${notes.actorWrites}`, notes.placeActor),
+      inputSchema: {
+        instance: instanceArg,
+        ...targetArgs,
+        x: mapCoord().optional(),
+        y: mapCoord().optional(),
+        z: mapCoord().optional(),
+        angle: z.number().finite().optional(),
+        pitch: z.number().min(-90).max(90).optional(),
+        vx: mapCoord().optional(),
+        vy: mapCoord().optional(),
+        vz: mapCoord().optional(),
+        addVelocity: z.boolean().optional(),
+        fog: z.boolean().optional(),
+        force: z.boolean().optional(),
+      },
+    },
+    async ({ instance, tid, index, x, y, z: zPos, angle, pitch, vx, vy, vz, addVelocity, fog, force }) => {
+      const moving = [x, y, zPos].some((v) => v !== undefined);
+      const launching = [vx, vy, vz].some((v) => v !== undefined);
+      const refusal = targetRefusal(tid, index);
+      if (refusal) return fail(refusal);
+      if (!moving && !launching && angle === undefined && pitch === undefined) {
+        return fail("give at least one of x, y, z, angle, pitch, vx, vy, vz");
+      }
+      if ((fog || force) && !moving) return fail("fog and force need x, y or z");
+      if (addVelocity && !launching) return fail("addVelocity needs vx, vy or vz");
+      const kv = kvArgs({
+        x,
+        y,
+        z: zPos,
+        angle,
+        pitch,
+        vx,
+        vy,
+        vz,
+        addvel: addVelocity ? 1 : undefined,
+        fog: fog ? 1 : undefined,
+        force: force ? 1 : undefined,
+      });
+      const client = await ctx.clientFor(instance);
+      const output = await client.runCommand(command("mcp_place", tid ?? 0, index ?? 0, ...kv));
+      return kvReply(
+        output,
+        "placed",
+        (rec) =>
+          `${rec.class}#${rec.tid} at ${rec.x},${rec.y},${rec.z} (from ${rec.fromx},${rec.fromy},${rec.fromz}), ` +
+          `angle ${rec.angle}, pitch ${rec.pitch}, velocity ${rec.vx},${rec.vy},${rec.vz}${markerText(rec, ["fog", "forced"])}`,
+      );
+    },
+  );
+
+  registerLive(
+    "remove_actor",
+    {
+      title: "Remove an actor",
+      description:
+        "Run `mcp_remove`: remove the actor with this tid (index: the nth sharing it) or, with all, every actor with it, as Thing_Remove does: no death, and it leaves the kill/item totals. " +
+        "A live player's body is never removed; it is reported as skipped. The reply lists each removed actor as it was, plus the count. " +
+        appendNote(notes.actorWrites, notes.removeActor),
+      inputSchema: {
+        instance: instanceArg,
+        tid: z.number().int().min(1).describe("The actor's TID; required, so the player's body can't be named."),
+        index: targetArgs.index,
+        all: z.boolean().optional().describe("Remove every actor with the tid; can't be combined with index."),
+      },
+    },
+    async ({ instance, tid, index, all }) => {
+      if (all && index !== undefined) return fail("all and index can't be combined");
+      const client = await ctx.clientFor(instance);
+      const output = await client.runCommand(command("mcp_remove", tid, index ?? 0, ...kvArgs({ all: all ? 1 : undefined })));
+      const total = parseKvLines(output, "removed_total")[0];
+      if (!total) return failed(output);
+      const removed = parseKvLines(output, "removed");
+      const { text, skipped } = describeRemoved(total, removed);
+      return { content: [{ type: "text", text }], structuredContent: { removed, count: total.count, ...(skipped && { skipped }) } };
+    },
+  );
+
+  registerLive(
+    "damage_actor",
+    {
+      title: "Damage an actor",
+      description:
+        "Run `mcp_damage`: damage any live actor through the engine's own damage path, as Thing_Damage does: per-type damage factors, pain and death states apply (damageType Extreme forces the extreme death). Target: tid and index, as set_actor_prop's. " +
+        "amount 1..1000000; 1000000 is telefrag damage and gets through god mode and invulnerability. " +
+        "sourceTid (0 = the console player's body) names who dealt it: the target turns on it (target= in find_actors) and, in a netgame, a player source gets the kill credit; single player credits every counted kill to player 0 whatever the source. " +
+        "The reply reports hp before and after (oldhp=, dealt=), nodamage=1 when nothing was lost (not shootable, invulnerable, god mode or a damage factor of 0), died=1 and removed=1. A dead target is refused; heal with set_actor_prop health. " +
+        `The write is direct, so it works while paused; the actor reacts once the sim runs. ${notes.actorWrites}`,
+      inputSchema: {
+        instance: instanceArg,
+        ...targetArgs,
+        amount: z.number().int().min(1).max(1000000),
+        damageType: classArg.optional().describe("A damage type name such as Fire or Extreme; default None."),
+        sourceTid: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Who dealt it: an actor's TID, 0 = the console player's body; omitted = no source."),
+      },
+    },
+    async ({ instance, tid, index, amount, damageType, sourceTid }) => {
+      const refusal = targetRefusal(tid, index) ?? tokenRefusal("damageType", damageType);
+      if (refusal) return fail(refusal);
+      const client = await ctx.clientFor(instance);
+      const output = await client.runCommand(
+        command("mcp_damage", tid ?? 0, index ?? 0, amount, ...kvArgs({ type: damageType, source: sourceTid })),
+      );
+      return kvReply(
+        output,
+        "damaged",
+        (rec) =>
+          `${rec.class}#${rec.tid} took ${rec.dealt} ${rec.type} damage: hp ${rec.oldhp} -> ${rec.hp}` +
+          markerText(rec, ["nodamage", "died", "removed"]),
+      );
+    },
+  );
+
+  registerLive(
     "set_cheat",
     {
       title: "Set a cheat on or off",
@@ -992,42 +1277,71 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
+  /** give/take's arguments: `tid` switches from the stock command to `mcp_inv`. */
+  const inventoryArgs = {
+    instance: instanceArg,
+    item: classArg,
+    amount: z.number().int().positive().optional(),
+    ...targetArgs,
+  };
+  /** give/take's description from "With a tid" on; `held` says what held= names for that op. */
+  const inventoryTidText = (acs: string, held: string) =>
+    `With a tid (0 = the console player's body; index as set_actor_prop's), run \`mcp_inv\` on any live actor instead, as ACS ${acs} does (class names only), and report held=, ${held}, with before= and after=. `;
+  const inventoryClose = appendNote(`The write is direct, so it works while paused. ${notes.actorWrites}`, notes.inventory);
+
+  /** give/take: the stock command without a tid, else `mcp_inv` on the target, reporting before and after. */
+  async function runInventory(
+    op: "give" | "take",
+    done: string,
+    { instance, item, amount, tid, index }: { instance: number; item: string; amount?: number; tid?: number; index?: number },
+  ) {
+    const refusal = targetRefusal(tid, index) ?? (tid === undefined ? undefined : tokenRefusal("item", item));
+    if (refusal) return fail(refusal);
+    const client = await ctx.clientFor(instance);
+    const amountArg = amount !== undefined ? [amount] : [];
+    if (tid === undefined) {
+      const output = await client.runCommand(command(op, item, ...amountArg));
+      return { content: [{ type: "text" as const, text: output.join("\n") || `${done} ${item}` }] };
+    }
+    const output = await client.runCommand(command("mcp_inv", tid, index ?? 0, op, item, ...amountArg));
+    return kvReply(output, "inv", (rec) => {
+      const refused = rec.ok === 0 ? " (pickup refused)" : "";
+      return `${op} ${rec.item} on ${rec.class}#${rec.tid}: ${rec.held} ${rec.before} -> ${rec.after}${refused}`;
+    });
+  }
+
   registerLive(
     "give",
     {
       title: "Give item",
-      description: "Give an inventory item to the player.",
-      inputSchema: {
-        instance: instanceArg,
-        item: z.string().min(1),
-        amount: z.number().int().positive().optional(),
-      },
+      description:
+        "Give an inventory item. Without a tid, the stock `give` command to the player (cheat names such as all, weapons and health work). " +
+        inventoryTidText(
+          "GiveInventory",
+          "the class the amount is kept under (armor: the player's armor class; an ammo pickup: its parent ammo, e.g. ClipBox: Clip; a Health item: health; anything else: itself)",
+        ) +
+        "amount (default 1) is ACS's: it sets the item's amount, unclamped, so a Health item heals that much (a Medikit with the default 1 heals 1), an ammo pickup gives that many rounds (times the skill's ammo factor), not its pickup size (a ClipBox with the default 1 gives 1 Clip), and an armor pickup's armor is multiplied by it. " +
+        "With a tid, a bare Armor gives nothing, as in ACS (it is a BasicArmorPickup worth 0), so name a real armor class such as GreenArmor or BlueArmor. " +
+        "An item that turns into something else on pickup (a powerup giver, custom inventory) can read 0 -> 0. ok=0 when the pickup was refused (e.g. health already at max). A given weapon isn't raised. " +
+        inventoryClose,
+      inputSchema: inventoryArgs,
     },
-    async ({ instance, item, amount }) => {
-      const client = await ctx.clientFor(instance);
-      const cmd = amount === undefined ? command("give", item) : command("give", item, amount);
-      const output = await client.runCommand(cmd);
-      return { content: [{ type: "text", text: output.join("\n") || `gave ${item}` }] };
-    },
+    (args) => runInventory("give", "gave", args),
   );
 
   registerLive(
     "take",
     {
       title: "Take item",
-      description: "Remove an inventory item from the player.",
-      inputSchema: {
-        instance: instanceArg,
-        item: z.string().min(1),
-        amount: z.number().int().positive().optional(),
-      },
+      description:
+        "Remove an inventory item. Without a tid, the stock `take` command on the player. " +
+        inventoryTidText("TakeInventory", "the item class itself, the only class looked up") +
+        "So taking an ammo or armor pickup or a Health item (ClipBox, GreenArmor, Medikit) takes nothing: name what is held (Clip, Armor). " +
+        "amount (default 1) is taken from the item itself; ammo and armor stay in the inventory at 0. " +
+        inventoryClose,
+      inputSchema: inventoryArgs,
     },
-    async ({ instance, item, amount }) => {
-      const client = await ctx.clientFor(instance);
-      const cmd = amount === undefined ? command("take", item) : command("take", item, amount);
-      const output = await client.runCommand(cmd);
-      return { content: [{ type: "text", text: output.join("\n") || `took ${item}` }] };
-    },
+    (args) => runInventory("take", "took", args),
   );
 
   registerLive(
@@ -1216,6 +1530,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "screenshot",
     {
+      scenario: SCENARIO_REFUSALS.image,
       title: "Screenshot",
       description: "Take a screenshot of the game and return it as an image so it can be viewed.",
       inputSchema: { instance: instanceArg },
@@ -1409,6 +1724,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "verify_menu",
     {
+      scenario: SCENARIO_REFUSALS.image,
       title: "Open, navigate, and screenshot a menu",
       description:
         "Open a menu (via a console command like `menu_options`), apply navigation steps, then return a screenshot to verify it.",
@@ -1582,7 +1898,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Step until a condition holds",
       description:
-        "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var or player field (x, y, z, angle, floorHeight, sector, light, health, armor) against a number, or a player field against another field (e.g. z == floorHeight). Reports the map tics that actually elapsed. Fails fast with the blocker list if the map tic counter stops for " + STALL_TICS + " tics, and fails if it goes back (a map change). On a netgame the reply adds what pause means for the instance's role" +
+        "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var, player field (x, y, z, angle, floorHeight, sector, light, health, armor) or the count of actors find_actors' class/tid/radius/flags filter matches (a corpse counts unless flags rules it out, e.g. {alive: true}) against a number, or a player field against another field (e.g. z == floorHeight); or, kind log, holds once a line matching pattern (a case-insensitive regex) is printed after the call starts (value is the matching-line count). Reports the map tics that actually elapsed. Fails fast with the blocker list if the map tic counter stops for " + STALL_TICS + " tics, and fails if it goes back (a map change). On a netgame the reply adds what pause means for the instance's role" +
         (clientRuns ? ", and a client is left running instead of paused between chunks." : "."),
       inputSchema: {
         instance: instanceArg,
@@ -1594,7 +1910,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     async ({ instance, condition, maxTics, chunkTics }, extra) => {
       const client = await ctx.clientFor(instance);
       requireCap(client, "time");
-      const read = () => readingOf(client, () => readCondition(client, condition));
+      const log = logSince(instance);
+      const read = () => readingOf(client, () => checkCondition(client, condition, log));
       const first = await read();
       const snap = statusField(client, "maptime");
       if ("error" in snap) return fail(`can't count tics: ${snap.error}`);
@@ -1606,18 +1923,21 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           first,
           step: (n) => runStep(client, instance, n),
           read,
-          done: (r) => "error" in r || COMPARE[condition.op](r.left, r.right),
+          done: (r) => "error" in r || r.met,
           levelChange: "stop",
         }),
       );
       if ("error" in value) return fail(value.error);
+      // A log condition's own status refresh can time out, so only a missing snapshot fails here;
+      // one without maptime is a stall below.
+      const counted = statusField(client, "maptime");
+      if (!client.lastStatus && "error" in counted) return fail(`can't count tics: ${counted.error}`);
       const now = Number(client.lastStatus?.maptime);
       if (end === "stalled") return stalledResult(client, now);
       if (end === "level_change") {
         return fail(`the map changed (maptime went from ${maptime} to ${now}) after ${elapsed} tic(s); the condition was not met`);
       }
-      const met = COMPARE[condition.op](value.left, value.right);
-      const cmp = `${value.left} ${condition.op} ${value.right}`;
+      const { met, text: cmp } = value;
       const head = met ? `met after ${elapsed} tic(s): ${cmp}` : `not met within ${elapsed} tic(s): ${cmp}`;
       const notes = [...capNote({ end, elapsed }, maxTics), ...netPauseNote(net, true)];
       return {
@@ -1897,7 +2217,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   // --- static ACS source index (number <-> name <-> file:line) --------------
-  server.registerTool(
+  register(
     "acs_index",
     {
       title: "Index ACS source",
@@ -1916,7 +2236,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "find_acs_symbol",
     {
       title: "Find ACS symbol",
@@ -1933,7 +2253,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "behavior_names",
     {
       title: "Read ACS names from compiled bytecode",
@@ -1962,16 +2282,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "list_map_exports",
     {
       title: "List exported map variables from compiled bytecode",
       description:
-        "List each ACS module's exported map variables and arrays (MEXP/ARAY chunks) from a WAD, PK3 or compiled .o, with slot index and array size. get_map_var/get_map_array only see exported names, so check here before a launch or pk3 rebuild. `lump` narrows to modules whose name or basename matches (e.g. `mymod` for `acs/mymod.o`); a map's BEHAVIOR also matches `BEHAVIOR` or its map marker.",
+        "List each ACS module's exported map variables and arrays (MEXP/ARAY chunks) from a WAD, PK3, directory or compiled .o, with slot index and array size. These are the names get_map_var/get_map_array find by name; anything else needs their sourceFile. `lump` narrows to modules whose name or basename matches (e.g. `mymod` for `acs/mymod.o`); a map's BEHAVIOR also matches `BEHAVIOR` or its map marker.",
       inputSchema: { file: z.string().min(1), lump: z.string().min(1).optional() },
     },
     async ({ file, lump }) => {
-      const all = collectAcsModules(ctx.io.readFileSync(file), path.basename(file));
+      const all = ctx.deployedModules(file);
       const picked = pickModules(all, lump);
       if (picked.length === 0) {
         const known = all.map((m) => m.name).join(", ") || "none";
@@ -1989,7 +2309,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   // --- savegames & demos -----------------------------------------------------
-  server.registerTool(
+  register(
     "list_saves",
     {
       title: "List savegames",
@@ -2366,22 +2686,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         radius: z.number().int().positive().optional(),
         limit: z.number().int().positive().optional(),
         detail: z.boolean().optional(),
-        flags: z
-          .object(Object.fromEntries([...FLAG_NAMES, "alive"].map((n) => [n, z.boolean().optional()])))
-          .strict()
-          .optional(),
+        flags: actorFlags.optional(),
       },
     },
     async ({ instance, class: cls, tid, radius, limit, detail, flags }) => {
-      // The engine cuts to its limit before the host sees rows, so a flag filter
-      // fetches every row (limit=0 is unlimited) and cuts after filtering.
-      const want = flags && Object.keys(flags).length > 0 ? flags : undefined;
-      const args = kvArgs({ class: cls, tid, radius, limit: want ? 0 : limit, detail: detail ? 1 : undefined });
       const client = await ctx.clientFor(instance);
-      const output = await client.runCommand(command("findactors", ...args));
-      const parsed = parseFoundReply(output);
-      if (!parsed) return failed(output);
-      const found = want ? filterFound(parsed, want, limit ?? FIND_ACTORS_LIMIT) : parsed;
+      const got = await findActors(client, { class: cls, tid, radius, limit, detail, flags });
+      if ("output" in got) return failed(got.output);
+      const { found } = got;
       const cut = found.truncated ? ` (showing ${found.truncated.shown} of ${found.truncated.total})` : "";
       return {
         content: [{ type: "text", text: `${found.actors.length} actor(s) found${cut}` }],
@@ -2430,26 +2742,17 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "profile_scripts",
     {
       title: "Profile ACS scripts",
-      description:
-        "Run `acsprofile` and return per-script/function execution stats (total instructions, runs, avg/min/max).",
+      description: `Run \`acsprofile\` and return per-script/function execution stats (total instructions, runs, avg/min/max). ${profileRows(notes.profileScripts)}`,
       inputSchema: { instance: instanceArg, sort: profileSort, limit: profileLimit },
     },
-    async ({ instance, sort, limit }) => {
-      const client = await ctx.clientFor(instance);
-      const entries = parseAcsProfile(await client.runCommand(profileCommand(sort, limit)));
-      return {
-        content: [{ type: "text", text: `${entries.length} profiled` }],
-        structuredContent: { entries },
-      };
-    },
+    async ({ instance, sort, limit }) => profileEntries(await ctx.clientFor(instance), "", sort, limit),
   );
 
   registerLive(
     "profile_window",
     {
       title: "Profile a time window",
-      description:
-        "Clear ACS profiling, wait N seconds, then return what ran during that window — `what's hot right now` rather than cumulative since map start.",
+      description: `Clear ACS profiling, wait N seconds, then return what ran during that window — \`what's hot right now\` rather than cumulative since map start. ${profileRows(notes.profileScripts)}`,
       inputSchema: {
         instance: instanceArg,
         seconds: z.number().int().min(1).max(30).default(3),
@@ -2463,11 +2766,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       await withProgress(extra, seconds * 1000, `sampling for ${seconds}s`, () =>
         sleep(seconds * 1000),
       );
-      const entries = parseAcsProfile(await client.runCommand(profileCommand(sort, limit)));
-      return {
-        content: [{ type: "text", text: `${entries.length} profiled over ${seconds}s` }],
-        structuredContent: { entries },
-      };
+      return profileEntries(client, ` over ${seconds}s`, sort, limit);
     },
   );
 
@@ -2490,14 +2789,79 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
+  /** The engine's cwd, which relative launch files resolve against: its log sits there. */
+  function launchDir(last: LastLaunch): string {
+    return path.dirname(last.logFile);
+  }
+
+  /** The four map-var tools' sourceFile path (undefined without one), resolving the slot host-side for
+   *  `mcp_mapslot`, which first proves the loaded module is the one resolved. */
+  async function bySourceFile(args: SourceFileArgs, array: boolean) {
+    const { instance, name, index, value, sourceFile, object, includeDirs } = args;
+    if (sourceFile === undefined) {
+      return object !== undefined || includeDirs !== undefined ? fail("object and includeDirs need sourceFile") : undefined;
+    }
+    const client = await ctx.clientFor(instance);
+    requireCap(client, "mapslot");
+    const last = ctx.launchArgsFor(instance);
+    const files = object !== undefined ? [object] : last?.args.files?.map((f) => path.resolve(launchDir(last), f));
+    if (!files?.length) {
+      return fail(`instance ${instance} has no launch files to find the source's build in (attached, or launched without files): pass object, the deployed file`);
+    }
+    const deployed: AcsModule[] = [];
+    for (const f of files) {
+      try {
+        deployed.push(...ctx.deployedModules(f));
+      } catch (e) {
+        return fail(`can't read ${f} to find the source's build in: ${(e as Error).message}`);
+      }
+    }
+    const expr = array ? `${name}[${index}]` : name;
+    const exe = ctx.config.bcc?.trim() || undefined;
+    const res = ctx.io.resolveMapSlot({ sourceFile, expr, exe, includeDirs, deployed, engine });
+    if ("refused" in res) return fail(`${expr} refused by the ${res.guard} check, nothing sent to the engine: ${res.refused}`);
+    const { len, first, md5 } = res.digest;
+    const sent = command("mcp_mapslot", res.slot, ...kvArgs({ v: 1, code: len, first, md5, index: res.index, set: value }));
+    const output = await client.runCommand(sent);
+    const reply = parseMapSlot(output);
+    if (!reply) {
+      const nomatch = parseMapSlotNoMatch(output);
+      if (!nomatch) return failed(output);
+      const marker = res.module.map ? `the BEHAVIOR of map ${res.module.map}` : "a library";
+      return fail(
+        `The loaded module isn't the one resolved: none of the ${nomatch.modules} loaded on map ${nomatch.map} matches ${res.module.name} (${marker}), built from ${sourceFile}. ` +
+          "Another map is loaded, the map has no BEHAVIOR of its own, or the file was rebuilt after launch (relaunch to load it).",
+      );
+    }
+    const echoed = reply.slot === res.slot && reply.index === res.index && (value === undefined || reply.value === value);
+    if (!echoed) return fail(`the engine's reply doesn't echo the slot, index and value sent (${sent}): ${output.join("\n")}`);
+    const at = `slot ${res.slot}${res.index !== undefined ? `[${res.index}]` : ""} of module ${reply.module} ${reply.name}, ${res.module.name}`;
+    const said = value === undefined ? String(reply.value) : `${expr} = ${reply.value}`;
+    return {
+      content: [{ type: "text" as const, text: `${said} (${at})` }],
+      structuredContent: {
+        name,
+        ...(array ? { index } : {}),
+        value: reply.value,
+        slot: res.slot,
+        ...(res.index !== undefined ? { offset: res.index } : {}),
+        module: { id: reply.module, name: reply.name, deployed: res.module.name },
+      },
+    };
+  }
+
   registerLive(
     "get_map_var",
     {
       title: "Get map variable",
-      description: "Read a map-scope ACS variable by name (searched across loaded modules).",
-      inputSchema: { instance: instanceArg, name: acsName },
+      description:
+        "Read a map-scope ACS variable by name (searched across loaded modules, exported names only), or with sourceFile any map var by expression.",
+      inputSchema: { instance: instanceArg, name: acsName, ...sourceFileArgs },
     },
-    async ({ instance, name }) => {
+    async (args) => {
+      const viaSource = await bySourceFile(args, false);
+      if (viaSource) return viaSource;
+      const { instance, name } = args;
       const client = await ctx.clientFor(instance);
       const read = await readMapVar(client, name);
       if ("error" in read) return fail(read.error);
@@ -2509,10 +2873,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "set_map_var",
     {
       title: "Set map variable",
-      description: "Write a map-scope ACS variable by name.",
-      inputSchema: { instance: instanceArg, name: acsName, value: z.number().int() },
+      description: "Write a map-scope ACS variable by name (exported names only), or with sourceFile any map var by expression.",
+      inputSchema: { instance: instanceArg, name: acsName, value: z.number().int(), ...sourceFileArgs },
     },
-    async ({ instance, name, value }) => {
+    async (args) => {
+      const viaSource = await bySourceFile(args, false);
+      if (viaSource) return viaSource;
+      const { instance, name, value } = args;
       const client = await ctx.clientFor(instance);
       const result = parseMapVar(await client.runCommand(command("setmapvar", name, value)));
       if (result === null) {
@@ -2529,10 +2896,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "get_map_array",
     {
       title: "Get map array element",
-      description: "Read one element of a map-scope ACS array by name and index.",
-      inputSchema: { instance: instanceArg, name: acsName, index: z.number().int().min(0) },
+      description:
+        "Read one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, read at name[index]).",
+      inputSchema: { instance: instanceArg, name: acsName, index: z.number().int().min(0), ...sourceFileArgs },
     },
-    async ({ instance, name, index }) => {
+    async (args) => {
+      const viaSource = await bySourceFile(args, true);
+      if (viaSource) return viaSource;
+      const { instance, name, index } = args;
       const client = await ctx.clientFor(instance);
       const read = await readMapArray(client, name, index);
       if ("error" in read) return fail(read.error);
@@ -2547,15 +2918,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     "set_map_array",
     {
       title: "Set map array element",
-      description: "Write one element of a map-scope ACS array by name and index.",
+      description:
+        "Write one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, written at name[index]).",
       inputSchema: {
         instance: instanceArg,
         name: acsName,
         index: z.number().int().min(0),
         value: z.number().int(),
+        ...sourceFileArgs,
       },
     },
-    async ({ instance, name, index, value }) => {
+    async (args) => {
+      const viaSource = await bySourceFile(args, true);
+      if (viaSource) return viaSource;
+      const { instance, name, index, value } = args;
       const client = await ctx.clientFor(instance);
       const result = parseMapArray(
         await client.runCommand(command("setmaparray", name, index, value)),
@@ -2648,7 +3024,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   // --- map geometry (read-only) ---------------------------------------------
-  server.registerTool(
+  register(
     "map_info",
     {
       title: "Map info",
@@ -2669,7 +3045,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "get_sector",
     {
       title: "Get sector",
@@ -2689,7 +3065,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "get_linedef",
     {
       title: "Get linedef",
@@ -2713,7 +3089,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "find_sectors_by_tag",
     {
       title: "Find sectors by tag",
@@ -2880,21 +3256,25 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return logFile === undefined ? undefined : readIfExists(stderrLogPath(logFile));
   }
 
-  /** Store `args` for relaunch, pick a port, spawn and attach. */
-  async function launchWith(
-    instance: number,
-    exe: string,
-    args: LaunchArgs,
-    extra: ToolExtra,
-  ): Promise<{ port: number; logFile: string; isolatedConfig?: string; error?: string }> {
+  interface Launched {
+    port: number;
+    logFile: string;
+    isolatedConfig?: string;
+    /** Spawned with wait: false, so not attached yet; `pid` is the child's. */
+    pending?: { pid?: number };
+    error?: string;
+  }
+
+  /** Store `args` for relaunch, pick a port, spawn and (unless `wait: false`) attach. */
+  async function launchWith(instance: number, exe: string, args: LaunchArgs, extra: ToolExtra): Promise<Launched> {
     // Pick the first free port at/above the conventional one for this instance, so a
     // stale engine (or anything) squatting the default port can't cause a mis-attach.
     const port = await ctx.io.findFreePort(ctx.portFor(instance));
     const logFile = path.join(path.dirname(exe), `mcp-bridge-${port}.log`);
     ctx.rememberLaunchArgs(instance, args, port, logFile);
     ctx.rememberLaunch(instance, port, logFile);
-    // LaunchOptions.config is a path, so the mode must not ride along in the spread.
-    const { config, ...options } = args;
+    // LaunchOptions.config is a path, so the mode must not ride along in the spread; nor is wait an option.
+    const { config, wait, ...options } = args;
     const isolateConfig = config === "isolated";
     const isolatedConfig = isolateConfig ? isolatedConfigPathFor(engine, configPathFor(engine, exe), port) : undefined;
     const launch = { id: instance, exe, cwd: path.dirname(exe), port, logFile, isolateConfig, ...options };
@@ -2902,6 +3282,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const child = ctx.registry.spawn(launch, ctx.io.launchIo);
       // The child is the engine: a failed launch still matches its crash report, and an attach checks identity.
       ctx.rememberEngine(instance, child.pid);
+      if (wait === false) return { port, logFile, isolatedConfig, pending: { pid: child.pid } };
       // The engine can take tens of seconds to boot a big mod and open its
       // bridge — well past a default client timeout, so report progress.
       const client = await withProgress(extra, 42000, "waiting for the engine", () =>
@@ -2926,18 +3307,34 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return { port, logFile, isolatedConfig };
   }
 
+  /** A wait: false launch whose engine may still open its bridge; a pending child that died can't, so it isn't one. */
+  function waitingLaunch(instance: number): boolean {
+    const pid = ctx.registry.childPid(instance);
+    return ctx.registry.pending(instance) && (pid === undefined || ctx.io.alive(pid));
+  }
+
   /** `, config <path>` for an isolated instance, so the caller can find (or pgrep) its ini. */
   const configNote = (r: { isolatedConfig?: string }) => (r.isolatedConfig ? `, config ${r.isolatedConfig}` : "");
+  /** The reply line a `wait: false` launch adds, none otherwise. */
+  const pendingLines = (r: Launched) =>
+    r.pending
+      ? [`Not attached yet${r.pending.pid !== undefined ? ` (engine PID ${r.pending.pid})` : ""}: its first tool call waits for the bridge and attaches.`]
+      : [];
 
   registerLive(
     "launch_instance",
     {
+      scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Launch a ${engine.displayName} instance`,
       description:
-        `Spawn a bridge-enabled ${engine.displayName} process with the given options and attach to it. Requires ${ctx.env("EXE")} to be set.`,
+        `Spawn a bridge-enabled ${engine.displayName} process with the given options and attach to it (with wait: false, on its first tool call instead). Requires ${ctx.env("EXE")} to be set.`,
       inputSchema: { instance: instanceArg, ...launchArgsSchema },
     },
     async ({ instance, iwad, ...rest }, extra) => {
+      // Its bridge port isn't open, so a second launch would pick that port and orphan the first engine.
+      if (waitingLaunch(instance)) {
+        return fail(`Instance ${instance} is still waiting from a wait: false launch; kill_instance or relaunch_instance it first.`);
+      }
       const checked = launchableExe();
       if ("error" in checked) return fail(checked.error);
       const args = { iwad: iwad ?? ctx.config.iwad, ...rest };
@@ -2945,18 +3342,19 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       if (invalid) return fail(invalid);
       const r = await launchWith(instance, checked.exe, args, extra);
       if (r.error) return fail(r.error);
-      return {
-        content: [{ type: "text", text: `launched instance ${instance} on bridge port ${r.port}${configNote(r)}` }],
-      };
+      const verb = r.pending ? "spawned" : "launched";
+      const lines = [`${verb} instance ${instance} on bridge port ${r.port}${configNote(r)}`, ...pendingLines(r)];
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     },
   );
 
   registerLive(
     "relaunch_instance",
     {
+      scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Relaunch a ${engine.displayName} instance with its last options`,
       description:
-        `Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config), e.g. to pick up ${notes.reloadLumps} edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs. Refuses for an attached instance.`,
+        `Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config, wait), e.g. to pick up ${notes.reloadLumps} edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs. Refuses for an attached instance.`,
       inputSchema: {
         instance: instanceArg,
         ...launchArgsSchema,
@@ -2975,10 +3373,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const invalid = launchArgsError(args);
       if (invalid) return fail(invalid);
 
-      let stopped = "was not running";
-      if (ctx.registry.has(instance)) {
-        stopped = (await ctx.registry.quit(instance)) === "clean" ? "old engine stopped" : "force-killed";
-      }
+      const quit = await ctx.quit(instance);
+      const stopped = { clean: "old engine stopped", forced: "force-killed", absent: "was not running", unbridged: "killed before its bridge came up" }[quit];
       ctx.forgetInstance(instance);
       // A force-killed engine can hold its port briefly; wait so the relaunch keeps it.
       await pollUntil(() => ctx.io.findFreePort(last.port), (p) => p === last.port, {
@@ -2988,7 +3384,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
 
       const r = await launchWith(instance, checked.exe, args, extra);
       if (r.error) return fail(r.error);
-      const lines = [`relaunched instance ${instance} on bridge port ${r.port}${configNote(r)} (${stopped})`];
+      const lines = [
+        `relaunched instance ${instance} on bridge port ${r.port}${configNote(r)} (${stopped})`,
+        ...pendingLines(r),
+      ];
       if (r.port !== last.port) {
         lines.push(`The bridge port changed from ${last.port}, so the engine log is now ${r.logFile}.`);
       }
@@ -3007,14 +3406,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "attach_instance",
     {
+      scenario: SCENARIO_REFUSALS.lifecycle,
       title: "Attach to an engine you started yourself",
       description:
         `Connect to a bridge-patched ${engine.displayName} that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port. Refuses an instance whose launched engine is still running.`,
       inputSchema: { instance: instanceArg, port: z.number().int().positive().optional() },
     },
     async ({ instance, port }) => {
+      // Rebinding would drop its port and launch options (relaunch, netgame role).
       const launched = ctx.registry.childPid(instance);
-      if (launched !== undefined && ctx.io.alive(launched)) {
+      const running = launched !== undefined && ctx.io.alive(launched);
+      if (waitingLaunch(instance)) {
+        return fail(`Instance ${instance} was launched with wait: false; call any tool on it to attach.`);
+      }
+      if (running) {
         return fail(
           `Instance ${instance} runs an engine this session launched (PID ${launched}); kill_instance it first, or attach another instance number.`,
         );
@@ -3088,7 +3493,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return { instance: n, joined: true, ...(slot !== undefined && { slot }) };
   }
 
-  server.registerTool(
+  register(
     "join_game",
     {
       title: "Join netgame clients into the game",
@@ -3128,29 +3533,32 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "kill_instance",
     {
+      scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Kill a ${engine.displayName} instance`,
       description:
-        "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit.",
+        "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit. A wait: false instance not attached yet is attached first if its bridge is up; one whose bridge isn't up is force-killed at once.",
       inputSchema: { instance: instanceArg },
     },
     async ({ instance }) => {
-      const result = await ctx.registry.quit(instance);
+      const result = await ctx.quit(instance);
       ctx.forgetInstance(instance);
       const text = {
         clean: `instance ${instance} quit cleanly`,
         forced: `instance ${instance} did not quit on request — force-killed`,
         absent: `no instance ${instance} attached, nothing to kill`,
+        unbridged: `instance ${instance} killed before its bridge came up`,
       }[result];
       return { content: [{ type: "text", text }] };
     },
   );
 
-  server.registerTool(
+  register(
     "reset",
     {
+      scenario: SCENARIO_REFUSALS.lifecycle,
       title: "Reset — reap this session's engine instances",
       description:
         "Kill every instance this session launched, and reap engines ORPHANED by earlier sessions (whose launcher is gone) that could otherwise squat bridge ports. Engines belonging to another running editor window are left alone. Pass all:true to also kill those — only do that if you know no other session is using this engine build.",
@@ -3187,7 +3595,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "get_startup_errors",
     {
       title: "Get engine startup errors",
@@ -3221,7 +3629,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "read_log",
     {
       title: "Read the engine console log",
@@ -3258,7 +3666,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "wait_for_log",
     {
       title: "Wait for a line in the engine log",
@@ -3307,7 +3715,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "read_marks",
     {
       title: "Read playtest marks",
@@ -3362,7 +3770,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  server.registerTool(
+  register(
     "get_crash",
     {
       title: "Get the last engine crash backtrace",
@@ -3390,6 +3798,93 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         written: crash.written,
       });
       return notThisEngine ? noCrash(text) : { content: [{ type: "text", text }] };
+    },
+  );
+
+  register(
+    "process_stats",
+    {
+      title: "Engine process memory",
+      description:
+        "Read the instance's engine process memory from /proc/<pid>/status (Linux only): vmRssKib (resident now), vmHwmKib (peak resident since start) and vmSizeKib (virtual), all KiB, plus the pid and the kernel's process name (cut to 15 characters). Reads the file directly, never the bridge, so a busy or hung engine still answers. " +
+        "Fails, never reports zeros, when this session knows no engine PID for the instance (not launched or attached here, or killed since), the process has exited, or the file is unreadable or lacks those fields (no /proc, a zombie), or the process name isn't the engine executable's (a server outside the engine's PID namespace sees another process at that PID).",
+      inputSchema: { instance: instanceArg },
+    },
+    async ({ instance }) => {
+      const pid = ctx.enginePidFor(instance);
+      if (pid === undefined) {
+        return fail(`No engine PID known for instance ${instance}: launch it with launch_instance or attach with attach_instance.`);
+      }
+      if (!ctx.io.alive(pid)) return fail(`Instance ${instance}'s engine (PID ${pid}) is not running.`);
+      const file = procStatusPath(pid);
+      let text: string;
+      try {
+        text = ctx.io.readTextSync(file);
+      } catch (e) {
+        return fail(`Can't read ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      const mem = parseProcMemory(text);
+      if ("missing" in mem) return fail(`${file} has no ${mem.missing.join("/")} line (a zombie or kernel thread has none).`);
+      const name = procName(text);
+      const mismatch = ctx.config.exe && procMismatch(pid, name, ctx.config.exe);
+      if (mismatch) return fail(mismatch);
+      return {
+        content: [{ type: "text", text: `PID ${pid} (${name ?? "?"}): VmRSS ${mem.vmRssKib} KiB, VmHWM ${mem.vmHwmKib} KiB, VmSize ${mem.vmSizeKib} KiB` }],
+        structuredContent: { pid, name, ...mem },
+      };
+    },
+  );
+
+  // --- scenarios ----------------------------------------------------------------
+  // Image tools last, beside the screenshot_file aside.
+  const refusedFor = (why: string) => tools.refused().filter((n) => tools.refusal(n) === why);
+  const refused = [...refusedFor(SCENARIO_REFUSALS.lifecycle), ...refusedFor(SCENARIO_REFUSALS.image)].join(", ");
+  registerLive(
+    "run_scenario",
+    {
+      scenario: SCENARIO_REFUSALS.nested,
+      title: "Run a batch of tool calls in one reply",
+      description:
+        `Run up to ${MAX_STEPS} steps on one instance inside the server and return every result in one reply, instead of a round trip per call: setup bursts, summon waves, map-array sweeps, step-then-check loops. ` +
+        `A step is {call, args}, any instance tool by name with its own args (the scenario's instance is used, so args carry none); {expect: condition}, which fails when the condition doesn't hold; or {repeat: [call and expect steps], until?: condition, maxIterations (up to ${MAX_ITERATIONS})}, which runs its body until the condition holds after a pass and fails if it never does (without until, exactly maxIterations passes). Conditions are step_until's; a log condition counts lines printed since the scenario began. E.g. {repeat: [{call: "step", args: {tics: 5}}], until: {kind: "actors", class: "DoomImp", flags: {alive: true}, op: "==", value: 0}, maxIterations: 40} runs until every imp is dead (without the alive flag a corpse still counts). ` +
+        `Every call step's tool and args are checked against that tool's own schema (an unknown arg too) before anything runs, so a typo in a late step drives nothing; ${refused} (screenshot_file stands in for a frame) and tools without an instance are refused. Without sinceLine, a read_log step reads on from the last read_log (the first from where the scenario began), and a wait_for_log step waits for a line printed since the scenario began, not since launch. A wait_for_log that times out is not a failed step (its reply is no error); follow it with {expect: {kind: "log", ...}} when the run should stop there. ` +
+        `onFail stop (default) ends the run at the first failed step (an error reply, an unmet expect or until); continue runs the rest. A thrown error, a client cancel, ${MAX_CALLS} calls in all, or maxSeconds of wall clock end it either way, and a run that ended at a failure is an error reply. These are checked between calls, so one long call (wait_for_log, step_until, watch_actors, input_timeline) can run past maxSeconds by its own timeout. ` +
+        `The reply is structured: ok, failedAt (the first failure), calls, maptimeStart and maptimeEnd (the map tic counter around the run: count elapsed tics by these, since a step's tics are asked for, not measured, and an engine's step can run short; a map loaded mid-run restarts the counter, and a note says so when it ends below where it began), and per step its index, ok, text (cut at ${STEP_TEXT_CHARS} chars) and structured result (arrays cut to ${STEP_ROWS} rows, fewer until it fits ${STEP_JSON_CHARS} chars, with omitted counts and a hint to call that tool on its own); a repeat keeps its last pass's results and its iteration count. Past ${REPLY_CHARS} chars of step results, later steps keep only their kind and ok, and a failed one its text's first line, cut at ${SUMMARY_CHARS} chars.`,
+      inputSchema: { instance: instanceArg, ...scenarioShape(conditionArg) },
+    },
+    async ({ instance, steps, onFail, maxSeconds }, extra) => {
+      const shape = (call: string) => tools.shape(call);
+      const refusalOf = (call: string) => tools.refusal(call);
+      // Before the attach, so a refused scenario leaves a pending instance alone.
+      const refusal = scenarioRefusal({ shape, refusal: refusalOf }, { instance, steps, onFail, maxSeconds });
+      if (refusal) return fail(refusal);
+      const client = await ctx.clientFor(instance);
+      const start = logMark(instance);
+      const log = logSince(instance, start);
+      // One heartbeat for the whole run: inner tools reporting on the same token would send it backwards.
+      const inner = { ...extra, _meta: { ...extra._meta, progressToken: undefined } };
+      const port: ScenarioPort<Condition> = {
+        shape,
+        refusal: refusalOf,
+        invoke: (call, args) => tools.invoke(call, args, inner),
+        evalCondition: (c) => checkCondition(client, c, log),
+        maptime: async () => {
+          await client.refreshStatus();
+          const t = Number(client.lastStatus?.maptime);
+          return Number.isNaN(t) ? undefined : t;
+        },
+        logStart: start,
+        signal: extra.signal,
+        now: () => Date.now(),
+      };
+      const out = await withProgress(extra, maxSeconds * 1000, "running scenario", () =>
+        runScenario(port, { instance, steps, onFail, maxSeconds }),
+      );
+      return {
+        ...(out.halted && { isError: true }),
+        content: [{ type: "text", text: describeScenario(out.result) }],
+        structuredContent: { ...out.result },
+      };
     },
   );
 }

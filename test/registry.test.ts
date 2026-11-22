@@ -11,7 +11,7 @@ import {
   type LaunchConfig,
   type LaunchIo,
 } from "../src/process/registry.js";
-import { EngineExitedError, LaunchSetupError, type ChildExit } from "../src/process/registry.js";
+import { EngineExitedError, LaunchSetupError, PortWaitError, type ChildExit } from "../src/process/registry.js";
 
 /** launch_instance's sequence: spawn, then attach (reaping the child on failure). */
 function launch(registry: InstanceRegistry, config: LaunchConfig, io: LaunchIo) {
@@ -401,22 +401,97 @@ describe("InstanceRegistry", () => {
     });
   });
 
-  it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
-    let killed = 0;
-    const io: LaunchIo = {
-      spawn: () => ({ pid: 123, kill: () => void killed++ }),
-      waitForPort: () => Promise.reject(new Error("never opened")),
-      clearQuarantine: () => {},
-      ensureDir: () => {},
-      seedConfig: () => {},
-    };
-    registry = new InstanceRegistry(engine);
-    expect(registry.childPid(1)).toBeUndefined();
-    registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
-    expect(registry.childPid(1)).toBe(123);
-    await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
-    expect(killed).toBe(1);
-    expect(registry.childPid(1)).toBeUndefined();
+  describe("spawn without waiting (wait: false)", () => {
+    /** A LaunchIo whose port wait is decided by `port`, recording kills. */
+    function pendingIo(port: () => Promise<void>, pid: number | undefined = 123, exited?: Promise<ChildExit>) {
+      const seen = { killed: 0, waits: 0 };
+      const io: LaunchIo = {
+        spawn: () => ({ pid, kill: () => void seen.killed++, exited }),
+        waitForPort: () => {
+          seen.waits++;
+          return port();
+        },
+        clearQuarantine: () => {},
+        ensureDir: () => {},
+        seedConfig: () => {},
+      };
+      return { io, seen };
+    }
+
+    it("spawn registers the child with no client, and attachSpawned attaches it later", async () => {
+      bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 123 } });
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(async () => {});
+      const child = registry.spawn({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+      expect(child.pid).toBe(123);
+      expect(seen.waits).toBe(0);
+      expect(registry.pending(1)).toBe(true);
+      expect(registry.has(1)).toBe(false);
+      const client = await registry.attachSpawned({ id: 1, port: bridge.port }, io);
+      expect(registry.get(1)).toBe(client);
+      expect(registry.pending(1)).toBe(false);
+    });
+
+    it("a failed attach leaves the child running and pending", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(() => Promise.reject(new Error("bridge port 127.0.0.1:1 never opened")));
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+      const err = await registry.attachSpawned({ id: 1, port: 1 }, io).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PortWaitError);
+      expect((err as Error).message).toBe("bridge port 127.0.0.1:1 never opened");
+      expect(seen.killed).toBe(0);
+      expect(registry.pending(1)).toBe(true);
+    });
+
+    it("attachOrKill reaps the child on a failed attach; childPid names the child only until then", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(() => Promise.reject(new Error("never opened")));
+      expect(registry.childPid(1)).toBeUndefined();
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+      expect(registry.childPid(1)).toBe(123);
+      await expect(registry.attachOrKill({ id: 1, port: 1 }, io)).rejects.toThrow("never opened");
+      expect(seen.killed).toBe(1);
+      expect(registry.childPid(1)).toBeUndefined();
+      expect(registry.pending(1)).toBe(false);
+    });
+
+    it("a non-Error port-wait rejection keeps its text", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io } = pendingIo(() => Promise.reject("boom"));
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+      await expect(registry.attachSpawned({ id: 1, port: 1 }, io)).rejects.toThrow(new PortWaitError("boom"));
+    });
+
+    it("an exited child fails the attach at once, still registered", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(() => new Promise<void>(() => {}), 5, Promise.resolve({ code: 1, signal: null }));
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+      await expect(registry.attachSpawned({ id: 1, port: 1 }, io)).rejects.toBeInstanceOf(EngineExitedError);
+      expect(seen.killed).toBe(0);
+      expect(registry.pending(1)).toBe(true);
+    });
+
+    it("a squatter on the port is detached, not killed, and the child stays pending", async () => {
+      bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", pid: 999 } });
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(async () => {});
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: bridge.port }, io);
+      await expect(registry.attachSpawned({ id: 1, port: bridge.port }, io)).rejects.toThrow(/stale instance is squatting/);
+      expect(seen.killed).toBe(0);
+      expect(registry.pending(1)).toBe(true);
+    });
+
+    it("quit force-kills a pending child after the wait, since nothing could ask it to quit", async () => {
+      registry = new InstanceRegistry(engine);
+      const { io, seen } = pendingIo(async () => {});
+      registry.spawn({ id: 1, exe: "z", cwd: ".", port: 1 }, io);
+      const sleeps: number[] = [];
+      const result = await registry.quit(1, 450, { alive: () => true, sleep: async (ms) => void sleeps.push(ms) });
+      expect(result).toBe("forced");
+      expect(sleeps).toHaveLength(3);
+      expect(seen.killed).toBe(1);
+      expect(registry.pending(1)).toBe(false);
+    });
   });
 
   it("quitAll graceful-quits every launched instance", async () => {

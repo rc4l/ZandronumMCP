@@ -6,11 +6,14 @@ import { InstanceRegistry } from "./../src/process/registry.js";
 import { configPathFor, isolatedConfigPathFor } from "../src/process/launch.js";
 import { envName, type EngineAdapter, type NetgameCaps } from "../src/adapter.js";
 import { engine } from "../src/engine.js";
-import type { ContextIo, ServerConfig } from "../src/context.js";
+import type { ContextIo, LaunchArgs, ServerConfig } from "../src/context.js";
+import type { MapSlotRequest, MapSlotResult } from "../src/acs/probe.js";
 import { buildWad, buildZip, sectorsLump, doomLinedefsLump, sidedefsLump, vertexesLump } from "./fakes/wad-builder.js";
 import { buildBehaviorAcse, buildBehaviorExports } from "./fakes/acs-builder.js";
 import { readFileSync } from "node:fs";
 import { engineFixture } from "./fakes/fixtures.js";
+import type { KvRecord } from "../src/parsers/lines.js";
+import { MAPSLOT_DIGESTS } from "./fixtures/mapslot/digests.js";
 import { abs, norm, PathMap, sepRe } from "./fakes/paths.js";
 
 /**
@@ -762,6 +765,197 @@ describe("map-scope ACS tools", () => {
   });
 });
 
+describe("map vars by sourceFile", () => {
+  const DIGEST = MAPSLOT_DIGESTS.mapslot;
+  const LIB = { name: "acs/mapslot.o", data: buildBehaviorAcse([], []) };
+  const SRC = "/mods/src/mapslot.bcs";
+  const CAPS = ["cmd", "event", "time", "mapslot"];
+  const HEAD = `mcp_mapslot 4 v=1 code=44 first=SPTR md5=${DIGEST.md5}`;
+
+  /** IO whose resolveMapSlot records each request and answers `result`; launch files read as one library. */
+  function resolver(result: MapSlotResult) {
+    const seen: MapSlotRequest[] = [];
+    const io: Partial<ContextIo> = {
+      resolveMapSlot: (r) => (seen.push(r), result),
+      readFileSync: () => LIB.data,
+    };
+    return { seen, io };
+  }
+  /** A live harness with the mapslot cap, its instance launched with `args`. */
+  async function launched(io: Partial<ContextIo>, responses: Record<string, string[]> = {}, args: LaunchArgs = { files: ["/mods/mapslot.o"] }) {
+    const h = await live({ caps: CAPS, io, responses, config: { bcc: " /opt/bcc " } });
+    h.ctx.rememberLaunchArgs(1, args, bridge!.port, "/tmp/log");
+    return h;
+  }
+  const sent = () => bridge!.received.filter((m) => m.t === "cmd").map((m) => m.text ?? "");
+  const scalar = { slot: 4, digest: DIGEST, module: LIB };
+
+  it("refuses object or includeDirs without sourceFile, sending nothing", async () => {
+    const h = await live({ caps: CAPS });
+    for (const extra of [{ object: "/x.pk3" }, { includeDirs: ["/inc"] }]) {
+      const result = await h.call("get_map_var", { name: "v", ...extra });
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toBe("object and includeDirs need sourceFile");
+    }
+    expect(sent()).toEqual([]);
+  });
+
+  it("refuses on a bridge without the mapslot cap, compiling nothing", async () => {
+    const r = resolver(scalar);
+    const h = await live({ io: r.io });
+    const result = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toMatch(/^This engine build has no slot-addressed map var access for sourceFile/);
+    expect(r.seen).toEqual([]);
+  });
+
+  it("asks for object when the instance has no launch files", async () => {
+    for (const args of [{}, { files: [] }]) {
+      const r = resolver(scalar);
+      const h = await launched(r.io, {}, args);
+      const result = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+      expect(result.content?.[0]?.text).toBe(
+        "instance 1 has no launch files to find the source's build in (attached, or launched without files): pass object, the deployed file",
+      );
+      expect(r.seen).toEqual([]);
+      await harness?.close();
+      await bridge?.close();
+    }
+    const r = resolver(scalar);
+    const h = await live({ caps: CAPS, io: r.io });
+    expect((await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC })).content?.[0]?.text).toMatch(/pass object/);
+  });
+
+  it("resolves against the launch files' modules, or object's, and names the refusing guard, sending nothing", async () => {
+    const r = resolver({ guard: "deployed", refused: "build A equals no deployed module" });
+    const h = await launched(r.io);
+    const result = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC, includeDirs: ["/inc"] });
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toBe("ms_hid refused by the deployed check, nothing sent to the engine: build A equals no deployed module");
+    expect(r.seen).toEqual([{ sourceFile: SRC, expr: "ms_hid", exe: "/opt/bcc", includeDirs: ["/inc"], deployed: [{ name: "mapslot.o", data: LIB.data }], engine }]);
+    await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC, object: "/other/lib.o" });
+    expect(r.seen[1]).toMatchObject({ deployed: [{ name: "lib.o" }], includeDirs: undefined });
+    expect(sent()).toEqual([]);
+  });
+
+  it("keeps the engine-state footer on a no-launch-files source refusal", async () => {
+    const h = await live({ caps: [...CAPS, "status"] });
+    bridge!.setStatus({ menu: "on" });
+    const res = await h.call("get_map_var", { name: "v", sourceFile: SRC });
+    expect(res.isError).toBe(true);
+    expect(res.content?.[0]?.text).toContain("pass object, the deployed file");
+    expect(res.content?.at(-1)?.text).toBe("Engine state: a menu is open.");
+    expect(sent().some((c) => c.startsWith("mcp_mapslot"))).toBe(false);
+  });
+
+  it("passes over a launch file that holds no ACS, such as a DEHACKED patch", async () => {
+    const r = resolver({ guard: "deployed", refused: "x" });
+    const deh = Buffer.from("Patch File for DeHackEd v3.0\n");
+    const h = await launched({ ...r.io, readFileSync: (p) => (p.endsWith(".deh") ? deh : LIB.data) }, {}, { files: ["/mods/x.deh", "/mods/mapslot.o"] });
+    await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+    expect(r.seen[0].deployed).toEqual([{ name: "mapslot.o", data: LIB.data }]);
+  });
+
+  it("reads relative launch files from the engine's folder and refuses an unreadable one by name", async () => {
+    const r = resolver({ guard: "deployed", refused: "x" });
+    const read: string[] = [];
+    const readFileSync = (p: string) => {
+      read.push(p);
+      if (p.endsWith("gone.pk3")) throw new Error(`ENOENT: ${p}`);
+      return LIB.data;
+    };
+    const h = await launched({ ...r.io, readFileSync }, {}, { files: ["mods/mapslot.o"] });
+    h.ctx.rememberLaunchArgs(1, { files: ["mods/mapslot.o"] }, bridge!.port, "/games/zan/mcp-bridge-1.log");
+    await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+    expect(read).toEqual([abs("/games/zan/mods/mapslot.o")]);
+    h.ctx.rememberLaunchArgs(1, { files: ["gone.pk3", "mods/mapslot.o"] }, bridge!.port, "/games/zan/mcp-bridge-1.log");
+    const result = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toBe(`can't read ${abs("/games/zan/gone.pk3")} to find the source's build in: ENOENT: ${abs("/games/zan/gone.pk3")}`);
+    expect(r.seen).toHaveLength(1);
+  });
+
+  it("searches PATH for the compiler when the configured one is blank", async () => {
+    const r = resolver({ guard: "compile", refused: "x" });
+    const h = await live({ caps: CAPS, io: r.io, config: { bcc: "  " } });
+    await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC, object: "/lib.o" });
+    expect(r.seen[0].exe).toBeUndefined();
+  });
+
+  it("reads and writes a scalar by slot, checking the reply echoes what was sent", async () => {
+    const r = resolver(scalar);
+    const reply = ["MCP_MAPSLOT module=0 slot=4 value=103 name=MAPSLOT"];
+    const h = await launched(r.io, { "mcp_mapslot 4 v=1": reply });
+    const got = await h.call("get_map_var", { name: "ms_hid", sourceFile: SRC });
+    expect(got.content?.[0]?.text).toBe("103 (slot 4 of module 0 MAPSLOT, acs/mapslot.o)");
+    expect(got.structuredContent).toEqual({ name: "ms_hid", value: 103, slot: 4, module: { id: 0, name: "MAPSLOT", deployed: "acs/mapslot.o" } });
+    expect(sent()[0]).toMatch(new RegExp(`^${HEAD} ;`));
+    reply[0] = "MCP_MAPSLOT module=0 slot=4 value=7 name=MAPSLOT";
+    expect(await h.text("set_map_var", { name: "ms_hid", value: 7, sourceFile: SRC })).toBe("ms_hid = 7 (slot 4 of module 0 MAPSLOT, acs/mapslot.o)");
+    expect(sent()[1]).toMatch(new RegExp(`^${HEAD} set=7 ;`));
+    // A reply with another value, slot or index than the ones sent.
+    for (const body of ["slot=4 value=8", "slot=5 value=7", "slot=4 index=0 value=7"]) {
+      reply[0] = `MCP_MAPSLOT module=0 ${body} name=MAPSLOT`;
+      const bad = await h.call("set_map_var", { name: "ms_hid", value: 7, sourceFile: SRC });
+      expect(bad.isError).toBe(true);
+      expect(bad.content?.[0]?.text).toBe(`the engine's reply doesn't echo the slot, index and value sent (${HEAD} set=7): ${reply[0]}`);
+    }
+  });
+
+  it("reads and writes an array element at name[index], sending the resolved offset", async () => {
+    const r = resolver({ slot: 6, index: 5, digest: DIGEST, module: LIB });
+    const head = "mcp_mapslot 6 v=1 code=44 first=SPTR";
+    const reply = ["MCP_MAPSLOT module=1 slot=6 index=5 value=104 name=MAPSLOT"];
+    const h = await launched(r.io, { [head]: reply });
+    const got = await h.call("get_map_array", { name: "ms_hid_arr", index: 2, sourceFile: SRC });
+    expect(r.seen[0].expr).toBe("ms_hid_arr[2]");
+    expect(got.content?.[0]?.text).toBe("104 (slot 6[5] of module 1 MAPSLOT, acs/mapslot.o)");
+    expect(got.structuredContent).toEqual({
+      name: "ms_hid_arr",
+      index: 2,
+      value: 104,
+      slot: 6,
+      offset: 5,
+      module: { id: 1, name: "MAPSLOT", deployed: "acs/mapslot.o" },
+    });
+    expect(sent()[0]).toMatch(new RegExp(`^${head} md5=${DIGEST.md5} index=5 ;`));
+    reply[0] = "MCP_MAPSLOT module=1 slot=6 index=5 value=9 name=MAPSLOT";
+    expect(await h.text("set_map_array", { name: "ms_hid_arr", index: 2, value: 9, sourceFile: SRC })).toBe(
+      "ms_hid_arr[2] = 9 (slot 6[5] of module 1 MAPSLOT, acs/mapslot.o)",
+    );
+    expect(sent()[1]).toMatch(/ index=5 set=9 ;/);
+    // An element reply without its index, or with another, is not the one sent.
+    for (const body of ["slot=6 value=104", "slot=6 index=4 value=104"]) {
+      reply[0] = `MCP_MAPSLOT module=1 ${body} name=MAPSLOT`;
+      expect((await h.call("get_map_array", { name: "ms_hid_arr", index: 2, sourceFile: SRC })).isError).toBe(true);
+    }
+  });
+
+  it("explains a loaded module that isn't the one resolved, naming the map and the module's kind", async () => {
+    const nomatch = { "mcp_mapslot 4": ["error no module matches map=NMORIG modules=3"] };
+    const lib = await launched(resolver(scalar).io, nomatch);
+    expect(await lib.text("get_map_var", { name: "ms_hid", sourceFile: SRC })).toBe(
+      `The loaded module isn't the one resolved: none of the 3 loaded on map NMORIG matches acs/mapslot.o (a library), built from ${SRC}. ` +
+        "Another map is loaded, the map has no BEHAVIOR of its own, or the file was rebuilt after launch (relaunch to load it).",
+    );
+    await harness?.close();
+    await bridge?.close();
+    const map = { name: "maps/ARENA.WAD:ARENA", data: LIB.data, map: "ARENA" };
+    const beh = await launched(resolver({ ...scalar, module: map }).io, nomatch);
+    expect(await beh.text("get_map_var", { name: "round_num", sourceFile: SRC })).toMatch(
+      /matches maps\/ARENA\.WAD:ARENA \(the BEHAVIOR of map ARENA\), built from/,
+    );
+  });
+
+  it("passes any other engine refusal through", async () => {
+    const reply = ["error ambiguous modules=1,2"];
+    const h = await launched(resolver(scalar).io, { "mcp_mapslot 4": reply });
+    expect(await h.text("get_map_var", { name: "ms_hid", sourceFile: SRC })).toBe("ambiguous modules=1,2");
+    reply.length = 0;
+    expect(await h.text("get_map_var", { name: "ms_hid", sourceFile: SRC })).toBe("(no output)");
+  });
+});
+
 describe("ACS source and bytecode tools", () => {
   const sources: Record<string, string> = {
     "main.acs": "#define GOLD 7\nscript 1 OPEN { }\nfunction void Give(void) { }",
@@ -852,6 +1046,16 @@ describe("ACS source and bytecode tools", () => {
     it("names a raw compiled file after itself", async () => {
       const h = await offline({}, { readFileSync: () => buildBehaviorExports(["v"]) });
       expect(await h.text("list_map_exports", { file: "/build/lib.o" })).toBe("lib.o: 1 export(s)\n  0: v");
+    });
+
+    it("walks a launch directory, naming modules by relative path", async () => {
+      const dir = path.join("/mods/res");
+      const h = await offline({}, {
+        isDirSync: (p) => p === dir || p === path.join(dir, "acs"),
+        readdirSync: (p) => (p === dir ? ["acs"] : ["lib.o"]),
+        readFileSync: () => buildBehaviorExports(["v"]),
+      });
+      expect(await h.text("list_map_exports", { file: dir })).toBe("acs/lib.o: 1 export(s)\n  0: v");
     });
 
     it("errors with the available module names when lump matches nothing", async () => {
@@ -1519,8 +1723,9 @@ describe("test-session tools", () => {
     });
   });
 
-  describe("actor targets and spawn bounds", () => {
+  describe("acting on other actors", () => {
     const HEAD = "class=DoomImp tid=7 hp=60 spawnhp=60 x=1.0 y=2.0 z=0.0 angle=0.0 pitch=0.0";
+    const BODY = "class=DoomPlayer tid=0 hp=100 spawnhp=100 x=0.0 y=0.0 z=0.0 angle=90.0 pitch=0.0";
     const refused = async (h: Harness, tool: string, args: Record<string, unknown>, text: string | RegExp) => {
       const res = await h.call(tool, args);
       expect(res.isError).toBe(true);
@@ -1532,8 +1737,8 @@ describe("test-session tools", () => {
       const h = await live({ responses: { dumpactor: ["MCP_ACTOR", "class DoomPlayer"] } });
       expect((await h.call("actor_state", { tid: 0 })).structuredContent).toMatchObject({ class: "DoomPlayer" });
       expect(cmds()[0]).toMatch(/^dumpactor ;/);
-      for (const tool of ["actor_state", "set_actor_prop"]) {
-        const args = { prop: "speed" };
+      for (const tool of ["actor_state", "set_actor_prop", "place_actor", "damage_actor", "give", "take"]) {
+        const args = { prop: "speed", angle: 1, amount: 1, item: "Clip" };
         await refused(h, tool, { ...args, index: 1 }, "index needs a tid");
         await refused(h, tool, { ...args, tid: 0, index: 1 }, "index needs a tid");
       }
@@ -1550,6 +1755,206 @@ describe("test-session tools", () => {
       const res = await h.call("summon_at", { className: "DoomImp", x: 32767, y: -32767, z: 32767 });
       expect(res.isError).toBeFalsy();
       expect(cmds()[0]).toMatch(/^mcp_spawnat DoomImp 32767 -32767 z=32767 ;/);
+    });
+
+    describe("place_actor", () => {
+      it("sends only the given fields and reports the actor where it ends up", async () => {
+        const placed = `placed ${HEAD.replace("x=1.0", "x=128.5")} fromx=0.0 fromy=2.0 fromz=8.0 vx=1.00 vy=0.00 vz=20.00 flags=mso`;
+        const h = await live({
+          responses: { "mcp_place 7 2": [`${placed} fog=1 forced=1 name=Imp`], mcp_place: [`${placed} name=Imp`] },
+        });
+        const res = await h.call("place_actor", {
+          tid: 7, index: 2, x: 128.5, y: -64, z: 0, angle: 90, pitch: -10.5, vx: 1, vy: 0, vz: 20,
+          addVelocity: true, fog: true, force: true,
+        });
+        expect(res.isError).toBeFalsy();
+        expect(cmds()[0]).toMatch(
+          /^mcp_place 7 2 x=128\.5 y=-64 z=0 angle=90 pitch=-10\.5 vx=1 vy=0 vz=20 addvel=1 fog=1 force=1 ;/,
+        );
+        expect(res.structuredContent).toMatchObject({ class: "DoomImp", x: 128.5, fromz: 8, vz: 20, flags: "monster,shootable,solid", fog: 1, forced: 1, name: "Imp" });
+        expect(res.content?.[0]?.text).toBe(
+          "DoomImp#7 at 128.5,2,0 (from 0,2,8), angle 0, pitch 0, velocity 1,0,20 (fog, forced)",
+        );
+        expect(await h.text("place_actor", { angle: 45 })).toBe("DoomImp#7 at 128.5,2,0 (from 0,2,8), angle 0, pitch 0, velocity 1,0,20");
+        await h.call("place_actor", { tid: 0, vy: -2.5, addVelocity: false, fog: false, force: false });
+        expect(cmds()[1]).toMatch(/^mcp_place 0 0 angle=45 ;/);
+        expect(cmds()[2]).toMatch(/^mcp_place 0 0 vy=-2\.5 ;/);
+      });
+
+      it("refuses an empty call, fog/force without a position and addVelocity without a velocity, before sending", async () => {
+        const h = await live();
+        await refused(h, "place_actor", { tid: 7 }, "give at least one of x, y, z, angle, pitch, vx, vy, vz");
+        await refused(h, "place_actor", { tid: 7, fog: true, force: false }, "give at least one of x, y, z, angle, pitch, vx, vy, vz");
+        await refused(h, "place_actor", { tid: 7, angle: 1, fog: true }, "fog and force need x, y or z");
+        await refused(h, "place_actor", { tid: 7, vz: 1, force: true }, "fog and force need x, y or z");
+        await refused(h, "place_actor", { tid: 7, x: 1, addVelocity: true }, "addVelocity needs vx, vy or vz");
+        await refused(h, "place_actor", { tid: 7, x: 40000 }, /32767/);
+        await refused(h, "place_actor", { tid: 7, pitch: 91 }, /90/);
+        expect(cmds()).toHaveLength(0);
+      });
+    });
+
+    describe("remove_actor", () => {
+      it("removes one actor by index, or every one with the tid, listing each with hidden and skipped", async () => {
+        const h = await live({
+          responses: {
+            "mcp_remove 7 1": [`removed ${HEAD}`, "removed_total count=1"],
+            "mcp_remove 7 0 all=1": [`removed ${HEAD}`, `removed ${HEAD} hidden=1`, "removed_total count=2 skipped=player0,player1"],
+            "mcp_remove 8 ": ["removed_total count=0 skipped=player0"],
+            "mcp_remove 9 ": ["removed_total count=0 skipped=player0,MCPTagItem#9"],
+          },
+        });
+        const one = await h.call("remove_actor", { tid: 7, index: 1, all: false });
+        expect(cmds()[0]).toMatch(/^mcp_remove 7 1 ;/);
+        expect(one.content?.[0]?.text).toBe("removed 1: DoomImp#7");
+        expect(one.structuredContent).toEqual({ removed: [expect.objectContaining({ class: "DoomImp", tid: 7, hp: 60 })], count: 1 });
+        const all = await h.call("remove_actor", { tid: 7, all: true });
+        expect(cmds()[1]).toMatch(/^mcp_remove 7 0 all=1 ;/);
+        expect(all.content?.[0]?.text).toBe("removed 2: DoomImp#7, DoomImp#7 (hidden); skipped player0, player1 (a live player's body)");
+        expect(all.structuredContent).toMatchObject({ count: 2, skipped: ["player0", "player1"] });
+        expect((all.structuredContent?.removed as KvRecord[])[1]).toMatchObject({ hidden: 1 });
+        expect(await h.text("remove_actor", { tid: 8 })).toBe("removed 0; skipped player0 (a live player's body)");
+        expect(await h.text("remove_actor", { tid: 9 })).toBe(
+          "removed 0; skipped player0 (a live player's body); MCPTagItem#9 (owned inventory, which the engine keeps)",
+        );
+      });
+
+      it("refuses all with index and a tid below 1, before sending", async () => {
+        const h = await live();
+        await refused(h, "remove_actor", { tid: 7, index: 0, all: true }, "all and index can't be combined");
+        await refused(h, "remove_actor", { tid: 0 }, /tid/);
+        await refused(h, "remove_actor", {}, /tid/);
+        expect(cmds()).toHaveLength(0);
+      });
+    });
+
+    describe("damage_actor", () => {
+      it("sends the amount, type and source, and reports hp before and after", async () => {
+        const h = await live({
+          responses: {
+            "mcp_damage 7 0 10": [`damaged ${HEAD.replace("hp=60", "hp=50")} oldhp=60 dealt=10 type=None flags=mso name=Imp`],
+            "mcp_damage 7 1 61 ": [`damaged ${HEAD.replace("hp=60", "hp=-1")} oldhp=60 dealt=61 type=Extreme source=player0 died=1 removed=1 flags=c name=Imp`],
+            "mcp_damage 0 0 5 ": [`damaged ${BODY} oldhp=100 dealt=0 type=Fire source=DoomImp#7 nodamage=1 flags=so name=Player`],
+          },
+        });
+        const hit = await h.call("damage_actor", { tid: 7, amount: 10 });
+        expect(cmds()[0]).toMatch(/^mcp_damage 7 0 10 ;/);
+        expect(hit.content?.[0]?.text).toBe("DoomImp#7 took 10 None damage: hp 60 -> 50");
+        expect(hit.structuredContent).toMatchObject({ hp: 50, oldhp: 60, dealt: 10, type: "None", flags: "monster,shootable,solid" });
+        const kill = await h.call("damage_actor", { tid: 7, index: 1, amount: 61, damageType: "Extreme", sourceTid: 0 });
+        expect(cmds()[1]).toMatch(/^mcp_damage 7 1 61 type=Extreme source=0 ;/);
+        expect(kill.content?.[0]?.text).toBe("DoomImp#7 took 61 Extreme damage: hp 60 -> -1 (died, removed)");
+        expect(kill.structuredContent).toMatchObject({ source: "player0", died: 1, removed: 1, flags: "corpse" });
+        const god = await h.call("damage_actor", { amount: 5, damageType: "Fire", sourceTid: 7 });
+        expect(cmds()[2]).toMatch(/^mcp_damage 0 0 5 type=Fire source=7 ;/);
+        expect(god.content?.[0]?.text).toBe("DoomPlayer#0 took 0 Fire damage: hp 100 -> 100 (nodamage)");
+      });
+
+      it("refuses a damage type the console would rewrite or split, and an amount out of range, before sending", async () => {
+        const h = await live();
+        await refused(h, "damage_actor", { tid: 7, amount: 1, damageType: "$sv_cheats" }, 'bad damageType "$sv_cheats"');
+        await refused(h, "damage_actor", { tid: 7, amount: 1, damageType: "Café" }, 'bad damageType "Café"');
+        await refused(h, "damage_actor", { tid: 7, amount: 0 }, /amount/);
+        await refused(h, "damage_actor", { tid: 7, amount: 1000001 }, /amount/);
+        expect(cmds()).toHaveLength(0);
+      });
+    });
+
+    describe("give and take", () => {
+      it("keep the stock command without a tid", async () => {
+        const h = await live();
+        await h.call("give", { item: "Clip", amount: 50 });
+        await h.call("give", { item: "$weird" });
+        await h.call("take", { item: "Berserk" });
+        expect(cmds()[0]).toMatch(/^give Clip 50 ;/);
+        expect(cmds()[1]).toMatch(/^give \$weird ;/);
+        expect(cmds()[2]).toMatch(/^take Berserk ;/);
+      });
+
+      it("run mcp_inv with a tid and report the held class before and after", async () => {
+        const inv = (fields: string, head = BODY, name = "Player") => [`inv ${fields} ${head} flags=so name=${name}`];
+        const h = await live({
+          responses: {
+            "mcp_inv 0 0 give Clip": inv("op=give item=Clip held=Clip before=50 after=51"),
+            "mcp_inv 0 0 give Medikit": inv("op=give item=Medikit held=health before=100 after=100 ok=0"),
+            "mcp_inv 7 1 take Shell 4": inv("op=take item=Shell held=Shell before=8 after=4", HEAD, "Imp"),
+          },
+        });
+        const gave = await h.call("give", { tid: 0, item: "Clip" });
+        expect(cmds()[0]).toMatch(/^mcp_inv 0 0 give Clip ;/);
+        expect(gave.content?.[0]?.text).toBe("give Clip on DoomPlayer#0: Clip 50 -> 51");
+        expect(gave.structuredContent).toMatchObject({ op: "give", item: "Clip", held: "Clip", before: 50, after: 51, flags: "shootable,solid" });
+        const full = await h.call("give", { tid: 0, item: "Medikit", amount: 25 });
+        expect(cmds()[1]).toMatch(/^mcp_inv 0 0 give Medikit 25 ;/);
+        expect(full.content?.[0]?.text).toBe("give Medikit on DoomPlayer#0: health 100 -> 100 (pickup refused)");
+        expect(full.structuredContent).toMatchObject({ held: "health", ok: 0 });
+        expect(await h.text("take", { tid: 7, index: 1, item: "Shell", amount: 4 })).toBe("take Shell on DoomImp#7: Shell 8 -> 4");
+        expect(cmds()[2]).toMatch(/^mcp_inv 7 1 take Shell 4 ;/);
+      });
+
+      it("describe held= per op: the kept-under class for give, the item class itself for take", async () => {
+        const h = await live();
+        const { tools } = await h.client.listTools();
+        const description = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+        expect(description("give")).toContain("held=, the class the amount is kept under (armor: the player's armor class; an ammo pickup: its parent ammo, e.g. ClipBox: Clip;");
+        expect(description("take")).toContain("held=, the item class itself, the only class looked up");
+        expect(description("take")).not.toMatch(/kept under|ClipBox: Clip/);
+      });
+
+      it("closes the actor-write descriptions on the adapter's notes, with no trailing space for an empty one", async () => {
+        const notes = { ...engine.notes, placeActor: "", removeActor: "", inventory: "" };
+        for (const variant of [engine, { ...engine, notes }]) {
+          const h = await live({ engine: variant });
+          const { tools } = await h.client.listTools();
+          const { actorWrites, placeActor, removeActor, inventory } = variant.notes;
+          for (const [name, note] of [["place_actor", placeActor], ["remove_actor", removeActor], ["give", inventory], ["take", inventory]]) {
+            const description = tools.find((t) => t.name === name)?.description ?? "";
+            expect(description.endsWith(note ? `${actorWrites} ${note}` : actorWrites)).toBe(true);
+          }
+        }
+      });
+
+      it("refuses an item the console would rewrite or split with a tid, or one with a space, before sending", async () => {
+        const h = await live();
+        await refused(h, "give", { tid: 0, item: "$sv_cheats" }, 'bad item "$sv_cheats"');
+        await refused(h, "take", { tid: 7, item: "Café" }, 'bad item "Café"');
+        await refused(h, "give", { item: "Clip Box" }, /no spaces/);
+        expect(cmds()).toHaveLength(0);
+      });
+    });
+
+    const ERRORS: [string, string, (tid: number) => Record<string, unknown>, string[]][] = [
+      ["place_actor", "mcp_place", (tid) => ({ tid, angle: 1 }), [
+        "usage: mcp_place <tid> <index> [x=] [y=] [z=] [angle=] [pitch=] [vx=] [vy=] [vz=] [addvel=1] [fog=1] [force=1]",
+        "client: place on the server instance", "not in a level", "server: pass a tid", "no actor with tid 4 index 0",
+        "spectator", "coordinates must be within -32767..32767", "velocity must be within -32767..32767",
+        "pitch must be within -90..90", "blocked by player0", "blocked by line 12",
+        "blocked floor=0.0 ceiling=128.0 z=0.0 height=56.0", "z must be within -32767..32711 for height 56",
+      ]],
+      ["remove_actor", "mcp_remove", (tid) => ({ tid }), [
+        "usage: mcp_remove <tid> <index> [all=1]", "client: remove on the server instance", "not in a level",
+        "no actor with tid 4 index 0", "no actor with tid 5", "spectator",
+      ]],
+      ["damage_actor", "mcp_damage", (tid) => ({ tid, amount: 1 }), [
+        "usage: mcp_damage <tid> <index> <amount> [type=Name] [source=<tid>]", "client: damage on the server instance",
+        "not in a level", "server: pass a tid", "server: pass a source tid", "no actor with tid 6 index 0", "spectator",
+        "no source actor with tid 5", "already dead",
+      ]],
+      ["give", "mcp_inv", (tid) => ({ tid, item: "Clip" }), [
+        "usage: mcp_inv <tid> <index> <give|take> <class> [amount]", "client: give on the server instance", "not in a level",
+        "server: pass a tid", "not an inventory class Clip", "no actor with tid 6 index 0", "spectator",
+        "not replicated: give on a non-player",
+      ]],
+      ["take", "mcp_inv", (tid) => ({ tid, item: "Clip" }), ["client: take on the server instance", "not replicated: take on a non-player"]],
+    ];
+
+    it.each(ERRORS)("%s surfaces each engine error shape, or raw output without its reply line", async (tool, verb, args, errors) => {
+      const responses: Record<string, string[]> = { [`${verb} 98 `]: ["Unknown command"] };
+      errors.forEach((e, i) => (responses[`${verb} ${i + 1} `] = [`error ${e}`]));
+      const h = await live({ responses });
+      for (const [i, e] of errors.entries()) await refused(h, tool, args(i + 1), e);
+      await refused(h, tool, args(98), "Unknown command");
+      await refused(h, tool, args(99), "(no output)");
     });
   });
 
@@ -1849,6 +2254,15 @@ describe("test-session tools", () => {
       return Promise.resolve();
     };
     return { io: { sleep }, runs, maptime: () => t };
+  };
+
+  /** An engine log that gains `x` then `line` on every io.sleep (a sim run), so only what a step printed is new. */
+  const printingLog = (line: string) => {
+    let log = "imp died before the call\n";
+    return {
+      config: { exe: "/engine/zandronum" },
+      io: { existsSync: () => true, readTextSync: () => log, sleep: () => ((log += `x\n${line}\n`), Promise.resolve()) },
+    };
   };
 
   describe("ensure_live", () => {
@@ -2198,6 +2612,341 @@ describe("test-session tools", () => {
       expect(
         (await noTime.call("step_until", { condition: mapvar("==", 1), maxTics: 5 })).content?.[0]?.text,
       ).toMatch(/no time-control/);
+    });
+
+    it("counts the actors a find_actors filter matches, taking the engine's total past limit=1", async () => {
+      const h = await withStatus();
+      const replies = [
+        ["MCP_FOUND", "found class=DoomImp tid=0", "truncated shown=1 total=3"],
+        ["MCP_FOUND", "found class=DoomImp tid=0"],
+        ["MCP_FOUND"],
+      ];
+      const out = [...replies[0]];
+      let n = 0;
+      bridge!.respondTo("findactors", out);
+      bridge!.onCommand("findactors", () => out.splice(0, out.length, ...replies[Math.min(n++, 2)]));
+      ticking();
+      const res = await h.call("step_until", {
+        condition: { kind: "actors", class: "DoomImp", tid: 4, radius: 512, op: "==", value: 0 },
+        maxTics: 50,
+      });
+      expect(res.content?.[0]?.text).toBe("met after 2 tic(s): 0 == 0");
+      expect(res.structuredContent).toEqual({ met: true, tics: 2, value: 0, right: 0 });
+      const finds = cmds().filter((c) => c.startsWith("findactors"));
+      expect(finds).toHaveLength(3);
+      expect(finds[0]).toMatch(/^findactors class=DoomImp tid=4 radius=512 limit=1 ;/);
+      n = 0;
+      const three = await h.call("step_until", { condition: { kind: "actors", op: "==", value: 3 }, maxTics: 5 });
+      expect(three.content?.[0]?.text).toBe("met after 0 tic(s): 3 == 3");
+      expect(cmds().at(-1)).toMatch(/^findactors limit=1 ;/);
+    });
+
+    it("counts only what find_actors' flags keep, from every row, so a corpse can be ruled out", async () => {
+      const h = await withStatus();
+      const corpse = "found class=DoomImp tid=0 hp=0 flags=mc";
+      const replies = [
+        ["MCP_FOUND", "found class=DoomImp tid=0 hp=60 flags=mso", corpse],
+        ["MCP_FOUND", corpse, corpse],
+      ];
+      const out = [...replies[0]];
+      let n = 0;
+      bridge!.respondTo("findactors", out);
+      bridge!.onCommand("findactors", () => out.splice(0, out.length, ...replies[Math.min(n++, 1)]));
+      ticking();
+      const alive = await h.call("step_until", {
+        condition: { kind: "actors", class: "DoomImp", flags: { alive: true }, op: "==", value: 0 },
+        maxTics: 20,
+      });
+      expect(alive.content?.[0]?.text).toBe("met after 1 tic(s): 0 == 0");
+      expect(cmds().find((c) => c.startsWith("findactors"))).toMatch(/^findactors class=DoomImp limit=0 ;/);
+      const corpses = await h.call("step_until", { condition: { kind: "actors", flags: { corpse: true }, op: "==", value: 2 }, maxTics: 5 });
+      expect(corpses.content?.[0]?.text).toBe("met after 0 tic(s): 2 == 2");
+    });
+
+    it("reports what findactors said when an actors condition can't be read", async () => {
+      const h = await withStatus({ responses: { findactors: ["MCP_FOUND", "error unknown class Nope"] } });
+      const res = await h.call("step_until", { condition: { kind: "actors", class: "Nope", op: ">", value: 0 }, maxTics: 5 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("unknown class Nope");
+    });
+
+    it("holds a log condition once a matching line is printed after the call starts", async () => {
+      const h = await withStatus(printingLog("Imp died"));
+      ticking();
+      const res = await h.call("step_until", { condition: { kind: "log", pattern: "imp died" }, maxTics: 20 });
+      expect(res.content?.[0]?.text).toBe("met after 1 tic(s): 1 line(s) matching /imp died/");
+      expect(res.structuredContent).toEqual({ met: true, tics: 1, value: 1, right: 1 });
+      const none = await h.call("step_until", { condition: { kind: "log", pattern: "^never" }, maxTics: 3, chunkTics: 1 });
+      expect(none.content?.[0]?.text).toBe("not met within 3 tic(s): 0 line(s) matching /^never/");
+    });
+
+    it("needs an engine log for a log condition, and a valid pattern before anything runs", async () => {
+      const h = await withStatus();
+      const res = await h.call("step_until", { condition: { kind: "log", pattern: "x" }, maxTics: 5 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("no engine log to match /x/ in (launch_instance writes one)");
+      bridge!.clearReceived();
+      const bad = await h.call("step_until", { condition: { kind: "log", pattern: "(" }, maxTics: 5 });
+      expect(bad.isError).toBe(true);
+      expect(bad.content?.[0]?.text).toMatch(/not a valid regex/);
+      expect(cmds()).toEqual([]);
+    });
+
+    it("asks for a retry when a log condition's status refresh comes back empty mid-run", async () => {
+      const h = await withStatus(printingLog("tick"));
+      ticking();
+      let probes = 0;
+      // A bare probe's command is empty, so "" is what matches it; after ticking's hook, so the blank wins.
+      bridge!.onCommand("", () => ++probes >= 3 && bridge!.blankStatus());
+      const res = await h.call("step_until", { condition: { kind: "log", pattern: "^never" }, maxTics: 10, chunkTics: 1 });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("can't count tics: status read timed out (engine busy, e.g. loading a map); retry");
+    });
+  });
+
+  describe("run_scenario", () => {
+    const extraBridges: FakeBridge[] = [];
+    afterEach(async () => {
+      // Before the file-level afterEach: drop the harness's sockets first, or close() waits on them.
+      await harness?.close();
+      harness = undefined;
+      for (const b of extraBridges.splice(0)) await b.close();
+    });
+    type Reply = Awaited<ReturnType<Harness["call"]>>;
+    const stepsOf = (res: Reply) => (res.structuredContent?.steps ?? []) as Array<Record<string, unknown>>;
+    const sentinel = (t: string) => t.replace(/__MCPDONE_\w+__/, "S");
+
+    it("runs a mixed burst on the scenario's own instance in one call, each result in the structured half", async () => {
+      const h = await withStatus();
+      const second = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: "fake", caps: ["cmd", "event", "time", "status"] } });
+      extraBridges.push(second);
+      second.respondTo("god", ["degreelessness mode ON"]).respondTo("findactors", ["MCP_FOUND", "found class=DoomImp tid=7 flags=m"]);
+      await h.call("attach_instance", { instance: 2, port: second.port });
+      bridge!.clearReceived();
+      const res = await h.call("run_scenario", {
+        instance: 2,
+        steps: [
+          { call: "run_command", args: { text: "god" } },
+          { call: "step", args: { tics: 5 } },
+          { call: "find_actors", args: { class: "DoomImp" } },
+          { expect: { kind: "actors", class: "DoomImp", op: "==", value: 1 } },
+        ],
+      });
+      expect(res.isError).toBeUndefined();
+      expect(res.structuredContent).toEqual({
+        ok: true,
+        calls: 3,
+        maptimeStart: 0,
+        maptimeEnd: 0,
+        steps: [
+          { index: 0, call: "run_command", ok: true, text: "degreelessness mode ON" },
+          { index: 1, call: "step", ok: true, text: "advanced ~5 tic(s)" },
+          { index: 2, call: "find_actors", ok: true, text: "1 actor(s) found", structured: { actors: [{ class: "DoomImp", tid: 7, flags: "monster" }] } },
+          { index: 3, expect: "actors", ok: true, text: "met: 1 == 1" },
+        ],
+      });
+      expect(res.content).toEqual([
+        {
+          type: "text",
+          text: [
+            "scenario ok: 4 step(s) ran, 3 call(s), maptime 0 -> 0",
+            "0 run_command: ok - degreelessness mode ON",
+            "1 step: ok - advanced ~5 tic(s)",
+            "2 find_actors: ok - 1 actor(s) found",
+            "3 expect actors: ok - met: 1 == 1",
+          ].join("\n"),
+        },
+      ]);
+      const sent = second.received.filter((m) => m.t === "cmd").map((m) => sentinel(m.text ?? ""));
+      expect(sent.filter((c) => !c.startsWith("mcp_status"))).toEqual([
+        "god ; mcp_status S",
+        "findactors class=DoomImp ; mcp_status S",
+        "findactors class=DoomImp limit=1 ; mcp_status S",
+      ]);
+      expect(second.pauses).toEqual([0, 1]);
+      expect(cmds()).toEqual([]);
+    });
+
+    it("refuses a bad call step anywhere before step 0 runs, so the engine sees nothing", async () => {
+      const h = await live();
+      bridge!.clearReceived();
+      const res = await h.call("run_scenario", {
+        steps: [
+          { call: "run_command", args: { text: "god" } },
+          { call: "step", args: { tics: 5 } },
+          { call: "kill_instance" },
+          { call: "screenshot" },
+          { repeat: [{ call: "step", args: { tics: -1 } }], maxIterations: 2 },
+          { call: "step", args: { instance: 1 } },
+          { call: "map_info", args: { map: "MAP01" } },
+          { call: "summon", args: { classname: "DoomImp" } },
+        ],
+      });
+      expect(cmds()).toEqual([]);
+      expect(bridge!.pauses).toEqual([]);
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe(
+        [
+          "refused, nothing ran:",
+          "step 2 (kill_instance): not callable in a scenario (process lifecycle)",
+          "step 3 (screenshot): not callable in a scenario (replies with an inline image; use screenshot_file)",
+          "step 4.0 (step): tics: Number must be greater than 0",
+          "step 5 (step): instance is the scenario's; drop it from args",
+          "step 6 (map_info): takes no instance; call it on its own",
+          "step 7 (summon): className: Required; args: Unrecognized key(s) in object: 'classname'",
+        ].join("\n"),
+      );
+      expect(h.ctx.attachedClient(1)).toBeDefined();
+    });
+
+    it("can name every listed tool: each is callable, or refused for a stated reason, never unknown", async () => {
+      const h = await live();
+      const names = (await h.client.listTools()).tools.map((t) => t.name);
+      const lines: string[] = [];
+      for (let i = 0; i < names.length; i += 60) {
+        // A bad last step keeps each batch from running.
+        const steps = [...names.slice(i, i + 60).map((call) => ({ call })), { call: "step", args: { tics: 0 } }];
+        const res = await h.call("run_scenario", { steps });
+        lines.push(...(res.content?.[0]?.text ?? "").split("\n").slice(1));
+      }
+      expect(lines.filter((l) => l.endsWith("no such tool"))).toEqual([]);
+      const refusedAs = (why: string) => lines.filter((l) => l.endsWith(why)).map((l) => /\(([a-z_]+)\)/.exec(l)![1]);
+      expect(refusedAs("(process lifecycle)").sort()).toEqual(["attach_instance", "kill_instance", "launch_instance", "relaunch_instance", "reset"]);
+      expect(refusedAs("use screenshot_file)").sort()).toEqual(["screenshot", "verify_menu"]);
+      expect(refusedAs("(scenarios don't nest)")).toEqual(["run_scenario"]);
+      expect(refusedAs("takes no instance; call it on its own")).toContain("map_info");
+      expect(cmds()).toEqual([]);
+    });
+
+    it("repeats until no imp is alive, expects a log line, and reads the log on from each read", async () => {
+      const h = await withStatus(printingLog("Imp died"));
+      const replies = [["MCP_FOUND", "found class=DoomImp tid=0 hp=60 flags=mso"], ["MCP_FOUND", "found class=DoomImp tid=0 hp=0 flags=mc"]];
+      const out = [...replies[0]];
+      let n = 0;
+      bridge!.respondTo("findactors", out);
+      bridge!.onCommand("findactors", () => out.splice(0, out.length, ...replies[Math.min(n++, 1)]));
+      const res = await h.call("run_scenario", {
+        steps: [
+          {
+            repeat: [{ call: "step", args: { tics: 5 } }],
+            until: { kind: "actors", class: "DoomImp", flags: { alive: true }, op: "==", value: 0 },
+            maxIterations: 10,
+          },
+          { expect: { kind: "log", pattern: "imp died" } },
+          { call: "read_log", args: { pattern: "imp" } },
+          { call: "step", args: { tics: 1 } },
+          { call: "read_log", args: { pattern: "imp" } },
+          { call: "read_log" },
+        ],
+      });
+      expect(res.isError).toBeUndefined();
+      const steps = stepsOf(res);
+      expect(steps[0]).toMatchObject({ index: 0, iterations: 2, ok: true, text: "until met: 0 == 0, after 2 iteration(s)" });
+      expect(steps[0].repeat).toMatchObject([{ index: 0, call: "step", ok: true, structured: { log: ["x", "Imp died"] } }]);
+      expect(steps[1]).toEqual({ index: 1, expect: "log", ok: true, text: "met: 2 line(s) matching /imp died/" });
+      const linesOf = (i: number) => (steps[i].structured as { lines: unknown[] }).lines;
+      expect(linesOf(2)).toEqual([{ line: 3, text: "Imp died" }, { line: 5, text: "Imp died" }]);
+      expect(linesOf(4)).toEqual([{ line: 7, text: "Imp died" }]);
+      expect(linesOf(5)).toEqual([]);
+    });
+
+    it("makes a wait_for_log step wait from where the scenario began, so a line printed before it doesn't match", async () => {
+      const h = await live(printingLog("boom"));
+      const res = await h.call("run_scenario", {
+        steps: [
+          { call: "wait_for_log", args: { pattern: "before the call", timeoutSec: 0.3 } },
+          { call: "wait_for_log", args: { pattern: "boom", timeoutSec: 1 } },
+          { call: "wait_for_log", args: { pattern: "before the call", sinceLine: 0, timeoutSec: 0.3 } },
+        ],
+      });
+      expect(stepsOf(res).map((st) => (st.structured as { reason: string }).reason)).toEqual(["timeout", "matched", "matched"]);
+    });
+
+    it("applies each tool's own defaults", async () => {
+      const clock = mapClock((t) => t);
+      const h = await withStatus({ io: clock.io });
+      clock.runs.length = 0;
+      await h.call("run_scenario", { steps: [{ call: "step" }] });
+      expect(clock.runs).toEqual([35]);
+    });
+
+    it("stops at a failed step under onFail stop, an error reply; continue runs the rest", async () => {
+      const h = await live({ responses: { findactors: ["MCP_FOUND", "error unknown class Nope"], god: ["god on"] } });
+      const steps = [{ call: "find_actors", args: { class: "Nope" } }, { call: "run_command", args: { text: "god" } }];
+      const stopped = await h.call("run_scenario", { steps });
+      expect(stopped.isError).toBe(true);
+      expect(stopped.structuredContent).toMatchObject({ ok: false, failedAt: 0, calls: 1 });
+      expect(stopped.structuredContent).not.toHaveProperty("maptimeStart");
+      expect(stepsOf(stopped)).toEqual([{ index: 0, call: "find_actors", ok: false, text: "unknown class Nope" }]);
+      expect(stopped.structuredContent?.error).toMatch(/^scenario failed at step 0: 1 step\(s\) ran, 1 call\(s\)\n0 find_actors: FAILED - unknown class Nope$/);
+      expect(cmds().some((c) => c.startsWith("god"))).toBe(false);
+      const went = await h.call("run_scenario", { steps, onFail: "continue" });
+      expect(went.isError).toBeUndefined();
+      expect(went.structuredContent).toMatchObject({ ok: false, failedAt: 0, calls: 2 });
+      expect(stepsOf(went)[1]).toEqual({ index: 1, call: "run_command", ok: true, text: "god on" });
+    });
+
+    it("fails a repeat whose until never holds and an expect that doesn't, stopping at the first unless told to continue", async () => {
+      const h = await live({ responses: { findactors: ["MCP_FOUND", "found class=DoomImp tid=7 flags=m"] } });
+      const none = { kind: "actors", class: "DoomImp", op: "==", value: 0 };
+      const steps = [{ repeat: [{ call: "step", args: { tics: 1 } }], until: none, maxIterations: 3 }, { expect: none }];
+      const until = { index: 0, iterations: 3, ok: false, text: "until not met: 1 == 0, within 3 iteration(s)" };
+      const stopped = await h.call("run_scenario", { steps });
+      expect(stopped.isError).toBe(true);
+      expect(stopped.structuredContent).toMatchObject({ ok: false, failedAt: 0, calls: 3 });
+      expect(stepsOf(stopped)).toMatchObject([until]);
+      const went = await h.call("run_scenario", { steps, onFail: "continue" });
+      expect(went.isError).toBeUndefined();
+      expect(went.structuredContent).toMatchObject({ ok: false, failedAt: 0, calls: 3 });
+      expect(stepsOf(went)).toMatchObject([until, { index: 1, expect: "actors", ok: false, text: "not met: 1 == 0" }]);
+      expect((went.content?.[0]?.text ?? "").split("\n").slice(1)).toEqual([
+        "0 repeat x3: FAILED - until not met: 1 == 0, within 3 iteration(s)",
+        "1 expect actors: FAILED - not met: 1 == 0",
+      ]);
+    });
+
+    it("stops before the next step once the client cancels, sending the engine nothing more", async () => {
+      // Driven directly: through a real client the cancelled call rejects at once, with no sign of when the run ended.
+      const h = await withStatus();
+      const cancel = new AbortController();
+      bridge!.onCommand("first", () => cancel.abort());
+      bridge!.clearReceived();
+      const steps = [{ call: "run_command", args: { text: "first" } }, { call: "run_command", args: { text: "second" } }];
+      const res = await collectTools(h.ctx).get("run_scenario")!({ instance: 1, steps, onFail: "continue", maxSeconds: 60 }, { signal: cancel.signal });
+      // The start maptime read, then step 0: no step 1 and no end maptime read.
+      expect(cmds().map(sentinel)).toEqual(["mcp_status S", "first ; mcp_status S"]);
+      expect(res.isError).toBe(true);
+      expect(stepsOf(res)[1]).toEqual({ index: 1, call: "run_command", ok: false, text: "stopped: the client cancelled the run" });
+    });
+
+    it("cuts a large step result to fit, with how to get all of it", async () => {
+      const rows = Array.from({ length: 30 }, (_, i) => `found class=DoomImp tid=${i + 1}`);
+      const h = await live({ responses: { findactors: ["MCP_FOUND", ...rows] } });
+      const res = await h.call("run_scenario", { steps: [{ call: "find_actors" }] });
+      const step = stepsOf(res)[0];
+      expect((step.structured as { actors: unknown[] }).actors).toHaveLength(20);
+      expect(step).toMatchObject({ omitted: { rows: 10 }, hint: "cut to fit; call find_actors on its own for all of it" });
+    });
+
+    it("reports progress once for the whole run, never an inner tool's own", async () => {
+      const h = await live();
+      const { result, progress } = await h.callWithProgress("run_scenario", { steps: [{ call: "step", args: { tics: 5 } }], maxSeconds: 30 });
+      expect(result.structuredContent?.ok).toBe(true);
+      expect(progress).toEqual([{ progress: 1000, total: 30000, message: "running scenario" }]);
+    });
+
+    it("gives the run one engine-state note, and settles and refreshes after an inner input-only step", async () => {
+      const sleeps: number[] = [];
+      const h = await withStatus({ io: { sleep: (ms: number) => (sleeps.push(ms), Promise.resolve()) } });
+      bridge!.setStatus({ paused: "1" });
+      bridge!.clearReceived();
+      const res = await h.call("run_scenario", {
+        steps: [{ call: "menu_key", args: { key: "down" } }, { call: "run_command", args: { text: "x" } }],
+      });
+      expect(res.structuredContent?.engineState).toBe("Engine state: paused.");
+      expect(stepsOf(res).every((st) => !JSON.stringify(st).includes("Engine state"))).toBe(true);
+      expect(cmds().map(sentinel)).toEqual(["mcp_status S", "mcp_status S", "x ; mcp_status S", "mcp_status S"]);
+      expect(sleeps).toEqual([60]);
     });
   });
 
@@ -2939,24 +3688,83 @@ describe("script listing and profiling tools", () => {
     expect(await h.text("list_functions")).toBe("1 function(s)");
   });
 
-  it("profiles scripts with and without sort/limit", async () => {
-    const h = await live({ responses: { acsprofile: ["MOD name 1 2 3 4 5"] } });
-    expect(await h.text("profile_scripts")).toBe("1 profiled");
-    await h.call("profile_scripts", { sort: "avg" });
-    await h.call("profile_scripts", { sort: "total", limit: 5 });
-    const sent = bridge!.received.filter((m) => m.t === "cmd").map((m) => m.text ?? "");
-    expect(sent[0]).toMatch(/^acsprofile ;/);
-    expect(sent[1]).toMatch(/^acsprofile avg ;/);
-    expect(sent[2]).toMatch(/^acsprofile total 5 ;/);
+  const sentCmds = () => bridge!.received.filter((m) => m.t === "cmd").map((m) => (m.text ?? "").split(" ;")[0]);
+  // Twelve scripts by total descending, so the engine's own top 10 would drop the last two.
+  const twelve = [
+    "All scripts:",
+    ...Array.from({ length: 12 }, (_, i) => `MOD          ${i + 1}  ${1200 - i * 100} 1 ${1200 - i * 100} 1 1`),
+    "All functions:",
+    "MOD          fn  7 7 1 1 1",
+  ];
+
+  it("fetches every row with acsprofile total 0 and ranks and limits them host-side", async () => {
+    const h = await live({ responses: { acsprofile: twelve } });
+    const res = await h.call("profile_scripts");
+    expect(res.content?.[0]?.text).toBe("11 of 13 profiled (top 10 per section by total)");
+    // Claude Code shows only the structured half, so it must say the rows are a slice too.
+    expect(res.structuredContent).toMatchObject({ profiled: { scripts: 12, functions: 1 }, limit: 10, sort: "total" });
+    expect(await h.text("profile_scripts", { sort: "runs", limit: 12 })).toBe("13 of 13 profiled (top 12 per section by runs)");
+    const avg = await h.call("profile_scripts", { sort: "avg", limit: 1 });
+    expect((avg.structuredContent as { entries: { name: string }[] }).entries.map((e) => e.name)).toEqual(["1", "fn"]);
+    // Nothing printed truncated, so no dump round trip.
+    expect(sentCmds()).toEqual(["acsprofile total 0", "acsprofile total 0", "acsprofile total 0"]);
+  });
+
+  it("resolves truncated names from the dumps, fetching only the listing a cut row needs", async () => {
+    const h = await live({
+      responses: {
+        acsprofile: [
+          "All scripts:",
+          'BEHAVIOR     "AVeryLongProfiledSc        50       1      50      50      50',
+          "All functions:",
+          "BEHAVIOR     spinfn                      20       5       4       4       4",
+        ],
+        dumpmodules: ["MCP_MODULES", "module 0 BEHAVIOR"],
+        dumpscripts: ["MCP_SCRIPTS", "script 0 -1 AVeryLongProfiledScript 0 0"],
+      },
+    });
+    const res = await h.call("profile_scripts");
+    expect((res.structuredContent as { entries: { name: string }[] }).entries.map((e) => e.name)).toEqual([
+      '"AVeryLongProfiledScript"',
+      "spinfn",
+    ]);
+    expect(sentCmds()).toEqual(["acsprofile total 0", "dumpmodules", "dumpscripts"]);
+  });
+
+  it("fetches dumpfunctions alone for a cut function name, and flags one that doesn't resolve", async () => {
+    const h = await live({
+      responses: {
+        acsprofile: ["All functions:", "BEHAVIOR     averylongfunctionnam        20       5       4       4       4"],
+        dumpmodules: ["MCP_MODULES", "module 0 BEHAVIOR"],
+        dumpfunctions: ["MCP_FUNCTIONS"],
+      },
+    });
+    const res = await h.call("profile_scripts");
+    expect(res.structuredContent).toMatchObject({ entries: [{ name: "averylongfunctionnam", truncated: true }] });
+    expect(sentCmds()).toEqual(["acsprofile total 0", "dumpmodules", "dumpfunctions"]);
   });
 
   it("profiles a time window, clearing first", async () => {
     const h = await live({ responses: { acsprofile: ["MOD name 1 2 3 4 5"] } });
-    expect(await h.text("profile_window", { seconds: 2 })).toBe("1 profiled over 2s");
+    expect(await h.text("profile_window", { seconds: 2 })).toBe("1 of 1 profiled over 2s (top 10 per section by total)");
     await h.call("profile_window", { sort: "runs", limit: 3 });
-    const sent = bridge!.received.filter((m) => m.t === "cmd").map((m) => m.text ?? "");
-    expect(sent[0]).toMatch(/^acsprofile clear/);
-    expect(sent[3]).toMatch(/^acsprofile runs 3 ;/);
+    const sent = sentCmds();
+    expect(sent[0]).toBe("acsprofile clear");
+    expect(sent[3]).toBe("acsprofile total 0");
+  });
+
+  it("closes both profile descriptions on the adapter's note, with no trailing space for an empty one", async () => {
+    for (const variant of [engine, { ...engine, notes: { ...engine.notes, profileScripts: "" } }]) {
+      const h = await live({ engine: variant });
+      const { tools } = await h.client.listTools();
+      for (const name of ["profile_scripts", "profile_window"]) {
+        const description = tools.find((t) => t.name === name)?.description ?? "";
+        expect(description).toContain("top 10 per section");
+        expect(description.endsWith(variant.notes.profileScripts || "with truncated: true.")).toBe(true);
+      }
+      await harness!.close();
+      await bridge!.close();
+    }
   });
 });
 
@@ -3369,6 +4177,174 @@ describe("process management tools", () => {
     );
     expect(await h.text("reset")).toMatch(/survived SIGKILL \(PIDs 7\)/);
   });
+
+  describe("wait: false", () => {
+    // A PID that is not (and cannot be) running, so a graceful quit sees the engine gone at once.
+    const DEAD_PID = 0x7ffffff0;
+
+    /** A launch on `bridge` whose spawns, port waits and kills are counted. */
+    async function noWaitRig(opts: { pid?: number; portOpen?: boolean; spawn?: () => never } = {}) {
+      bridge = await FakeBridge.start();
+      const seen = { spawns: 0, waits: 0, killed: 0 };
+      harness = await startHarness({
+        config: { exe: "/engine/zandronum", basePort: bridge.port },
+        io: {
+          existsSync: (p) => p === "/engine/zandronum",
+          hasBridge: () => true,
+          portOpen: () => Promise.resolve(opts.portOpen === true),
+          launchIo: {
+            spawn: () => {
+              seen.spawns++;
+              if (opts.spawn) opts.spawn();
+              return { pid: "pid" in opts ? opts.pid : DEAD_PID, kill: () => void seen.killed++ };
+            },
+            waitForPort: () => {
+              seen.waits++;
+              return Promise.resolve();
+            },
+            clearQuarantine: () => {},
+            ensureDir: () => {},
+            seedConfig: () => {},
+          },
+        },
+      });
+      return { h: harness, seen };
+    }
+
+    it("returns once spawned, with no port wait or progress, and attaches on the first tool call", async () => {
+      const { h, seen } = await noWaitRig();
+      const { result, progress } = await h.callWithProgress("launch_instance", { wait: false });
+      expect(result.content).toEqual([
+        {
+          type: "text",
+          text: `spawned instance 1 on bridge port ${bridge!.port}\nNot attached yet (engine PID ${DEAD_PID}): its first tool call waits for the bridge and attaches.`,
+        },
+      ]);
+      expect(progress).toEqual([]);
+      expect(seen.waits).toBe(0);
+      expect(h.ctx.registry.pending(1)).toBe(true);
+      expect(h.ctx.enginePidFor(1)).toBe(DEAD_PID);
+      bridge!.respondTo("version", ["Zandronum 3.2.1"]);
+      expect(await h.text("run_command", { text: "version" })).toBe("Zandronum 3.2.1");
+      expect(seen.waits).toBe(1);
+      expect(h.ctx.registry.pending(1)).toBe(false);
+    });
+
+    it("leaves the PID out of the reply when the child has none", async () => {
+      const { h } = await noWaitRig({ pid: undefined });
+      expect(await h.text("launch_instance", { wait: false })).toBe(
+        `spawned instance 1 on bridge port ${bridge!.port}\nNot attached yet: its first tool call waits for the bridge and attaches.`,
+      );
+    });
+
+    it("reports a spawn that throws through the launch failure path", async () => {
+      const { h } = await noWaitRig({
+        spawn: () => {
+          // A non-Error throw must still be reported, not swallowed.
+          throw "spawn EACCES";
+        },
+      });
+      const result = await h.call("launch_instance", { wait: false });
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toMatch(/^Instance 1 failed to come up: spawn EACCES\./);
+    });
+
+    it("launch_instance refuses a pending instance instead of spawning beside it", async () => {
+      const { h, seen } = await noWaitRig();
+      await h.call("launch_instance", { wait: false });
+      const result = await h.call("launch_instance", { wait: false });
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toMatch(/still waiting from a wait: false launch; kill_instance or relaunch_instance/);
+      expect(seen.spawns).toBe(1);
+    });
+
+    it("launch_instance replaces a pending instance whose engine died", async () => {
+      const { h, seen } = await noWaitRig();
+      await h.call("launch_instance", { wait: false });
+      h.ctx.io.alive = () => false;
+      expect((await h.call("launch_instance", { wait: false })).isError).toBeFalsy();
+      expect(seen.spawns).toBe(2);
+    });
+
+    it("attach_instance refuses a pending instance, keeping its launch options", async () => {
+      const { h } = await noWaitRig();
+      await h.call("launch_instance", { wait: false, extraArgs: ["-host", "2"] });
+      const result = await h.call("attach_instance");
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]?.text).toBe("Instance 1 was launched with wait: false; call any tool on it to attach.");
+      expect(h.ctx.launchArgsFor(1)?.args.extraArgs).toEqual(["-host", "2"]);
+      expect(h.ctx.registry.pending(1)).toBe(true);
+    });
+
+    it("attach_instance replaces a pending instance whose engine died", async () => {
+      const { h } = await noWaitRig();
+      await h.call("launch_instance", { wait: false });
+      h.ctx.io.alive = () => false;
+      expect((await h.call("attach_instance", { port: bridge!.port })).isError).toBeFalsy();
+      expect(h.ctx.registry.pending(1)).toBe(false);
+      expect(h.ctx.registry.childPid(1)).toBeUndefined();
+    });
+
+    it("attach_instance still refuses a pending instance with no child PID to probe", async () => {
+      const { h } = await noWaitRig({ pid: undefined });
+      await h.call("launch_instance", { wait: false });
+      h.ctx.io.alive = () => false;
+      expect((await h.call("attach_instance")).isError).toBe(true);
+      expect(h.ctx.registry.pending(1)).toBe(true);
+    });
+
+    it("kill_instance attaches a pending instance whose bridge is up, so it quits cleanly", async () => {
+      const { h, seen } = await noWaitRig({ portOpen: true });
+      await h.call("launch_instance", { wait: false });
+      expect(await h.text("kill_instance")).toBe("instance 1 quit cleanly");
+      expect(seen.waits).toBe(1);
+      // The quit is fire-and-forget, so let the socket deliver it.
+      await vi.waitFor(() => expect(bridge!.received.some((m) => m.t === "cmd" && m.text === "quit")).toBe(true));
+      expect(seen.killed).toBe(0);
+    });
+
+    it("kill_instance force-kills a pending instance whose bridge isn't up, without attaching", async () => {
+      const { h, seen } = await noWaitRig({ pid: undefined });
+      await h.call("launch_instance", { wait: false });
+      expect(await h.text("kill_instance")).toBe("instance 1 killed before its bridge came up");
+      expect(seen.waits).toBe(0);
+      expect(seen.killed).toBe(1);
+      expect(h.ctx.isBound(1)).toBe(false);
+    });
+
+    it("run_scenario refuses a bad step without attaching a pending instance", async () => {
+      const { h, seen } = await noWaitRig({ pid: undefined });
+      await h.call("launch_instance", { wait: false });
+      const res = await h.call("run_scenario", { steps: [{ call: "kill_instance" }] });
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toMatch(/^refused, nothing ran:\nstep 0 \(kill_instance\)/);
+      expect(seen.waits).toBe(0);
+      expect(h.ctx.registry.pending(1)).toBe(true);
+    });
+
+    it("relaunch_instance stops the pending child and spawns again without waiting", async () => {
+      const { h, seen } = await noWaitRig({ pid: undefined });
+      await h.call("launch_instance", { wait: false, extraArgs: ["-host", "2"] });
+      expect(await h.text("relaunch_instance")).toBe(
+        `relaunched instance 1 on bridge port ${bridge!.port} (killed before its bridge came up)\nNot attached yet: its first tool call waits for the bridge and attaches.`,
+      );
+      expect(seen.killed).toBe(1);
+      expect(seen.spawns).toBe(2);
+      expect(seen.waits).toBe(0);
+      expect(h.ctx.registry.pending(1)).toBe(true);
+      expect(h.ctx.launchArgsFor(1)?.args.wait).toBe(false);
+    });
+
+    it("relaunch_instance with wait: true overrides the stored no-wait", async () => {
+      const { h, seen } = await noWaitRig({ pid: undefined });
+      await h.call("launch_instance", { wait: false });
+      expect(await h.text("relaunch_instance", { wait: true })).toBe(
+        `relaunched instance 1 on bridge port ${bridge!.port} (killed before its bridge came up)`,
+      );
+      expect(seen.waits).toBe(1);
+      expect(h.ctx.registry.has(1)).toBe(true);
+    });
+  });
 });
 
 describe("relaunch_instance", () => {
@@ -3571,9 +4547,12 @@ describe("relaunch_instance", () => {
       return h;
     };
 
-    it("get_crash and relaunch_instance know the spawned child's PID", async () => {
+    it("get_crash, process_stats and relaunch_instance know the spawned child's PID", async () => {
       const h = await failedLaunch();
       expect(await h.text("get_crash")).toBe(report);
+      expect((await h.call("process_stats")).content?.[0]?.text).toBe(
+        `Instance 1's engine (PID ${DEAD_PID}) is not running.`,
+      );
       expect((await h.text("relaunch_instance")).split("\n")).toContain(
         `previous engine (PID ${DEAD_PID}) crashed; its backtrace is at ${logOf(bridge!.port)}.crash`,
       );
@@ -4083,13 +5062,73 @@ describe("diagnostic tools", () => {
     expect((await harness.call("launch_instance")).isError).toBe(true);
     expect(await harness.text("get_crash")).toMatch(/^Unverified: this instance's engine PID is unknown/);
   });
+
+  describe("process_stats", () => {
+    const status = (name: string | null, fields = ["VmSize:\t 1234567 kB", "VmHWM:\t  900000 kB", "VmRSS:\t  812345 kB"]) =>
+      [...(name === null ? [] : [`Name:\t${name}`]), "State:\tS (sleeping)", "Pid:\t4242", ...fields, "Threads:\t9"].join("\n") + "\n";
+    const stats = async (text: string, config: Partial<ServerConfig> = { exe: "/engine/zandronum" }) => {
+      const read: string[] = [];
+      const h = await offline(config, { readTextSync: (p: string) => (read.push(p), text) });
+      h.ctx.rememberEngine(1, 4242);
+      return { res: await h.call("process_stats"), read };
+    };
+
+    it("reports the engine's memory in KiB from its /proc status file", async () => {
+      const { res, read } = await stats(status("zandronum"));
+      expect(read).toEqual(["/proc/4242/status"]);
+      expect(res.isError).toBeUndefined();
+      expect(res.content?.[0]?.text).toBe("PID 4242 (zandronum): VmRSS 812345 KiB, VmHWM 900000 KiB, VmSize 1234567 KiB");
+      expect(res.structuredContent).toEqual({ pid: 4242, name: "zandronum", vmRssKib: 812345, vmHwmKib: 900000, vmSizeKib: 1234567 });
+    });
+
+    it("fails when the process name isn't the engine executable's, so another process's memory never passes as the engine's", async () => {
+      const other = await stats(status("node"));
+      expect(other.res.isError).toBe(true);
+      expect(other.res.content?.[0]?.text).toBe(
+        "PID 4242 is node, not zandronum: not this instance's engine (a server outside the engine's PID namespace?).",
+      );
+      expect((await stats(status(null))).res.content?.[0]?.text).toMatch(/^PID 4242 is unnamed, not zandronum:/);
+      // With no exe configured there is nothing to compare against.
+      const bare = await stats(status(null), {});
+      expect(bare.res.isError).toBeUndefined();
+      expect(bare.res.content?.[0]?.text).toMatch(/^PID 4242 \(\?\): VmRSS 812345 KiB/);
+    });
+
+    it("fails, rather than reporting zeros, when a memory field is missing", async () => {
+      const { res } = await stats(status("zandronum", ["VmSize:\t 1 kB"]));
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("/proc/4242/status has no VmRSS/VmHWM line (a zombie or kernel thread has none).");
+    });
+
+    it("fails when the status file can't be read", async () => {
+      for (const [thrown, why] of [[new Error("ENOENT: no such file"), "ENOENT: no such file"], ["EACCES", "EACCES"]] as const) {
+        const h = await offline({}, { readTextSync: () => { throw thrown; } });
+        h.ctx.rememberEngine(1, 4242);
+        const res = await h.call("process_stats");
+        expect(res.isError).toBe(true);
+        expect(res.content?.[0]?.text).toBe(`Can't read /proc/4242/status: ${why}`);
+      }
+    });
+
+    it("fails on an instance with no known engine PID, or a dead engine, without reading /proc", async () => {
+      const unknown = await offline();
+      expect(await unknown.text("process_stats")).toBe(
+        "No engine PID known for instance 1: launch it with launch_instance or attach with attach_instance.",
+      );
+      const dead = await offline({}, { alive: (pid: number) => pid !== 4242 });
+      dead.ctx.rememberEngine(1, 4242);
+      const res = await dead.call("process_stats");
+      expect(res.isError).toBe(true);
+      expect(res.content?.[0]?.text).toBe("Instance 1's engine (PID 4242) is not running.");
+    });
+  });
 });
 
 describe("progress reporting on slow tools", () => {
   it("reports progress while sampling a profiling window", async () => {
     const h = await live({ responses: { acsprofile: ["MOD name 1 2 3 4 5"] } });
     const { result, progress } = await h.callWithProgress("profile_window", { seconds: 30 });
-    expect(result.content?.[0]?.text).toBe("1 profiled over 30s");
+    expect(result.content?.[0]?.text).toBe("1 of 1 profiled over 30s (top 10 per section by total)");
     expect(progress).toEqual([{ progress: 1000, total: 30000, message: "sampling for 30s" }]);
   });
 
@@ -4164,7 +5203,7 @@ describe("progress reporting on slow tools", () => {
       },
     );
     // The failed notification must not take the profiling run down with it.
-    expect(result.content?.[0]?.text).toBe("1 profiled over 1s");
+    expect(result.content?.[0]?.text).toBe("1 of 1 profiled over 1s (top 10 per section by total)");
   });
 });
 

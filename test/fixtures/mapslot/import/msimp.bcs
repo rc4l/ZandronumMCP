@@ -1,0 +1,7 @@
+#library "msimp"
+#import "zcommon.bcs"
+#import "msimplib.bcs"
+
+int mi_own[2] = { 9, 9 };
+
+script "mi_sum" (void) { SetResultValue(mil_v + mil_arr[1] + mi_own[0]); }

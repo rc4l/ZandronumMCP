@@ -139,12 +139,13 @@ the only thing Gatekeeper gates. A self-built engine is never quarantined, so th
 only affects downloads. (For a no-friction download you'd sign with a Developer ID
 and notarize the app in CI — not wired up here.)
 
-## ACS compilers for `run_acs`
+## ACS compilers
 
 `run_acs` compiles its snippet on the host before loading it into the game, so it needs
 [zt-bcc](https://github.com/zeta-group/zt-bcc) (the default) or
-[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. Nothing else needs a
-compiler: without one, the server and every other tool work as usual, and `run_acs` returns
+[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. The map-var tools'
+`sourceFile` builds the named source with zt-bcc too. Nothing else needs a
+compiler: without one, the server and every other tool work as usual, and these calls return
 an error naming what to install and which variable to set, without touching the game.
 
 The server looks for `zt-bcc`, then `bcc`, on `PATH` (and `acc` for acc). To use a binary
@@ -208,6 +209,10 @@ never picks it up. The files are read on every call, so an edit applies right aw
 Relative paths resolve against the profile file's folder. The reply names each profile it
 applied (`profile: <file>`), and a compile error in a copied define points at its own file
 and line, not at the generated prelude.
+
+### Map vars by source (`sourceFile`)
+
+How the map-var tools find a var the module doesn't export, and why that fails closed: PROTOCOL.md, ACS.
 
 ## Run the server from source
 

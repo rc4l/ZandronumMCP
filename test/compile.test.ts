@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { SpawnSyncReturns } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   compileAcs,
+  compileFile,
   consolePath,
   defaultCompileDeps,
   findOnPath,
@@ -14,6 +16,18 @@ import {
 import { envName } from "../src/adapter.js";
 import { engine } from "../src/engine.js";
 import { abs } from "./fakes/paths.js";
+
+// The next spawnSync result, once, in place of a real process.
+const nextSpawn = vi.hoisted(() => ({ result: undefined as SpawnSyncReturns<Buffer> | undefined }));
+vi.mock("node:child_process", async (orig) => {
+  const cp = await orig<typeof import("node:child_process")>();
+  const spawnSync = (...a: Parameters<typeof cp.spawnSync>) => {
+    const r = nextSpawn.result;
+    nextSpawn.result = undefined;
+    return r ?? cp.spawnSync(...a);
+  };
+  return { ...cp, spawnSync };
+});
 
 const BCC_ENV = envName(engine, "BCC");
 const ACC_ENV = envName(engine, "ACC");
@@ -48,6 +62,8 @@ function fakeDeps(
   opts: {
     dir?: string;
     fail?: unknown;
+    /** What exec prints on success. */
+    output?: string;
     path?: string[];
     files?: string[];
     plain?: string[];
@@ -67,6 +83,7 @@ function fakeDeps(
     exec: (exe, args, cwd) => {
       calls.push({ exe, args, cwd });
       if (opts.fail !== undefined) throw opts.fail;
+      return opts.output ?? "";
     },
     pathEnv: () => opts.path?.map(abs).join(path.delimiter),
     exeExts: opts.exts ?? [""],
@@ -349,12 +366,45 @@ describe("compileAcs", () => {
     removeDir(bin);
   });
 
+  it("the default exec returns stdout then stderr on success, and names a signal or a missing binary", () => {
+    const bin = mkdtempSync(path.join(tmpdir(), "mcp-fakebcc-"));
+    const ok = withNodeStub(bin, 'fs.writeSync(1, "out\\n"); fs.writeSync(2, `${args[0]}: warning: w\\n`); process.exit(0);', (exe) =>
+      defaultCompileDeps.exec(exe, ["x.bcs"], bin),
+    );
+    expect(ok).toBe("out\nx.bcs: warning: w\n");
+    // Only the spawning process sees a signal on Windows, so the killed run is a spawn result.
+    nextSpawn.result = { pid: 1, output: [], stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), status: null, signal: "SIGKILL" };
+    expect(() => defaultCompileDeps.exec(path.join(bin, "killed"), [], bin)).toThrow(/killed exited with SIGKILL/);
+    expect(() => defaultCompileDeps.exec(path.join(bin, "missing"), [], bin)).toThrow(expect.objectContaining({ code: "ENOENT" }));
+    removeDir(bin);
+  });
+
   it("removeDir is a no-op on a missing dir and removes a full one", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "mcp-rm-"));
     writeFileSync(path.join(dir, "f"), "x");
     removeDir(dir);
     removeDir(dir);
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe("compileFile", () => {
+  const req = { compiler: "bcc" as const, exe: "/opt/bcc", main: "lib.bcs", cwd: "/work", object: "/work/a.o", purpose: "sourceFile", engine };
+
+  it("compiles a file in place with the shared include path, keeping what a successful compiler printed", () => {
+    const { deps, calls, written } = fakeDeps({ ...BCC, output: "lib.bcs:3:1: warning: w\n" });
+    expect(compileFile({ ...req, includeDirs: ["/src", "inc"] }, deps)).toEqual({ ok: true, output: "lib.bcs:3:1: warning: w\n" });
+    expect(calls).toEqual([{ exe: abs("/opt/bcc"), args: ["-i", abs("/src"), "-i", abs("inc"), "lib.bcs", "/work/a.o"], cwd: "/work" }]);
+    expect(written.size).toBe(0);
+  });
+
+  it("returns the diagnostics and the binary on failure, and names its purpose when there is no compiler", () => {
+    const fail = { stderr: "lib.bcs:1:1: error: e\n" };
+    expect(compileFile(req, fakeDeps({ ...BCC, fail }).deps)).toEqual({ ok: false, diagnostics: "lib.bcs:1:1: error: e", exe: abs("/opt/bcc") });
+    expect(compileFile({ ...req, exe: undefined }, fakeDeps().deps)).toEqual({
+      ok: false,
+      diagnostics: `no ACS compiler found: tried zt-bcc, bcc on PATH. sourceFile needs zt-bcc (https://github.com/zeta-group/zt-bcc): put it on PATH or set ${BCC_ENV} to its path in the MCP server's env.`,
+    });
   });
 });
 

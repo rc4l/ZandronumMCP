@@ -1,6 +1,33 @@
 // Build synthetic compiled-ACS BEHAVIOR lumps for tests (FNAM/SNAM name chunks).
 
-function nameChunk(id: string, names: string[]): Buffer {
+/** Little-endian DWORDs. */
+export function u32(...values: number[]): Buffer {
+  const buf = Buffer.alloc(values.length * 4);
+  values.forEach((v, i) => buf.writeUInt32LE(v >>> 0, i * 4));
+  return buf;
+}
+
+/** One chunk: [id][size][data]. */
+export function chunk(id: string, data: Buffer): Buffer {
+  return Buffer.concat([Buffer.from(id, "latin1"), u32(data.length), data]);
+}
+
+/** A FUNC chunk: one public, value-returning, argless entry per address. */
+export function funcChunk(addresses: number[]): Buffer {
+  return chunk("FUNC", Buffer.concat(addresses.map((a) => Buffer.concat([Buffer.from([0, 0, 1, 0]), u32(a)]))));
+}
+
+/** A compiled object with code from offset 8, by default behind zt-bcc's indirect `ACS\0` header,
+ *  whose chunk offset and real tag sit just before a minimal directory after the chunks. */
+export function buildObject(opts: { format?: "ACSE" | "ACSe"; indirect?: boolean; code?: Buffer; chunks?: Buffer[] }): Buffer {
+  const { format = "ACSe", indirect = true, code = Buffer.alloc(0), chunks = [] } = opts;
+  const body = Buffer.concat([code, ...chunks]);
+  if (!indirect) return Buffer.concat([Buffer.from(format, "latin1"), u32(8 + code.length), body]);
+  const tail = Buffer.concat([u32(8 + code.length), Buffer.from(format, "latin1"), u32(0)]);
+  return Buffer.concat([Buffer.from("ACS\0", "latin1"), u32(8 + body.length + 8), body, tail]);
+}
+
+export function nameChunk(id: string, names: string[]): Buffer {
   const strings: Buffer[] = [];
   const offsets: number[] = [];
   let pos = 4 + names.length * 4; // strings begin after count + offset table

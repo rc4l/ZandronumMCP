@@ -63,6 +63,7 @@ under that marker:
 | `scriptstat` | `scriptstat` |
 | `acsprofile` | `puke 901 1` and `step` 3 tics first (so the functions section has a row), then `acsprofile` |
 | `acsprofile_sorted` | `acsprofile total 5` |
+| `acsprofile_all` | `acsprofile total 0`, run right after the `acsprofile_sorted` capture |
 | `dumphud` | `pukename ConfHud`, `step` 3 tics, `dumphud` |
 | `runacs` | `mcp_runacs <repo>/test/fixtures/conformance/probe.o ConfProbe 5 name=1` (drop `name=1` on an overlay without the `runacsname` cap) |
 | `runscript` | `mcp_runscript ConfProbe name=1 7` (the script `runacs` just loaded; it sets its result to 6 times the argument) |
@@ -79,7 +80,29 @@ under that marker:
 | `input_trail_ends` | `mcp_input trail ends` |
 | `input_stop` | `mcp_input stop` |
 | `spawnat_find` | `mcp_spawnat DoomImp <player x> <player y> find=128`, the player's own spot (from `currentpos`), so the search has to move the imp |
-| `dumpactor_firing` | `mcp_setview 270` (away from the imps), `+attack`, `step` 25 tics, `dumpactor`, `-attack`, all under this marker: the pistol mid-refire, so the weapon and flash psprites, `refire` and the attack button are set. Last, since it spends ammo |
+| `dumpactor_firing` | `mcp_setview 270` (away from the imps), `+attack`, `step` 25 tics, `dumpactor`, `-attack`, all under this marker: the pistol mid-refire, so the weapon and flash psprites, `refire` and the attack button are set. After the rows above, since it spends ammo |
+| `place` | `mcp_place <tid> 0 x=<x> y=<y>`, a spot 48 to 96 units from the `spawnat` imp where `mcp_pointinfo <x> <y> mover=tid:<tid>` says `fit ok=1` |
+| `place_error` | `mcp_place 9999 0 x=0` |
+| `damage` | `mcp_damage <tid> 0 10` |
+| `damage_error` | `mcp_damage <tid> 0 10 source=9999` |
+| `inv_give` | `mcp_inv 0 0 give Clip 5` |
+| `inv_take` | `mcp_inv 0 0 take Clip 5` |
+| `inv_error` | `mcp_inv 0 0 give NoSuchItem` |
+| `remove` | `mcp_remove <tid> 0`, last of the imp's rows |
+| `remove_error` | `mcp_remove 9999 0 all=1` |
+| `end` | (marker only) |
+
+The `mapslot_*` captures take a second launch, with `files` also listing
+`<repo>/test/fixtures/mapslot/res` (kept out of the first, whose `dumpmodules` expects `MCPCONF`
+alone). The digests are those of `res/acs/mapslot.o` and `res/acs/mapslotn.o`
+(`imageDigest`, `src/acs/bytecode.ts`); a fixture rebuild changes them:
+
+| Name | Command |
+|---|---|
+| `mapslot_get` | `mcp_mapslot 4 v=1 code=44 first=SPTR md5=29ceb5e0fbf5c86a15b7f526facab038` (`ms_hid`) |
+| `mapslot_set` | the same with `set=107` |
+| `mapslot_array` | `mcp_mapslot 6 v=1 code=136 first=SPTR md5=4acb6c6f08027dc5833e3698dc124a63 index=11` (`mn_hid_pts[1].y`) |
+| `mapslot_nomatch` | `mapslot_get`'s command with the md5's last digit changed |
 | `end` | (marker only) |
 
 The `dumphud` captures were taken with `res/` loaded, god/notarget enabled, the player at
@@ -89,8 +112,9 @@ binds only `dumprenderer` and `pointinfo`, so a redo of `dumphud` alone can run 
 no bridge correlator and retains the HUD message and pause image.
 
 The `status` and `status_acstemp` captures include `pending=0`.
-Never hand-edit captures into a new format. For notify conformance, re-run the launch through
-`dumphud` with its HUD-message script active; bridge correlator text must be absent.
+Never hand-edit captures into a new format. On resolver changes, re-capture `mapslot_*` and
+verify byte-identical replies. For notify conformance, re-run the first launch through `dumphud`
+with its HUD-message script active; bridge correlator text must be absent.
 
 Then, before `kill_instance` (a launch recreates it), split the instance's bridge tee log,
 `mcp-bridge-<port>.log` beside the engine binary. For example, for Zandronum instance 1, from the

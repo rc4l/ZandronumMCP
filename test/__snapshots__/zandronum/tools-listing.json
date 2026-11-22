@@ -302,6 +302,159 @@
     }
   },
   {
+    "name": "place_actor",
+    "title": "Move, turn or launch an actor",
+    "description": "Run `mcp_place`: move, turn and/or launch any live actor in one call and report it after (fromx/fromy/fromz: where it was). Target: tid and index, as set_actor_prop's. x/y/z in map units: a missing x or y keeps the current one; without z, a given x or y puts the actor on the floor there, else z stays. The move is Thing_Move's fit-tested teleport, judged as summon_at judges a spawn, and never telefrags: where the actor wouldn't fit it is refused, reporting what blocks (an actor, a line or the floor/ceiling fit), and then nothing is applied, angle and velocity included. force skips that test; fog spawns teleport fog at both spots. The test is a real collision check, as summon_at's: an overlapped TOUCHY actor dies, a BUMPSPECIAL actor's special can fire and a missile damages what it overlaps. angle and pitch in degrees (0 east, 90 north; pitch negative looks up). vx/vy/vz in map units per tic set the velocity (a missing axis keeps its own), or add to it with addVelocity. Applied in that order (position, facing, velocity), so a move-and-launch isn't stopped. The write is direct, so it works while paused, but the actor only acts on it once the sim runs. Refused outside a level, on a client instance (act on the server) and on a spectator. On a server pass a tid (tid 0 isn't your body there). A z above 32767 minus the actor's height is refused, force or not, since fixed point would wrap its top. A point in the void is only caught by the floor/ceiling fit here. On a server, a client's own body takes back its angle and pitch from that client's next move until the client has the new ones.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The actor's TID; omitted or 0 = the console player's body."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The nth (0-based) actor sharing the TID, as find_actors' index=; needs a tid of 1 or more."
+        },
+        "x": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "y": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "z": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "angle": {
+          "type": "number"
+        },
+        "pitch": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "vx": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "vy": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "vz": {
+          "type": "number",
+          "minimum": -32767,
+          "maximum": 32767
+        },
+        "addVelocity": {
+          "type": "boolean"
+        },
+        "fog": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "remove_actor",
+    "title": "Remove an actor",
+    "description": "Run `mcp_remove`: remove the actor with this tid (index: the nth sharing it) or, with all, every actor with it, as Thing_Remove does: no death, and it leaves the kill/item totals. A live player's body is never removed; it is reported as skipped. The reply lists each removed actor as it was, plus the count. Refused outside a level, on a client instance (act on the server) and on a spectator. On a server pass a tid (tid 0 isn't your body there). In a game mode that resets the map, a map-placed actor is hidden instead (hidden=1) and keeps its tid, but every later lookup (these tools, find_actors, actor_state) skips it, as ACS does.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The actor's TID; required, so the player's body can't be named."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The nth (0-based) actor sharing the TID, as find_actors' index=; needs a tid of 1 or more."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "Remove every actor with the tid; can't be combined with index."
+        }
+      },
+      "required": [
+        "tid"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "damage_actor",
+    "title": "Damage an actor",
+    "description": "Run `mcp_damage`: damage any live actor through the engine's own damage path, as Thing_Damage does: per-type damage factors, pain and death states apply (damageType Extreme forces the extreme death). Target: tid and index, as set_actor_prop's. amount 1..1000000; 1000000 is telefrag damage and gets through god mode and invulnerability. sourceTid (0 = the console player's body) names who dealt it: the target turns on it (target= in find_actors) and, in a netgame, a player source gets the kill credit; single player credits every counted kill to player 0 whatever the source. The reply reports hp before and after (oldhp=, dealt=), nodamage=1 when nothing was lost (not shootable, invulnerable, god mode or a damage factor of 0), died=1 and removed=1. A dead target is refused; heal with set_actor_prop health. The write is direct, so it works while paused; the actor reacts once the sim runs. Refused outside a level, on a client instance (act on the server) and on a spectator. On a server pass a tid (tid 0 isn't your body there).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The actor's TID; omitted or 0 = the console player's body."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The nth (0-based) actor sharing the TID, as find_actors' index=; needs a tid of 1 or more."
+        },
+        "amount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "damageType": {
+          "type": "string",
+          "pattern": "^[^ \\t\\n\\r]+$",
+          "description": "A damage type name such as Fire or Extreme; default None."
+        },
+        "sourceTid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Who dealt it: an actor's TID, 0 = the console player's body; omitted = no source."
+        }
+      },
+      "required": [
+        "amount"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
     "name": "set_cheat",
     "title": "Set a cheat on or off",
     "description": "Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. Uses the engine's normal net path. Needs a bridge with the status cap and a cheats= field.",
@@ -339,7 +492,7 @@
   {
     "name": "give",
     "title": "Give item",
-    "description": "Give an inventory item to the player.",
+    "description": "Give an inventory item. Without a tid, the stock `give` command to the player (cheat names such as all, weapons and health work). With a tid (0 = the console player's body; index as set_actor_prop's), run `mcp_inv` on any live actor instead, as ACS GiveInventory does (class names only), and report held=, the class the amount is kept under (armor: the player's armor class; an ammo pickup: its parent ammo, e.g. ClipBox: Clip; a Health item: health; anything else: itself), with before= and after=. amount (default 1) is ACS's: it sets the item's amount, unclamped, so a Health item heals that much (a Medikit with the default 1 heals 1), an ammo pickup gives that many rounds (times the skill's ammo factor), not its pickup size (a ClipBox with the default 1 gives 1 Clip), and an armor pickup's armor is multiplied by it. With a tid, a bare Armor gives nothing, as in ACS (it is a BasicArmorPickup worth 0), so name a real armor class such as GreenArmor or BlueArmor. An item that turns into something else on pickup (a powerup giver, custom inventory) can read 0 -> 0. ok=0 when the pickup was refused (e.g. health already at max). A given weapon isn't raised. The write is direct, so it works while paused. Refused outside a level, on a client instance (act on the server) and on a spectator. On a server pass a tid (tid 0 isn't your body there). On a server only a player's inventory reaches the clients, so with a tid any other target is refused (not replicated).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -350,11 +503,21 @@
         },
         "item": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[^ \\t\\n\\r]+$"
         },
         "amount": {
           "type": "integer",
           "exclusiveMinimum": 0
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The actor's TID; omitted or 0 = the console player's body."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The nth (0-based) actor sharing the TID, as find_actors' index=; needs a tid of 1 or more."
         }
       },
       "required": [
@@ -367,7 +530,7 @@
   {
     "name": "take",
     "title": "Take item",
-    "description": "Remove an inventory item from the player.",
+    "description": "Remove an inventory item. Without a tid, the stock `take` command on the player. With a tid (0 = the console player's body; index as set_actor_prop's), run `mcp_inv` on any live actor instead, as ACS TakeInventory does (class names only), and report held=, the item class itself, the only class looked up, with before= and after=. So taking an ammo or armor pickup or a Health item (ClipBox, GreenArmor, Medikit) takes nothing: name what is held (Clip, Armor). amount (default 1) is taken from the item itself; ammo and armor stay in the inventory at 0. The write is direct, so it works while paused. Refused outside a level, on a client instance (act on the server) and on a spectator. On a server pass a tid (tid 0 isn't your body there). On a server only a player's inventory reaches the clients, so with a tid any other target is refused (not replicated).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -378,11 +541,21 @@
         },
         "item": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[^ \\t\\n\\r]+$"
         },
         "amount": {
           "type": "integer",
           "exclusiveMinimum": 0
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The actor's TID; omitted or 0 = the console player's body."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The nth (0-based) actor sharing the TID, as find_actors' index=; needs a tid of 1 or more."
         }
       },
       "required": [
@@ -939,7 +1112,7 @@
   {
     "name": "step_until",
     "title": "Step until a condition holds",
-    "description": "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var or player field (x, y, z, angle, floorHeight, sector, light, health, armor) against a number, or a player field against another field (e.g. z == floorHeight). Reports the map tics that actually elapsed. Fails fast with the blocker list if the map tic counter stops for 5 tics, and fails if it goes back (a map change). On a netgame the reply adds what pause means for the instance's role, and a client is left running instead of paused between chunks.",
+    "description": "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var, player field (x, y, z, angle, floorHeight, sector, light, health, armor) or the count of actors find_actors' class/tid/radius/flags filter matches (a corpse counts unless flags rules it out, e.g. {alive: true}) against a number, or a player field against another field (e.g. z == floorHeight); or, kind log, holds once a line matching pattern (a case-insensitive regex) is printed after the call starts (value is the matching-line count). Reports the map tics that actually elapsed. Fails fast with the blocker list if the map tic counter stops for 5 tics, and fails if it goes back (a map change). On a netgame the reply adds what pause means for the instance's role, and a client is left running instead of paused between chunks.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1088,6 +1261,90 @@
                 "field",
                 "op",
                 "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "actors"
+                },
+                "class": {
+                  "type": "string",
+                  "pattern": "^[^ \\t\\n\\r]+$"
+                },
+                "tid": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "radius": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                "flags": {
+                  "type": "object",
+                  "properties": {
+                    "monster": {
+                      "type": "boolean"
+                    },
+                    "friendly": {
+                      "type": "boolean"
+                    },
+                    "corpse": {
+                      "type": "boolean"
+                    },
+                    "dormant": {
+                      "type": "boolean"
+                    },
+                    "shootable": {
+                      "type": "boolean"
+                    },
+                    "solid": {
+                      "type": "boolean"
+                    },
+                    "invulnerable": {
+                      "type": "boolean"
+                    },
+                    "ambush": {
+                      "type": "boolean"
+                    },
+                    "alive": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "op": {
+                  "$ref": "#/properties/condition/anyOf/0/properties/op"
+                },
+                "value": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "kind",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "log"
+                },
+                "pattern": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "pattern"
               ],
               "additionalProperties": false
             }
@@ -1512,7 +1769,7 @@
   {
     "name": "list_map_exports",
     "title": "List exported map variables from compiled bytecode",
-    "description": "List each ACS module's exported map variables and arrays (MEXP/ARAY chunks) from a WAD, PK3 or compiled .o, with slot index and array size. get_map_var/get_map_array only see exported names, so check here before a launch or pk3 rebuild. `lump` narrows to modules whose name or basename matches (e.g. `mymod` for `acs/mymod.o`); a map's BEHAVIOR also matches `BEHAVIOR` or its map marker.",
+    "description": "List each ACS module's exported map variables and arrays (MEXP/ARAY chunks) from a WAD, PK3, directory or compiled .o, with slot index and array size. These are the names get_map_var/get_map_array find by name; anything else needs their sourceFile. `lump` narrows to modules whose name or basename matches (e.g. `mymod` for `acs/mymod.o`); a map's BEHAVIOR also matches `BEHAVIOR` or its map marker.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1954,7 +2211,7 @@
   {
     "name": "profile_scripts",
     "title": "Profile ACS scripts",
-    "description": "Run `acsprofile` and return per-script/function execution stats (total instructions, runs, avg/min/max).",
+    "description": "Run `acsprofile` and return per-script/function execution stats (total instructions, runs, avg/min/max). Rows are the top 10 per section (scripts, functions) by `sort` (default total, all descending); `limit` raises that, and the reply counts every profiled row. A name the engine's 20-character column cuts (a script name over 18 characters, since it prints quoted, or a function name over 20) is resolved from dumpscripts/dumpfunctions when exactly one name fits, else kept as the printed prefix with truncated: true. Stock Zandronum builds (not the MCP fork, which fixes it) never profile `busy` scripts: they are missing from the list, and functions they call show 0 instructions per run.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1985,7 +2242,7 @@
   {
     "name": "profile_window",
     "title": "Profile a time window",
-    "description": "Clear ACS profiling, wait N seconds, then return what ran during that window — `what's hot right now` rather than cumulative since map start.",
+    "description": "Clear ACS profiling, wait N seconds, then return what ran during that window — `what's hot right now` rather than cumulative since map start. Rows are the top 10 per section (scripts, functions) by `sort` (default total, all descending); `limit` raises that, and the reply counts every profiled row. A name the engine's 20-character column cuts (a script name over 18 characters, since it prints quoted, or a function name over 20) is resolved from dumpscripts/dumpfunctions when exactly one name fits, else kept as the printed prefix with truncated: true. Stock Zandronum builds (not the MCP fork, which fixes it) never profile `busy` scripts: they are missing from the list, and functions they call show 0 instructions per run.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2039,7 +2296,7 @@
   {
     "name": "get_map_var",
     "title": "Get map variable",
-    "description": "Read a map-scope ACS variable by name (searched across loaded modules).",
+    "description": "Read a map-scope ACS variable by name (searched across loaded modules, exported names only), or with sourceFile any map var by expression.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2051,6 +2308,24 @@
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed."
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "description": "With sourceFile: the deployed WAD, PK3, directory or .o to find the source's build in, instead of the instance's launch files (needed for an attached instance)."
+        },
+        "includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."
         }
       },
       "required": [
@@ -2063,7 +2338,7 @@
   {
     "name": "set_map_var",
     "title": "Set map variable",
-    "description": "Write a map-scope ACS variable by name.",
+    "description": "Write a map-scope ACS variable by name (exported names only), or with sourceFile any map var by expression.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2078,6 +2353,24 @@
         },
         "value": {
           "type": "integer"
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed."
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "description": "With sourceFile: the deployed WAD, PK3, directory or .o to find the source's build in, instead of the instance's launch files (needed for an attached instance)."
+        },
+        "includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."
         }
       },
       "required": [
@@ -2091,7 +2384,7 @@
   {
     "name": "get_map_array",
     "title": "Get map array element",
-    "description": "Read one element of a map-scope ACS array by name and index.",
+    "description": "Read one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, read at name[index]).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2107,6 +2400,24 @@
         "index": {
           "type": "integer",
           "minimum": 0
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed."
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "description": "With sourceFile: the deployed WAD, PK3, directory or .o to find the source's build in, instead of the instance's launch files (needed for an attached instance)."
+        },
+        "includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."
         }
       },
       "required": [
@@ -2120,7 +2431,7 @@
   {
     "name": "set_map_array",
     "title": "Set map array element",
-    "description": "Write one element of a map-scope ACS array by name and index.",
+    "description": "Write one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, written at name[index]).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2139,6 +2450,24 @@
         },
         "value": {
           "type": "integer"
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed."
+        },
+        "object": {
+          "type": "string",
+          "minLength": 1,
+          "description": "With sourceFile: the deployed WAD, PK3, directory or .o to find the source's build in, instead of the instance's launch files (needed for an attached instance)."
+        },
+        "includeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."
         }
       },
       "required": [
@@ -2542,7 +2871,7 @@
   {
     "name": "launch_instance",
     "title": "Launch a Zandronum instance",
-    "description": "Spawn a bridge-enabled Zandronum process with the given options and attach to it. Requires ZANDRONUM_EXE to be set.",
+    "description": "Spawn a bridge-enabled Zandronum process with the given options and attach to it (with wait: false, on its first tool call instead). Requires ZANDRONUM_EXE to be set.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2594,6 +2923,10 @@
             "isolated"
           ],
           "description": "\"shared\" (default) runs on ZANDRONUM_CONFIG, else zandronum-mcp.ini beside the engine. \"isolated\" copies that ini to zandronum-mcp-<port>.ini beside it and runs on the copy, so this instance never writes the shared one (netgame peers, parallel sessions). The copy is redone on every launch and relaunch, dropping what the previous run saved there. Can't be combined with a -config in extraArgs."
+        },
+        "wait": {
+          "type": "boolean",
+          "description": "true (default) waits for the engine's bridge and attaches. false returns once the process is spawned; the instance attaches on its first tool call, which waits for the bridge then. For an engine whose bridge opens late, e.g. a netgame host waiting for its lobby to fill."
         }
       },
       "additionalProperties": false,
@@ -2603,7 +2936,7 @@
   {
     "name": "relaunch_instance",
     "title": "Relaunch a Zandronum instance with its last options",
-    "description": "Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config), e.g. to pick up DECORATE/MAPINFO edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs. Refuses for an attached instance.",
+    "description": "Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config, wait), e.g. to pick up DECORATE/MAPINFO edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs. Refuses for an attached instance.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2655,6 +2988,10 @@
             "isolated"
           ],
           "description": "\"shared\" (default) runs on ZANDRONUM_CONFIG, else zandronum-mcp.ini beside the engine. \"isolated\" copies that ini to zandronum-mcp-<port>.ini beside it and runs on the copy, so this instance never writes the shared one (netgame peers, parallel sessions). The copy is redone on every launch and relaunch, dropping what the previous run saved there. Can't be combined with a -config in extraArgs."
+        },
+        "wait": {
+          "type": "boolean",
+          "description": "true (default) waits for the engine's bridge and attaches. false returns once the process is spawned; the instance attaches on its first tool call, which waits for the bridge then. For an engine whose bridge opens late, e.g. a netgame host waiting for its lobby to fill."
         }
       },
       "additionalProperties": false,
@@ -2711,7 +3048,7 @@
   {
     "name": "kill_instance",
     "title": "Kill a Zandronum instance",
-    "description": "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit.",
+    "description": "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit. A wait: false instance not attached yet is attached first if its bridge is up; one whose bridge isn't up is force-killed at once.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2876,6 +3213,357 @@
           "default": 1
         }
       },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "process_stats",
+    "title": "Engine process memory",
+    "description": "Read the instance's engine process memory from /proc/<pid>/status (Linux only): vmRssKib (resident now), vmHwmKib (peak resident since start) and vmSizeKib (virtual), all KiB, plus the pid and the kernel's process name (cut to 15 characters). Reads the file directly, never the bridge, so a busy or hung engine still answers. Fails, never reports zeros, when this session knows no engine PID for the instance (not launched or attached here, or killed since), the process has exited, or the file is unreadable or lacks those fields (no /proc, a zombie), or the process name isn't the engine executable's (a server outside the engine's PID namespace sees another process at that PID).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "run_scenario",
+    "title": "Run a batch of tool calls in one reply",
+    "description": "Run up to 64 steps on one instance inside the server and return every result in one reply, instead of a round trip per call: setup bursts, summon waves, map-array sweeps, step-then-check loops. A step is {call, args}, any instance tool by name with its own args (the scenario's instance is used, so args carry none); {expect: condition}, which fails when the condition doesn't hold; or {repeat: [call and expect steps], until?: condition, maxIterations (up to 200)}, which runs its body until the condition holds after a pass and fails if it never does (without until, exactly maxIterations passes). Conditions are step_until's; a log condition counts lines printed since the scenario began. E.g. {repeat: [{call: \"step\", args: {tics: 5}}], until: {kind: \"actors\", class: \"DoomImp\", flags: {alive: true}, op: \"==\", value: 0}, maxIterations: 40} runs until every imp is dead (without the alive flag a corpse still counts). Every call step's tool and args are checked against that tool's own schema (an unknown arg too) before anything runs, so a typo in a late step drives nothing; launch_instance, relaunch_instance, attach_instance, kill_instance, reset, screenshot, verify_menu (screenshot_file stands in for a frame) and tools without an instance are refused. Without sinceLine, a read_log step reads on from the last read_log (the first from where the scenario began), and a wait_for_log step waits for a line printed since the scenario began, not since launch. A wait_for_log that times out is not a failed step (its reply is no error); follow it with {expect: {kind: \"log\", ...}} when the run should stop there. onFail stop (default) ends the run at the first failed step (an error reply, an unmet expect or until); continue runs the rest. A thrown error, a client cancel, 256 calls in all, or maxSeconds of wall clock end it either way, and a run that ended at a failure is an error reply. These are checked between calls, so one long call (wait_for_log, step_until, watch_actors, input_timeline) can run past maxSeconds by its own timeout. The reply is structured: ok, failedAt (the first failure), calls, maptimeStart and maptimeEnd (the map tic counter around the run: count elapsed tics by these, since a step's tics are asked for, not measured, and an engine's step can run short; a map loaded mid-run restarts the counter, and a note says so when it ends below where it began), and per step its index, ok, text (cut at 500 chars) and structured result (arrays cut to 20 rows, fewer until it fits 2000 chars, with omitted counts and a hint to call that tool on its own); a repeat keeps its last pass's results and its iteration count. Past 24000 chars of step results, later steps keep only their kind and ok, and a failed one its text's first line, cut at 100 chars.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "call": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A tool name."
+                  },
+                  "args": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "default": {},
+                    "description": "That tool's own args, without instance."
+                  }
+                },
+                "required": [
+                  "call"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "expect": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "mapvar"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "op": {
+                            "type": "string",
+                            "enum": [
+                              "==",
+                              "!=",
+                              "<",
+                              "<=",
+                              ">",
+                              ">="
+                            ]
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "op",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "maparray"
+                          },
+                          "name": {
+                            "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/0/properties/name"
+                          },
+                          "index": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "op": {
+                            "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/0/properties/op"
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "index",
+                          "op",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "acsvar"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "enum": [
+                              "world",
+                              "global"
+                            ]
+                          },
+                          "index": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "op": {
+                            "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/0/properties/op"
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "scope",
+                          "index",
+                          "op",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "player"
+                          },
+                          "field": {
+                            "type": "string",
+                            "enum": [
+                              "x",
+                              "y",
+                              "z",
+                              "angle",
+                              "floorHeight",
+                              "sector",
+                              "light",
+                              "health",
+                              "armor"
+                            ]
+                          },
+                          "op": {
+                            "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/0/properties/op"
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/3/properties/field"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "field",
+                          "op",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "actors"
+                          },
+                          "class": {
+                            "type": "string",
+                            "pattern": "^[^ \\t\\n\\r]+$"
+                          },
+                          "tid": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "radius": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "flags": {
+                            "type": "object",
+                            "properties": {
+                              "monster": {
+                                "type": "boolean"
+                              },
+                              "friendly": {
+                                "type": "boolean"
+                              },
+                              "corpse": {
+                                "type": "boolean"
+                              },
+                              "dormant": {
+                                "type": "boolean"
+                              },
+                              "shootable": {
+                                "type": "boolean"
+                              },
+                              "solid": {
+                                "type": "boolean"
+                              },
+                              "invulnerable": {
+                                "type": "boolean"
+                              },
+                              "ambush": {
+                                "type": "boolean"
+                              },
+                              "alive": {
+                                "type": "boolean"
+                              }
+                            },
+                            "additionalProperties": false
+                          },
+                          "op": {
+                            "$ref": "#/properties/steps/items/anyOf/1/properties/expect/anyOf/0/properties/op"
+                          },
+                          "value": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "op",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "log"
+                          },
+                          "pattern": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "pattern"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "expect"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "repeat": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/properties/steps/items/anyOf/0"
+                        },
+                        {
+                          "$ref": "#/properties/steps/items/anyOf/1"
+                        }
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 64
+                  },
+                  "until": {
+                    "$ref": "#/properties/steps/items/anyOf/1/properties/expect"
+                  },
+                  "maxIterations": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  }
+                },
+                "required": [
+                  "repeat",
+                  "maxIterations"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "onFail": {
+          "type": "string",
+          "enum": [
+            "stop",
+            "continue"
+          ],
+          "default": "stop"
+        },
+        "maxSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 300,
+          "default": 60
+        }
+      },
+      "required": [
+        "steps"
+      ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     }
