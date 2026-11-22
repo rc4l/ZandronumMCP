@@ -95,9 +95,21 @@ export class InstanceRegistry {
     return client;
   }
 
-  /** Spawn a bridge-enabled instance, wait for its port, then attach. */
-  async launch(config: LaunchConfig, io: LaunchIo): Promise<BridgeClient> {
-    const host = config.host ?? "127.0.0.1";
+  /** `attachSpawned` for a child `spawn` just started, reaping the child if the attach fails. */
+  async attachOrKill(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
+    try {
+      return await this.attachSpawned(config, io);
+    } catch (err) {
+      // The launch failed (engine hung and the bridge never opened, or a stale
+      // process squatted the port). Reap the child we just spawned so a failed
+      // launch can't leave a hung engine orphaned on its port.
+      this.kill(config.id);
+      throw err;
+    }
+  }
+
+  /** Spawn a bridge-enabled instance and register its child, without waiting for its bridge. */
+  spawn(config: LaunchConfig, io: LaunchIo): ChildHandle {
     // Give the engine its own config unless the caller pinned one, so builds
     // can't trade cvars through the shared user-level ini.
     const args = buildLaunchArgs({ config: configPathFor(config.exe), ...config });
@@ -106,29 +118,28 @@ export class InstanceRegistry {
     io.clearQuarantine(config.exe);
     const child = io.spawn(config.exe, args, config.cwd, env);
     this.children.set(config.id, child);
-    try {
-      await io.waitForPort(host, config.port);
-      const client = await this.attach({ id: config.id, host, port: config.port });
+    return child;
+  }
 
-      // PID handshake: confirm we attached to the engine we just spawned and not a
-      // stale bridge that still held the port. Only enforced when both sides report a
-      // pid — older bridges omit it, so this stays backward compatible.
-      const enginePid = client.enginePid;
-      if (child.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
-        throw new Error(
-          `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
-            `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
-            `Run the "reset" tool, then relaunch.`,
-        );
-      }
-      return client;
-    } catch (err) {
-      // The launch failed (engine hung and the bridge never opened, or a stale
-      // process squatted the port). Reap the child we just spawned so a failed
-      // launch can't leave a hung engine orphaned on its port.
-      this.kill(config.id);
-      throw err;
+  /** Wait for a spawned instance's bridge port and attach, leaving the child running on failure. */
+  async attachSpawned(config: InstanceConfig, io: LaunchIo): Promise<BridgeClient> {
+    const host = config.host ?? "127.0.0.1";
+    const child = this.children.get(config.id);
+    await io.waitForPort(host, config.port);
+    const client = await this.attach({ id: config.id, host, port: config.port });
+
+    // PID handshake: confirm we attached to the engine we just spawned and not a
+    // stale bridge that still held the port. Only enforced when both sides report a
+    // pid — older bridges omit it, so this stays backward compatible.
+    const enginePid = client.enginePid;
+    if (child?.pid !== undefined && enginePid !== undefined && enginePid !== child.pid) {
+      throw new Error(
+        `Bridge on ${host}:${config.port} is PID ${enginePid}, not the engine we ` +
+          `launched (PID ${child.pid}) — a stale instance is squatting the port. ` +
+          `Run the "reset" tool, then relaunch.`,
+      );
     }
+    return client;
   }
 
   get(id: number): BridgeClient {
@@ -139,6 +150,11 @@ export class InstanceRegistry {
 
   has(id: number): boolean {
     return this.clients.has(id);
+  }
+
+  /** The PID of the child this registry launched for an instance, if it has one. */
+  childPid(id: number): number | undefined {
+    return this.children.get(id)?.pid;
   }
 
   /** Peek at an instance's client without attaching, connecting, or throwing.

@@ -3,7 +3,12 @@ import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-com
 import { z } from "zod";
 import path from "node:path";
 import type { ServerContext } from "./context.js";
-import { parseStartupErrors, tailLines, crashLogPath, readLogWindow } from "./process/startuplog.js";
+import {
+  parseStartupErrors,
+  tailLines,
+  readLogWindow,
+  crashReportText,
+} from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
 import { parseScriptStat } from "./parsers/scriptstat.js";
 import { parseAcsVars } from "./parsers/acsvars.js";
@@ -1963,32 +1968,32 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const port = await ctx.io.findFreePort(ctx.portFor(instance));
       const logFile = path.join(path.dirname(exe), `mcp-bridge-${port}.log`);
       ctx.rememberLaunch(instance, port, logFile);
+      const launch = {
+        id: instance,
+        exe,
+        cwd: path.dirname(exe),
+        port,
+        logFile,
+        iwad,
+        files,
+        map,
+        skill,
+        fullscreen,
+        width,
+        height,
+        extraArgs,
+      };
       try {
+        const child = ctx.registry.spawn(launch, ctx.io.launchIo);
+        // The child is the engine: a failed launch still matches its crash report, and an attach checks identity.
+        ctx.rememberEngine(instance, child.pid);
         // The engine can take tens of seconds to boot a big mod and open its
         // bridge — well past a default client timeout, so report progress.
         const client = await withProgress(extra, 42000, "waiting for the engine", () =>
-          ctx.registry.launch(
-            {
-              id: instance,
-              exe,
-              cwd: path.dirname(exe),
-              port,
-              logFile,
-              iwad,
-              files,
-              map,
-              skill,
-              fullscreen,
-              width,
-              height,
-              extraArgs,
-            },
-            ctx.io.launchIo,
-          ),
+          ctx.registry.attachOrKill(launch, ctx.io.launchIo),
         );
-        // Remember which process this is, so a later re-attach can tell if the
-        // engine died and something else took its port.
-        ctx.rememberEngine(instance, client.enginePid);
+        // A spawn that reported no PID skipped the handshake, so the bridge's own PID is all there is.
+        if (child.pid === undefined) ctx.rememberEngine(instance, client.enginePid);
       } catch (e) {
         // The bridge never opened. Most often that's a DECORATE/ACS compile error
         // that aborted startup — surface it from the captured log instead of just
@@ -2016,10 +2021,19 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Attach to an engine you started yourself",
       description:
-        "Connect to a bridge-patched Zandronum that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port.",
+        "Connect to a bridge-patched Zandronum that is ALREADY running — one you launched by hand, or from a terminal — and bind it to an instance number for the other tools. Only needed for engines this session didn't launch: launch_instance binds automatically. Defaults to this instance's conventional port. Refuses an instance whose launched engine is still running.",
       inputSchema: { instance: instanceArg, port: z.number().int().positive().optional() },
     },
     async ({ instance, port }) => {
+      const launched = ctx.registry.childPid(instance);
+      if (launched !== undefined && ctx.io.alive(launched)) {
+        return fail(
+          `Instance ${instance} runs an engine this session launched (PID ${launched}); kill_instance it first, or attach another instance number.`,
+        );
+      }
+      // Drop a dead child's handle and any earlier attach's client, PID and log path; kill on an exited child sends no signal.
+      ctx.registry.kill(instance);
+      ctx.forgetInstance(instance);
       const target = port ?? ctx.portFor(instance);
       ctx.bind(instance, target);
       try {
@@ -2164,13 +2178,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     {
       title: "Get the last engine crash backtrace",
       description:
-        "Return the signal, faulting address, and symbolized backtrace the bridge's crash handler captured the last time the engine crashed (segfault/abort/bus error/etc.). Use this when an instance dies unexpectedly — e.g. run_command reports the bridge closed. Empty if the instance has not crashed.",
+        "Return the signal, faulting address, and symbolized backtrace the bridge's crash handler captured the last time the engine crashed (segfault/abort/bus error/etc.). Use this when an instance dies unexpectedly — e.g. run_command reports the bridge closed. A report left by another engine (different PID) is named but not returned as this instance's crash; one that can't be tied to this engine (its PID is unknown, or the report has no pid line) is returned marked `Unverified:`.",
       inputSchema: { instance: instanceArg },
     },
     async ({ instance }) => {
-      const logFile = ctx.logPathFor(instance);
-      const crashFile = logFile ? crashLogPath(logFile) : undefined;
-      if (!crashFile || !ctx.io.existsSync(crashFile)) {
+      const crash = ctx.readCrash(instance);
+      if (!crash) {
         return {
           content: [
             {
@@ -2180,7 +2193,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           ],
         };
       }
-      return { content: [{ type: "text", text: ctx.io.readTextSync(crashFile) }] };
+      const text = crashReportText({
+        instance,
+        crashFile: crash.file,
+        report: crash.report,
+        enginePid: ctx.enginePidFor(instance),
+        written: crash.written,
+      });
+      return { content: [{ type: "text", text }] };
     },
   );
 }
