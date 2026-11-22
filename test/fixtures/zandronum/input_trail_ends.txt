@@ -1,4 +1,4 @@
 MCP_INPUT_TRAIL
-start maptime=3930 seg=0 x=-800.000 y=700.000 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=0.0000 momz=0.0000 health=100 buttons=-
-tic maptime=3932 seg=1 x=-800.000 y=708.803 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=3.8622 momz=0.0000 health=100 buttons=-
-tic maptime=3934 seg=2 x=-800.000 y=716.165 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=3.1719 momz=0.0000 health=100 buttons=attack
+start maptime=2412 seg=0 x=-800.000 y=700.000 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=0.0000 momz=0.0000 health=100 buttons=-
+tic maptime=2414 seg=1 x=-800.000 y=708.803 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=3.8622 momz=0.0000 health=100 buttons=-
+tic maptime=2416 seg=2 x=-800.000 y=716.165 z=8.000 angle=90.000 pitch=5.799 momx=0.0000 momy=3.1719 momz=0.0000 health=100 buttons=attack

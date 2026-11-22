@@ -39,18 +39,17 @@ static bool MCP_MapSlotHex( const char *s, BYTE out[16] )
 	return true;
 }
 
-// mcp_mapslot <slot> v=1 code=<len> first=<fourcc> md5=<32 hex> [index=<k>] [set=<value>]
-// Reply: MCP_MAPSLOT module=<i> slot=<s> [index=<k>] value=<n> name=<module name>
-CCMD( mcp_mapslot )
+struct MCPMapSlotArgs { FBehavior *module; int at; int index; int value; bool hasIndex; bool hasSet; };
+
+// Shared digest selector for mcp_mapslot and read-only ACS references.
+static bool MCP_MapSlotResolve( FCommandLine &argv, int start, int slot, bool allowSet, bool skipLabel,
+	const char *usage, MCPMapSlotArgs &out, FString &err )
 {
-	if ( gamestate != GS_LEVEL ) { Printf( "error not in a level\n" ); return; }
-	const char *usage = "error usage: mcp_mapslot <slot> v=1 code=<len> first=<fourcc> md5=<32 hex> [index=<k>] [set=<value>]\n";
-	int slot, v = 0, len = -1, index = -1, value = 0;
+	int v = 0, len = -1, index = -1, value = 0;
 	bool hasV = false, hasFirst = false, hasMd5 = false, hasIndex = false, hasSet = false;
 	DWORD first = 0;
 	BYTE md5[16];
-	if ( argv.argc() < 2 || !MCP_ParseInt( argv[1], slot ) ) { Printf( "%s", usage ); return; }
-	for ( int i = 2; i < argv.argc(); i++ )
+	for ( int i = start; i < argv.argc(); i++ )
 	{
 		const char *a = argv[i];
 		bool ok;
@@ -64,25 +63,44 @@ CCMD( mcp_mapslot )
 		}
 		else if ( strncmp( a, "md5=", 4 ) == 0 ) ok = hasMd5 = MCP_MapSlotHex( a + 4, md5 );
 		else if ( strncmp( a, "index=", 6 ) == 0 ) ok = hasIndex = MCP_ParseInt( a + 6, index ) && index >= 0;
-		else if ( strncmp( a, "set=", 4 ) == 0 ) ok = hasSet = MCP_ParseInt( a + 4, value );
+		else if ( allowSet && strncmp( a, "set=", 4 ) == 0 ) ok = hasSet = MCP_ParseInt( a + 4, value );
+		else if ( skipLabel && ( strncmp( a, "label=", 6 ) == 0 || strncmp( a, "slot=", 5 ) == 0 ) ) ok = true;
 		else ok = false;
-		if ( !ok ) { Printf( "%s", usage ); return; }
+		if ( !ok ) { err = usage; return false; }
 	}
-	if ( !hasV || len < 0 || !hasFirst || !hasMd5 ) { Printf( "%s", usage ); return; }
-	if ( v != 1 ) { Printf( "error unsupported v=%d\n", v ); return; }
+	if ( !hasV || len < 0 || !hasFirst || !hasMd5 ) { err = usage; return false; }
+	if ( v != 1 ) { err.Format( "unsupported v=%d", v ); return false; }
 	// Before MapVars is touched: its operator[] calls I_Error out of range.
-	if ( slot < 0 || slot >= NUM_MAPVARS ) { Printf( "error slot out of range\n" ); return; }
+	if ( slot < 0 || slot >= NUM_MAPVARS ) { err = "slot out of range"; return false; }
 
 	FBehavior *found = NULL;
 	int at = -1, count = 0;
 	for ( FBehavior *m; ( m = FBehavior::StaticGetModule( count ) ) != NULL; count++ )
 	{
 		if ( !MCP_MapSlotMatches( m, (DWORD)len, first, md5 ) ) continue;
-		if ( found != NULL ) { Printf( "error ambiguous modules=%d,%d\n", at, count ); return; }
+		if ( found != NULL ) { err.Format( "ambiguous modules=%d,%d", at, count ); return false; }
 		found = m;
 		at = count;
 	}
-	if ( found == NULL ) { Printf( "error no module matches map=%s modules=%d\n", level.mapname, count ); return; }
+	if ( found == NULL ) { err.Format( "no module matches map=%s modules=%d", level.mapname, count ); return false; }
+	out = { found, at, index, value, hasIndex, hasSet };
+	return true;
+}
+
+// mcp_mapslot <slot> v=1 code=<len> first=<fourcc> md5=<32 hex> [index=<k>] [set=<value>]
+// Reply: MCP_MAPSLOT module=<i> slot=<s> [index=<k>] value=<n> name=<module name>
+CCMD( mcp_mapslot )
+{
+	if ( gamestate != GS_LEVEL ) { Printf( "error not in a level\n" ); return; }
+	const char *usage = "usage: mcp_mapslot <slot> v=1 code=<len> first=<fourcc> md5=<32 hex> [index=<k>] [set=<value>]";
+	int slot;
+	MCPMapSlotArgs args;
+	FString err;
+	if ( argv.argc() < 2 || !MCP_ParseInt( argv[1], slot ) ) { Printf( "error %s\n", usage ); return; }
+	if ( !MCP_MapSlotResolve( argv, 2, slot, true, false, usage, args, err ) ) { Printf( "error %s\n", err.GetChars() ); return; }
+	FBehavior *found = args.module;
+	const int at = args.at, index = args.index, value = args.value;
+	const bool hasIndex = args.hasIndex, hasSet = args.hasSet;
 
 	// An element is read as PCD_PUSHMAPARRAY reads it: the slot holds the array's number.
 	SDWORD *var = found->MapVars[slot];

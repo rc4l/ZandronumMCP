@@ -183,11 +183,12 @@ describe("BridgeClient <-> FakeBridge", () => {
     expect(client.supports("nope")).toBe(false);
   });
 
-  it("reports the engine name from the hello, and undefined when it omits one", async () => {
-    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: engine.id } });
+  it("reports the engine name and bridge version from the hello, and undefined when it omits them", async () => {
+    bridge = await FakeBridge.start({ hello: { v: 1, t: "hello", engine: engine.id, bridge: "0.16.0" } });
     client = new BridgeClient({ port: bridge.port });
     await client.connect();
     expect(client.engineName).toBe(engine.id);
+    expect(client.bridgeVersion).toBe("0.16.0");
     client.close();
 
     await bridge.close();
@@ -195,6 +196,7 @@ describe("BridgeClient <-> FakeBridge", () => {
     client = new BridgeClient({ port: bridge.port });
     await client.connect();
     expect(client.engineName).toBeUndefined();
+    expect(client.bridgeVersion).toBeUndefined();
   });
 
   it("defaults to no capabilities when the hello omits caps", async () => {

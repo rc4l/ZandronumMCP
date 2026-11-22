@@ -77,11 +77,20 @@ export function buildSave(name: string, description?: string): string {
 
 /** `mcp_runacs <object> [script] [args...] [name=1] [open=1]`; with `markName`, `name=1` keeps a digit-only script name from reading as a number. */
 export function buildRunAcs(object: string, script?: number | string, args: number[] = [], open = false, markName = false): string {
-  // `object` comes from consolePath and may be quoted; its inside still gets the shared check.
-  safeToken(object.replace(/^"(.*)"$/, "$1"));
   const named = markName && typeof script === "string" ? ["name=1"] : [];
   const run = script === undefined ? [] : [script, ...args, ...named];
-  return ["mcp_runacs", object, ...[...run, ...(open ? ["open=1"] : [])].map(token)].join(" ");
+  return ["mcp_runacs", pathToken(object), ...[...run, ...(open ? ["open=1"] : [])].map(token)].join(" ");
+}
+
+/** `mcp_rec dump <path>`, the path a consolePath token. */
+export function buildRecDump(path: string): string {
+  return `mcp_rec dump ${pathToken(path)}`;
+}
+
+/** A consolePath token, which may be quoted; its inside still gets the shared check. */
+function pathToken(t: string): string {
+  safeToken(t.replace(/^"(.*)"$/, "$1"));
+  return t;
 }
 
 /** `puke <script> [args...]`; puke's own form of "always" is the negated script number. */

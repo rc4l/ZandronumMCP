@@ -5,7 +5,7 @@ import path from "node:path";
 import type { LastLaunch, LaunchArgs, ServerContext } from "./context.js";
 import { parseStartupErrors, tailLines, crashLogPath, crashReportPid, crashReportText, readLogWindow } from "./process/startuplog.js";
 import { stderrLogPath, stderrSection, startupFailureText } from "./process/startuplog.js";
-import { EngineExitedError, LaunchSetupError } from "./process/registry.js";
+import { EngineExitedError, LaunchSetupError, type QuitResult } from "./process/registry.js";
 import { parseProcMemory, procMismatch, procName, procStatusPath } from "./process/procstatus.js";
 import type { LogWindow, LogWindowOptions } from "./process/startuplog.js";
 import { parseDumpActors } from "./parsers/dumpactors.js";
@@ -26,7 +26,7 @@ import { pollUntil } from "./poll.js";
 import { parseActorState, parseActorsNear, parseFoundReply, expandFlags, describeRemoved } from "./parsers/actorstate.js";
 import { FLAG_NAMES, FIND_ACTORS_LIMIT, filterFound, type FoundActors } from "./parsers/actorstate.js";
 import { joinedBots, allHaveTid, addBotReport, botKey, type JoinedBot } from "./parsers/players.js";
-import { parseKvLines, firstError, stripColor, cleanConsoleLines, hasHeader, failureText, outputText, markerText } from "./parsers/lines.js";
+import { parseKvLines, firstError, stripColor, cleanConsoleLines, hasHeader, failureText, outputText, markerText, statusRow } from "./parsers/lines.js";
 import type { KvRecord } from "./parsers/lines.js";
 import { parseHud, filterHud } from "./parsers/hud.js";
 import { parseMarks, formatMark, resolveGamelog } from "./parsers/marks.js";
@@ -35,13 +35,14 @@ import type { BridgeClient } from "./bridge/transport.js";
 import { findSymbol } from "./acs/symbols.js";
 import { sectorTags } from "./map/index.js";
 import { collectAcsLumps, pickModules, type AcsModule } from "./acs/collect.js";
+import type { MapSlot, MapSlotResult } from "./acs/probe.js";
 import { parseBehaviorNames, parseMapExports, isAcsObject, parseLoadNames, missingImports } from "./acs/bytecode.js";
 import { parseRunAcs, parseRunScript, runAcsCaveats, runAcsText, scriptOutput } from "./parsers/runacs.js";
 import { PROP_NAMES, FLAG_PROP, FORCEABLE_PROPS, encodePropValue } from "./actorprops.js";
 import { parseRenderInfo, pick } from "./parsers/renderinfo.js";
 import { command, kvArgs, realToken, isPlainToken, buildPuke, buildPukeName, buildRunAcs, buildSave } from "./commands/builders.js";
 import { buildPrelude, type Prelude, type RunAcsProfile } from "./acs/profiles.js";
-import { buildRunScript, buildAddBot, refToken, type RefArg } from "./commands/builders.js";
+import { buildRunScript, buildAddBot, buildRecDump, refToken, type RefArg } from "./commands/builders.js";
 import { appendNote } from "./adapter.js";
 import { bridgeMarker } from "./process/verify.js";
 import { hasArg, argValue, configPathFor, isolatedConfigPathFor } from "./process/launch.js";
@@ -54,39 +55,79 @@ import {
   wheelEvent,
   type MenuKey,
 } from "./input/keys.js";
-import { runMoveTo, describeMove, type MovePort, type Waypoint } from "./movement/moveto.js";
+import { runMoveTo, runPrecheck, describeMove, engineResult, blockText, type MovePort, type MoveResult, type Waypoint, type TraceReply } from "./movement/moveto.js";
 import { classArg, exactlyOneForm, mapCoord, waypointFields, toWaypoint } from "./movement/target.js";
 import { FIELDS, DEFAULT_FIELDS, DETAIL_FIELDS, needsDetail, runWatch, describeWatch, type WatchPort } from "./sampler/watch.js";
 import { capNote, pollArmedRun, stallTracker, stepWithin, STALL_TICS, type Reading } from "./sampler/stepping.js";
+import { clockEndText, describeTicRun, frameName, planSweep, SHOT_FRAMES, type TicRun } from "./clock/frames.js";
+import { parseClockStatus, type ClockStatus } from "./parsers/clock.js";
+import { MAX_SWEEP_FRAMES, MAX_SWEEP_IMAGES, MAX_SWEEP_TICS } from "./clock/frames.js";
 import {
   segmentArg,
   planTimeline,
   scheduleCommand,
+  walkCommand,
   splitLog,
   summarizeSegments,
   describeTimeline,
   MAX_SEGMENTS,
+  MAX_TICS,
+  type ScheduleLimits,
 } from "./input/timeline.js";
 import { parseInputStatus, parseInputArmed, parseInputTrail, type InputRow, type InputStatus } from "./parsers/input.js";
 import { netRole, joinAction, joinState, type NetInfo, type JoinState } from "./netgame.js";
+import { failedRecVar, parseRecArmed, parseRecFile, parseRecStatus, parseRecWrote, type RecStatus } from "./parsers/rec.js";
+import {
+  REC_FIELDS,
+  DEFAULT_REC_FIELDS,
+  REC_EVENTS,
+  DEFAULT_REC_EVENTS,
+  MAX_WATCHES,
+  MAX_REC_TICS,
+  MAX_RUN_TICS,
+  MAX_REC_SCRIPTS,
+  MAX_REC_VARS,
+  MAX_TRACKED,
+  MAX_ENGINE_ROWS,
+  EVENT_LINES,
+  recordProblem,
+  recordSchedule,
+  groupVarsBySource,
+  recordResult,
+  recordNotes,
+  describeRecord,
+  expandFields,
+  FIELD_GROUPS,
+  needsPlayerCap,
+  type RecordOptions,
+  type RecVar,
+} from "./recorder/record.js";
+import { recDumpFiles } from "./recorder/files.js";
+import { consolePath, tempPathToken } from "./acs/compile.js";
 import { ToolRegistry, type ToolHandler } from "./scenario/dispatch.js";
 import { ToolRefusal } from "./types.js";
 import { scenarioShape, SCENARIO_REFUSALS, MAX_STEPS, MAX_CALLS, MAX_ITERATIONS } from "./scenario/schema.js";
 import { runScenario, describeScenario, scenarioRefusal, type ScenarioPort } from "./scenario/run.js";
 import { STEP_TEXT_CHARS, STEP_ROWS, STEP_JSON_CHARS, REPLY_CHARS, SUMMARY_CHARS } from "./scenario/run.js";
+import { demoActivity, demoClass, demoMayRefuse, demoState, demoVerdict, netcmdUnlessTid, writesWithCommand, writesWithValue, type DemoActivity, type DemoClass, type DemoRow, type DemoVerdict } from "./demo/policy.js";
+import { finishRecording, launchSidecar, resolveRecordArgs } from "./demo/record.js";
+import { parseSidecar, serializeSidecar, sidecarPaths, type Sidecar } from "./demo/sidecar.js";
+import { checkSidecar, resolvePlayTarget, type FileChange, type PlayedDemo } from "./demo/play.js";
+import { blessDemo, blessedSidecar, checkDemo, decodeRows, describeCheck, encodeRows, minimalSidecar, rowsForCheckpoint, type FixtureDriver } from "./demo/fixture.js";
+import { parseCheckpoint } from "./parsers/checkpoint.js";
 
 const instanceArg = z.number().int().positive().default(1);
 const acsScope = z.enum(["world", "global"]);
 const acsSrcArg = z.string().optional();
 const acsName = z.string().min(1);
-// The map-var tools' sourceFile selectors.
+// Shared by the map-var tools and record's sourceFile selectors.
 const sourceFileArgs = {
   sourceFile: z
     .string()
     .min(1)
     .optional()
     .describe(
-      "The module's main ACS source (bcc). With it, name is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed.",
+      "The module's main ACS source (bcc). With it, name (record: map) is an expression with constant indices and members (sectors[3].pf_pit_checked) and reaches vars with no exported name (internal library vars, a map's own BEHAVIOR vars): two temp builds of the source (as is, and with a probe) find the slot, the as-is build must equal a deployed module byte for byte, and the engine uses only the loaded module whose image matches. A var the source imports from a library is refused: pass that library's source instead. A refusal names the check that failed.",
     ),
   object: z
     .string()
@@ -98,9 +139,8 @@ const sourceFileArgs = {
     .optional()
     .describe("With sourceFile: include dirs searched after the source's own dir. Absolute paths; a relative one resolves against the MCP server's working directory."),
 };
-type SourceFileArgs = { instance: number; name: string; index?: number; value?: number } & {
-  [K in keyof typeof sourceFileArgs]?: z.infer<(typeof sourceFileArgs)[K]>;
-};
+type SourceArgs = { [K in keyof typeof sourceFileArgs]?: z.infer<(typeof sourceFileArgs)[K]> };
+type SourceFileArgs = { instance: number; name: string; index?: number; value?: number } & SourceArgs;
 // Fresh per field, like mapCoord: run_acs's `name` alias must not be a $ref into `script`.
 const runAcsName = () => z.string().regex(/^[^\s;"]+$/, "a script name has no spaces");
 const mapFileArg = z.string().optional();
@@ -333,13 +373,6 @@ function kvReply(output: string[], tag: string, text: (rec: KvRecord) => string)
   return { content: [{ type: "text" as const, text: text(rec) }], structuredContent: { ...rec } };
 }
 
-/** A map probe's block reason as text: `actor DoomImp#7`, `line 45`, `step (rise 32)`. */
-function blockText(r: KvRecord): string {
-  const what = r.blocker ?? r.line;
-  const size = r.rise !== undefined ? ` (rise ${r.rise})` : r.drop !== undefined ? ` (drop ${r.drop})` : "";
-  return `${r.reason}${what !== undefined ? ` ${what}` : ""}${size}`;
-}
-
 /**
  * How often a slow tool reports that it's still working.
  *
@@ -384,12 +417,24 @@ const CAP_REFUSALS = {
     "This engine bridge has no input support (rebuild with the latest bridge).",
   input:
     "This engine bridge has no scripted-input support (rebuild the engine with the latest overlay).",
+  walk:
+    "This engine bridge has no walk cap for timeline walk segments (rebuild the engine with the latest overlay); nothing sent to the engine.",
   spawnfind:
     "This engine build has no free-spot search for findSpot (rebuild the engine with the latest overlay, or retry without findSpot).",
   runacsname:
     "This engine build would run a script name made of digits as a script number (rebuild the engine with the latest overlay, or rename the script); nothing sent to the engine.",
   mapslot:
     "This engine build has no slot-addressed map var access for sourceFile (rebuild the engine with the latest overlay, or retry without sourceFile for an exported name); nothing compiled or sent.",
+  rec:
+    "This engine build has no per-tic recorder (rebuild the engine with the latest overlay); nothing sent to the engine.",
+  recvars:
+    "This engine build has no recvars cap for recorder vars (rebuild the engine with the latest overlay); nothing compiled or sent to the engine.",
+  recplayer:
+    "This engine build has no recplayer cap for player fields or psprite events (rebuild the engine with the latest overlay); nothing sent to the engine.",
+  rechost:
+    "This engine build has no rechost cap for passive server recording (rebuild the engine with the latest overlay); nothing sent to the engine.",
+  clock:
+    "This engine build has no frozen clock (rebuild the engine with the latest overlay); nothing sent to the engine.",
 };
 type OptionalCap = keyof typeof CAP_REFUSALS;
 
@@ -403,8 +448,12 @@ function requireCap(client: BridgeClient, cap: OptionalCap): void {
   const refusal = missingCap(client, cap);
   if (refusal) throw new ToolRefusal(refusal);
 }
+
+const FROZEN_REFUSAL = "time is frozen: freeze_time off first";
 // The cleanup stop gives up quickly: when it fails the bridge is gone and an error is already on its way.
 const ARMED_STOP_MS = 1000;
+// A frozen walk schedule's steps per status read, so at most this minus 1 tics run past its end.
+const FROZEN_WALK_CHUNK = 5;
 // Log lines kept for a timeline: its own poll replies plus what the level printed per tic.
 const TIMELINE_LOG_BASE = 200;
 const TIMELINE_LOG_PER_TIC = 8;
@@ -452,6 +501,21 @@ function launchArgsSchemaFor(ctx: ServerContext) {
       .describe(
         "true (default) waits for the engine's bridge and attaches. false returns once the process is spawned; the instance attaches on its first tool call, which waits for the bridge then. For an engine whose bridge opens late, e.g. a netgame host waiting for its lobby to fill.",
       ),
+    record: z
+      .string()
+      .optional()
+      .describe(
+        `Record a demo (-record): a bare name, written as <dir>/<name>.lmp (dir: ${ctx.env("DEMO_DIR")}, else the engine's folder), or an absolute .lmp path; refused when that .lmp exists. ` +
+          "Writes <name>.json beside it: the iwad and files with sha1 (and git rev for a file in a work tree), map, skill and save. " +
+          "The take is written when the engine quits: kill_instance and reset report it; an MCP shutdown quits it too, but its sidecar then lacks the lmp entry.",
+      ),
+    save: z
+      .string()
+      .optional()
+      .describe(
+        `Start from a savegame (-loadgame): a name under the save dir or an absolute path.${engine.demoRecordFromSave ? "" : " Can't be combined with record on this engine."}`,
+      ),
+    mouse: z.boolean().optional().describe("Pin use_mouse: true for a human player, false to keep the pointer free. Defaults to on with record, else the config's own setting."),
   };
 }
 
@@ -478,7 +542,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   async function withProgress<T>(
     extra: ToolExtra,
     expectedMs: number,
-    message: string,
+    message: string | (() => string),
     work: () => Promise<T>,
   ): Promise<T> {
     const progressToken = extra._meta?.progressToken;
@@ -495,7 +559,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             progressToken,
             progress: Math.min(elapsed, expectedMs),
             total: expectedMs,
-            message,
+            message: typeof message === "string" ? message : message(),
           },
         })
         .catch(() => {});
@@ -518,6 +582,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   type CallExtra = Parameters<ToolCallback<ZodRawShapeCompat>>[1];
   // Every tool by name, for run_scenario to call server-side.
   const tools = new ToolRegistry<CallExtra>();
+
+  /** The demo policy's verdict on a call of class `cls`, refreshing a demo or pending-load snapshot first
+   *  since a free playback may have ended (`run_command playdemo` leaves `pending=1 demo=0`). */
+  async function demoCheck(tool: string, cls: DemoClass, instance: number): Promise<DemoVerdict> {
+    if (!demoMayRefuse(cls)) return undefined;
+    const client = ctx.attachedClient(instance);
+    if (!client?.supports("status")) return undefined;
+    const cached = client.lastStatus;
+    if (!cached || demoActivity(cached) || cached.pending === "1") await client.refreshStatus();
+    const s = client.lastStatus;
+    const state = demoState(s);
+    if (!s) state.recording = ctx.launchArgsFor(instance)?.args.record !== undefined;
+    return demoVerdict(tool, cls, state);
+  }
 
   /** Register a tool with the server, and in `tools` under `raw` (registerLive's handler without the note); `scenario` is why run_scenario refuses it. */
   function register<Input extends ZodRawShapeCompat>(
@@ -550,17 +628,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
    * hand-maintained list of "tools that run a command", which would get cases
    * like `verify_menu` (runs a command only when `open` is given) wrong.
    *
+   * Before the handler, `fresh` applies the tool's `demo` row (`demo/policy.ts`), refusing a call
+   * a playing or recording demo can't take.
+   *
    * Two invariants the wrapper must not violate:
    * - It only ever PEEKS the registry (`ctx.attachedClient`), never
-   *   `ctx.clientFor` — so it can never itself open a socket or turn a
-   *   successful call into a failure.
+   *   `ctx.clientFor` — so it can never itself open a socket, and its only
+   *   failure is the demo policy's refusal.
    * - It does not try/catch the handler: a thrown error (unbound instance, a
    *   `loadMap` failure) must propagate byte-identically to a plain
    *   `server.registerTool` call.
    */
   function registerLive<Input extends ZodRawShapeCompat & { instance: typeof instanceArg }>(
     name: string,
-    config: ToolConfig<Input>,
+    { demo: policy, ...config }: ToolConfig<Input> & { demo: DemoRow },
     handler: ToolCallback<Input>,
   ): void {
     // TS can't carry an abstract `Input` through the SDK's own generic
@@ -583,10 +664,15 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
 
     const fresh = async (args: Args, extra: Extra): Promise<Result> => {
       const instance = args.instance;
+      const verdict = await demoCheck(name, demoClass(policy, args), instance);
+      if (verdict && "refuse" in verdict) return fail(verdict.refuse);
+      // After the policy's refresh, so an input-only call still gets its own refresh below.
       const prior = ctx.attachedClient(instance);
       const before = prior?.commandCount;
       const eventsBefore = prior?.eventCount ?? 0;
-      const result = await rawHandler(args, extra);
+      const handled = await rawHandler(args, extra);
+      const result =
+        verdict && !handled.isError ? { ...handled, content: [...handled.content, { type: "text" as const, text: verdict.note }] } : handled;
       const client = ctx.attachedClient(instance);
       const advanced = before !== undefined && client !== undefined && client.commandCount > before;
       if (client && !advanced) {
@@ -629,15 +715,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
    * Returns the output plus what the engine printed meanwhile, e.g. a load error.
    */
   async function runLoad(client: BridgeClient, cmd: string): Promise<string[]> {
+    return (await loadAndWait(client, cmd)).lines;
+  }
+
+  /** runLoad, plus whether a status read saw the load settle (false without the status cap). */
+  async function loadAndWait(client: BridgeClient, cmd: string): Promise<{ lines: string[]; settled: boolean }> {
     const out = await client.runCommand(cmd);
-    if (!client.supports("status")) return consoleLines(out);
+    if (!client.supports("status")) return { lines: consoleLines(out), settled: false };
     // pauseext stops every tic, so polling would only burn the whole wait.
     if (client.lastStatus?.pauseext === "1" && client.lastStatus.pending === "1") {
-      return [...consoleLines(out), "(focus-paused (pauseext): the load runs once ensure_live fix clears it)"];
+      return { lines: [...consoleLines(out), "(focus-paused (pauseext): the load runs once ensure_live fix clears it)"], settled: false };
     }
     const { settled, printed } = await awaitLoad(client);
     const caveat = settled ? [] : ["(load still pending after ~5 s; the engine-state note may predate it)"];
-    return [...consoleLines([...out, ...printed]), ...caveat];
+    return { lines: [...consoleLines([...out, ...printed]), ...caveat], settled };
   }
 
   /** Poll status until no load is pending (bounded, ~5 s), keeping what the engine printed meanwhile. */
@@ -656,11 +747,126 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return { settled, printed };
   }
 
-  /** Unpause for `tics`, then pause again unless `pauseAfter` is false. */
-  async function runTics(client: BridgeClient, tics: number, pauseAfter = true): Promise<void> {
+  const isFrozen = (client: BridgeClient) => client.lastStatus?.frozen === "1";
+
+  /** The client, with a status snapshot when its bridge has the clock (none is cached after a reconnect), so a frozen clock is seen. */
+  async function clockedClient(instance: number): Promise<BridgeClient> {
+    const client = await ctx.clientFor(instance);
+    if (!client.supports("clock") || client.lastStatus) return client;
+    await client.refreshStatus();
+    if (!client.lastStatus) throw new Error("can't tell whether time is frozen: the status read timed out (engine busy); retry");
+    return client;
+  }
+
+  /** clockedClient for a tool that needs tics to run by themselves (a queued action, a game action, input, a wall-clock driver): throws on a frozen clock. */
+  async function ticsClient(instance: number): Promise<BridgeClient> {
+    const client = await clockedClient(instance);
+    if (isFrozen(client)) throw new ToolRefusal(FROZEN_REFUSAL);
+    return client;
+  }
+
+  /** The client for a stock net command, run on the next tic, so it's refused on a frozen clock
+   *  unless recording, where it rides on the next step and is recorded. */
+  async function netcmdClient(instance: number): Promise<{ client: BridgeClient; queued: string }> {
+    const client = await clockedClient(instance);
+    if (!isFrozen(client)) return { client, queued: "" };
+    if (!demoState(client.lastStatus).recording) throw new ToolRefusal(FROZEN_REFUSAL);
+    return { client, queued: " (queued for the next step: the frozen recording records it then)" };
+  }
+
+  interface ClockRun {
+    reply: string[];
+    before: ClockStatus;
+    after: ClockStatus;
+    /** The engine's refusal of a job; nothing queued runs then. */
+    error?: string;
+    stalled: boolean;
+  }
+
+  /** Queue mcp_clock `jobs` behind a status read in one command so no frame runs between, then poll
+   *  until the queue drains or stalls (no step or shot for ~1 s); `units` frames bound the wait. */
+  async function runClock(client: BridgeClient, jobs: string[], units: number): Promise<ClockRun> {
+    const reply = await client.runCommand(["mcp_clock status", ...jobs].join("; "));
+    const before = parseClockStatus(reply);
+    if (!before) throw new Error(failureText(reply));
+    const error = firstError(reply);
+    if (error !== undefined) {
+      // Jobs queued ahead of the refused one would otherwise run unasked.
+      if (parseKvLines(reply, "MCP_CLOCK queued").length > 0) await client.runCommand("mcp_clock stop");
+      return { reply, before, after: before, error, stalled: false };
+    }
+    const read = async () => {
+      const s = await readOrThrow(client, "mcp_clock status", parseClockStatus);
+      return { ...s, active: s.jobs > 0 };
+    };
+    const after = await pollArmedRun(read, (s) => s.steps + s.shots, { tics: units, runMs: 0, sleep });
+    if (after.active) await client.runCommand("mcp_clock stop", ARMED_STOP_MS).catch(() => {});
+    return { reply, before, after, stalled: after.active };
+  }
+
+  /** Why a clock run made fewer than `shots` captures, or undefined. */
+  function shotShortfall(run: ClockRun, shots: number): string | undefined {
+    if (run.error !== undefined) return run.error;
+    if (run.after.shots - run.before.shots >= shots) return undefined;
+    return clockEndText(run.stalled ? "stalled" : run.after.reason);
+  }
+
+  /** Exactly `tics` steps on a frozen clock, and what ran. */
+  async function clockStep(client: BridgeClient, tics: number): Promise<TicRun> {
+    const run = await runClock(client, [command("mcp_clock step", tics)], tics);
+    return { ran: run.after.steps - run.before.steps, end: run.error ?? (run.stalled ? "stalled" : run.after.reason) };
+  }
+
+  /** Freeze the clock (one live tic, then held), returning the engine's refusal or a missed tic as
+   *  `error`, which callers fail with rather than falling back to unpausing. */
+  async function freezeClock(client: BridgeClient): Promise<{ run: ClockRun } | { error: string }> {
+    const run = await runClock(client, ["mcp_clock freeze"], 1);
+    if (run.error !== undefined) return { error: `can't freeze: ${run.error}` };
+    if (!run.before.frozen && (run.stalled || run.after.reason !== "done")) {
+      return { error: `froze, but its live tic didn't run: ${clockEndText(run.stalled ? "stalled" : run.after.reason)}. freeze_time off resumes.` };
+    }
+    return { run };
+  }
+
+  /** Whether a demo plays or records, re-reading a cached snapshot that says so (a free playback may have ended). */
+  async function demoActive(client: BridgeClient): Promise<DemoActivity | undefined> {
+    if (!demoActivity(client.lastStatus)) return undefined;
+    await client.refreshStatus();
+    return demoActivity(client.lastStatus);
+  }
+
+  /** Run `tics`, stepping a frozen clock (freezing it first under a demo) or else unpausing for their
+   *  time and pausing again unless `pauseAfter` is false. */
+  async function runTics(client: BridgeClient, tics: number, pauseAfter = true): Promise<TicRun | undefined> {
+    if (isFrozen(client)) return clockStep(client, tics);
+    // Unpause/sleep/pause would throw a playback's ticcmds away or record paused tics.
+    const activity = client.supports("clock") ? await demoActive(client) : undefined;
+    if (activity) {
+      const froze = await freezeClock(client);
+      if ("error" in froze) throw new ToolRefusal(`a demo is ${activity}, so stepping freezes the clock first: ${froze.error}`);
+      // The freeze's live tic is the first; the engine rejects step 0.
+      const rest = tics > 1 ? await clockStep(client, tics - 1) : { ran: 0, end: "done" };
+      return { ...rest, ran: rest.ran + 1, froze: true };
+    }
     client.setPause(false);
     await sleep((tics / TICRATE) * 1000);
     if (pauseAfter) client.setPause(true);
+    return undefined;
+  }
+
+  // Frozen-clock capture names count per server, like screenshotName's.
+  let frameSeq = 0;
+
+  /** A screenshot: on a frozen clock a capture job at the held frame (no tic runs to take `screenshot`), else the console command. */
+  async function shoot(client: BridgeClient, opts: { name?: string; keep?: boolean } = {}) {
+    if (!isFrozen(client)) return ctx.io.capture(client, ctx.config.screenshotDir, opts);
+    const name = opts.name ?? frameName(++frameSeq, 0);
+    // The engine counts a capture whose write failed, so a stale kept file would pass for the new one.
+    if (opts.keep) ctx.io.removeFile(path.join(ctx.config.screenshotDir, `${name}.png`));
+    const run = await runClock(client, [command("mcp_clock shot", name)], SHOT_FRAMES);
+    const short = shotShortfall(run, 1);
+    if (short !== undefined) throw new Error(`frozen-clock capture failed: ${short}`);
+    return ctx.io.readShot(ctx.config.screenshotDir, name, opts.keep === true);
   }
 
   /** An instance's engine log file, or undefined when it has none (an attached instance, a log not written yet). */
@@ -704,7 +910,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   }
 
   /** A stepping tool's run of `tics`: paused again after, except where the netgame role leaves it running. */
-  function runStep(client: BridgeClient, instance: number, tics: number): Promise<void> {
+  function runStep(client: BridgeClient, instance: number, tics: number): Promise<TicRun | undefined> {
     return runTics(client, tics, !netInfo(instance)?.leftRunning);
   }
 
@@ -728,14 +934,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     tics: number,
     extra: ToolExtra,
     pattern?: string,
-  ): Promise<LogWindow | undefined> {
+  ): Promise<{ got: LogWindow | undefined; run: TicRun | undefined }> {
     const readLater = logSince(instance);
-    await withProgress(extra, (tics / TICRATE) * 1000, `advancing ${tics} tic(s)`, () => runStep(client, instance, tics));
+    const run = await withProgress(extra, (tics / TICRATE) * 1000, `advancing ${tics} tic(s)`, () => runStep(client, instance, tics));
     // Refresh here since registerLive won't once a command ran, and before reading the log since
     // this round trip lands after the last tic, so that tic's lines are in it.
     await client.refreshStatus();
     const got = readLater(STEP_LOG_MAX_LINES, pattern);
-    return got;
+    return { got, run };
   }
 
   /** The reply block for a step's log window, which `quiet` drops when empty. */
@@ -758,9 +964,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   /** An action tool's step block, with the netgame role's note: empty without stepTics. */
   async function stepBlock(client: BridgeClient, instance: number, extra: ToolExtra, { stepTics, logPattern }: StepArgs) {
     if (stepTics === 0) return { text: [], structured: undefined, notes: [] };
-    const block = stepLogReply(stepTics, await stepAndCollect(client, instance, stepTics, extra, logPattern), logPattern);
-    const role = netPauseNote(netInfo(instance), true);
-    return { ...block, text: [...role, ...block.text], notes: [...role, ...block.notes] };
+    const { got, run } = await stepAndCollect(client, instance, stepTics, extra, logPattern);
+    const block = stepLogReply(run?.ran ?? stepTics, got, logPattern);
+    // A frozen step that ran short says so; a full one reads like any other.
+    const caveats = [...netPauseNote(netInfo(instance), true), ...(run && (run.end !== "done" || run.froze) ? [describeTicRun(run)] : [])];
+    return { ...block, text: [...caveats, ...block.text], notes: [...caveats, ...block.notes] };
   }
 
   /** An action tool's reply, `lines` then the step block when stepTics is set; `notes` are the caller's caveat lines. */
@@ -829,12 +1037,148 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return parsed?.start ? { start: parsed.start, rows: parsed.rows } : { error: failureText(reply) };
   }
 
+  /** A chunked tool's step, keeping a frozen clock's last run so a stall names why its steps stopped. */
+  function chunkStepper(client: BridgeClient, instance: number) {
+    let last: TicRun | undefined;
+    return {
+      step: async (n: number) => {
+        last = await runStep(client, instance, n);
+      },
+      stalled: (maptime: number) =>
+        last && last.end !== "done"
+          ? fail(`the frozen clock's steps stopped at maptime ${maptime}: ${clockEndText(last.end)}`)
+          : stalledResult(client, maptime),
+    };
+  }
+
   /** `cmd`'s reply through `parse`; throws the reply's failure text when it has no such line. */
   async function readOrThrow<T>(client: BridgeClient, cmd: string, parse: (lines: string[]) => T | undefined): Promise<T> {
     const reply = await client.runCommand(cmd);
     const parsed = parse(reply);
     if (parsed === undefined) throw new Error(failureText(reply));
     return parsed;
+  }
+
+  /** Arm an mcp_input schedule on a client whose status the caller just refreshed (after its own
+   *  `mcp_input stop`), poll it to the end and always stop it, returning a still-active status on a stall. */
+  async function runSchedule(
+    client: BridgeClient,
+    instance: number,
+    extra: ToolExtra,
+    run: { what: string; entries: string[]; tics: number; nominalTics: number; walks: boolean; limits?: ScheduleLimits; progress: string },
+  ): Promise<{ refused: string } | { status: InputStatus; readLater: LogReader; froze: boolean; ranPast?: number }> {
+    const snap = statusField(client, "paused");
+    if ("error" in snap) return { refused: `can't run ${run.what}: ${snap.error}` };
+    // A paused tic desyncs a recording and the engine refuses go 1 there, so freeze as stepping does.
+    const s = snap.status;
+    const froze = !isFrozen(client) && demoState(s).recording && isPaused(s) && client.supports("clock");
+    if (froze) {
+      const got = await freezeClock(client);
+      if ("error" in got) return { refused: `can't run ${run.what} on a paused recording: ${got.error}` };
+    }
+    const frozen = isFrozen(client);
+    // A frozen clock drives the schedule through exact steps instead.
+    const blockers = statusBlockers({ ...client.lastStatus, frozen: "0" });
+    if (blockers.length) return { refused: `can't run ${run.what}: ${blockers.join(", ")}. Try ensure_live with fix.` };
+    // Frozen go writes no pause, so it arms with go 0.
+    const wasPaused = !frozen && isPaused(client.lastStatus);
+    const readLater = logSince(instance);
+    const armed = await client.runCommand(scheduleCommand(run.entries, wasPaused, run.limits));
+    if (!parseInputArmed(armed)) return { refused: failureText(armed) };
+    const runMs = (run.nominalTics / TICRATE) * 1000;
+    const readInput = () => readOrThrow(client, "mcp_input status", parseInputStatus);
+    let status: InputStatus | undefined;
+    let ranPast: number | undefined;
+    try {
+      await withProgress(extra, (run.tics / TICRATE) * 1000, run.progress, async () => {
+        if (!frozen) {
+          status = await pollArmedRun(readInput, (s) => s.consumed, { tics: run.tics, runMs, sleep });
+          return;
+        }
+        const driven = await driveFrozenSchedule(client, run, readInput);
+        status = driven.status;
+        ranPast = driven.ranPast;
+      });
+    } finally {
+      // A stop that fails too (the bridge died) must not hide the error that got us here.
+      if (status?.active !== false) await client.runCommand("mcp_input stop", ARMED_STOP_MS).catch(() => {});
+    }
+    return { status: status!, readLater, froze, ...(ranPast !== undefined && { ranPast }) };
+  }
+
+  /** Step an armed schedule on a frozen clock, in FROZEN_WALK_CHUNK steps when walks leave its end
+   *  unknown, reporting the tics stepped past that end as `ranPast`. */
+  async function driveFrozenSchedule(
+    client: BridgeClient,
+    run: { tics: number; walks: boolean },
+    readInput: () => Promise<InputStatus>,
+  ): Promise<{ status: InputStatus; ranPast?: number }> {
+    if (!run.walks) {
+      await stepOrThrow(client, run.tics);
+      const status = await readInput();
+      if (!status.active || status.consumed < status.total) return { status };
+      // Every tic ran; the engine would disarm it at the next tic's start, which a frozen clock hasn't run.
+      await client.runCommand("mcp_input stop");
+      return { status: { ...status, active: false, reason: "done" } };
+    }
+    let stepped = 0;
+    let status = await readInput();
+    while (status.active && stepped < run.tics) {
+      const n = Math.min(FROZEN_WALK_CHUNK, run.tics - stepped);
+      const ran = await stepOrThrow(client, n);
+      stepped += ran;
+      status = await readInput();
+      if (ran < n) break;
+    }
+    return { status, ...(!status.active && { ranPast: Math.max(0, stepped - status.consumed) }) };
+  }
+
+  /** The caveat lines for a schedule that froze the clock first or stepped past a walk's end. */
+  function frozenScheduleNotes(ran: { froze: boolean; ranPast?: number }): string[] {
+    return [
+      ...(ran.froze ? ["froze the clock first (one live tic): a paused tic desyncs a recording (freeze_time off resumes)"] : []),
+      ...(ran.ranPast ? [`stepped ${ran.ranPast} tic(s) past the end (a frozen walk steps ${FROZEN_WALK_CHUNK} at a time)`] : []),
+    ];
+  }
+
+  /** A frozen step of `tics`, returning how many ran; an engine refusal throws. */
+  async function stepOrThrow(client: BridgeClient, tics: number): Promise<number> {
+    const run = await runClock(client, [command("mcp_clock step", tics)], tics);
+    if (run.error !== undefined) throw new Error(`the frozen clock refused a step: ${run.error}`);
+    return run.after.steps - run.before.steps;
+  }
+
+  // One dump dir per server, holding its newest recordings.
+  const recDumps = recDumpFiles(() => ctx.io);
+
+  /** Why the dump dir can't be passed to the console, or undefined. */
+  function recDumpRefusal(): string | undefined {
+    const dir = recDumps.dir();
+    const tok = tempPathToken(dir, dir, engine.ansiPaths);
+    return "refused" in tok ? tok.refused : undefined;
+  }
+
+  /** Dump the recording to a fresh file and read it back as the reply, once recDumpRefusal is clear. */
+  async function recordingReply(client: BridgeClient, instance: number, maxRows: number, untracked: number) {
+    const file = recDumps.next(instance);
+    // The dir passed recDumpRefusal, and the file name adds only plain ASCII.
+    const { token } = tempPathToken(file, recDumps.dir(), engine.ansiPaths) as { token: string };
+    const wrote = await client.runCommand(buildRecDump(token));
+    if (!parseRecWrote(wrote)) return fail(failureText(wrote));
+    let text: string;
+    try {
+      text = ctx.io.readTextSync(file);
+    } catch (e) {
+      return fail(`can't read the recording file ${file}: ${(e as Error).message}`);
+    }
+    const rec = parseRecFile(text);
+    if (!rec) return fail(`the recording file ${file} has no MCP_RECFILE header`);
+    const result = recordResult(rec, file, maxRows, untracked);
+    const notes = recordNotes(result, rec);
+    return {
+      content: [{ type: "text" as const, text: describeRecord(result, rec, notes) }],
+      structuredContent: withNotes({ ...result }, notes),
+    };
   }
 
   /** `findactors` with find_actors' filters, or its output when it failed. */
@@ -920,6 +1264,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "run_command",
     {
+      demo: "read",
       title: "Run console command",
       description:
         appendNote(
@@ -945,6 +1290,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_actor_classes",
     {
+      demo: "read",
       title: "List actor classes",
       description:
         `Run \`dumpactors\` and return the registered ${notes.actorClasses} classes as structured data.`,
@@ -975,6 +1321,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "summon",
     {
+      demo: "netcmd",
       title: "Summon actor",
       description:
         "Spawn an actor of the given class at the player's position (use summon_at for exact map coordinates).",
@@ -986,15 +1333,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async ({ instance, className, kind }) => {
       const verb = kind === "friend" ? "summonfriend" : kind === "foe" ? "summonfoe" : "summon";
-      const client = await ctx.clientFor(instance);
+      const { client, queued } = await netcmdClient(instance);
       const output = await client.runCommand(command(verb, className));
-      return { content: [{ type: "text", text: output.join("\n") || `summoned ${className}` }] };
+      return { content: [{ type: "text", text: (output.join("\n") || `summoned ${className}`) + queued }] };
     },
   );
 
   registerLive(
     "summon_at",
     {
+      demo: "write",
       title: "Summon actor at coordinates",
       description:
         `Run \`mcp_spawnat\`: spawn an actor at exact map x/y (z defaults to the floor, angle in degrees, 0 east) and report it in the same call, even while ${notes.summonAtWhile} (it thinks once the sim runs). The reply's class is the actual spawned class after any mod replacement (requested= shows the asked-for name when it differs); use it and the returned tid for follow-ups with find_actors/actor_state. tid defaults to a fresh unique TID; tid 0 means none. kind friend/foe matches summonfriend/summonfoe. The spawn is refused, reporting why, ${notes.summonAtRefusals} ` +
@@ -1058,6 +1406,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_actor_prop",
     {
+      demo: writesWithValue,
       title: "Read or set an actor property",
       description:
         "Run `mcp_setprop`: read or write one property on any live actor, the player's body included. Target: tid (omitted or 0 = the console player's body) and index (the nth actor sharing the tid, as find_actors' index=; needs a tid). " +
@@ -1104,6 +1453,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "place_actor",
     {
+      demo: "write",
       title: "Move, turn or launch an actor",
       description:
         "Run `mcp_place`: move, turn and/or launch any live actor in one call and report it after (fromx/fromy/fromz: where it was). Target: tid and index, as set_actor_prop's. " +
@@ -1167,6 +1517,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "remove_actor",
     {
+      demo: "write",
       title: "Remove an actor",
       description:
         "Run `mcp_remove`: remove the actor with this tid (index: the nth sharing it) or, with all, every actor with it, as Thing_Remove does: no death, and it leaves the kill/item totals. " +
@@ -1194,6 +1545,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "damage_actor",
     {
+      demo: "write",
       title: "Damage an actor",
       description:
         "Run `mcp_damage`: damage any live actor through the engine's own damage path, as Thing_Damage does: per-type damage factors, pain and death states apply (damageType Extreme forces the extreme death). Target: tid and index, as set_actor_prop's. " +
@@ -1234,6 +1586,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_cheat",
     {
+      demo: "netcmd",
       title: "Set a cheat on or off",
       description:
         `Idempotently turn a player cheat on or off. Reads the cheat bit from the engine-state snapshot and only runs the stock toggle CCMD (god, notarget, ...) when it differs, then waits for the bit to flip, so a blind toggle can never switch it the wrong way. ${notes.setCheat} Needs a bridge with the status cap and a cheats= field.`,
@@ -1244,7 +1597,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, name, on }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       const bit = CHEATS[name];
       const read = () => {
         const cheats = client.lastStatus?.cheats;
@@ -1297,12 +1650,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   ) {
     const refusal = targetRefusal(tid, index) ?? (tid === undefined ? undefined : tokenRefusal("item", item));
     if (refusal) return fail(refusal);
-    const client = await ctx.clientFor(instance);
     const amountArg = amount !== undefined ? [amount] : [];
+    // The stock give/take is a net command run on the next tic; mcp_inv acts at once.
     if (tid === undefined) {
+      const { client, queued } = await netcmdClient(instance);
       const output = await client.runCommand(command(op, item, ...amountArg));
-      return { content: [{ type: "text" as const, text: output.join("\n") || `${done} ${item}` }] };
+      return { content: [{ type: "text" as const, text: (output.join("\n") || `${done} ${item}`) + queued }] };
     }
+    const client = await ctx.clientFor(instance);
     const output = await client.runCommand(command("mcp_inv", tid, index ?? 0, op, item, ...amountArg));
     return kvReply(output, "inv", (rec) => {
       const refused = rec.ok === 0 ? " (pickup refused)" : "";
@@ -1313,6 +1668,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "give",
     {
+      demo: netcmdUnlessTid,
       title: "Give item",
       description:
         "Give an inventory item. Without a tid, the stock `give` command to the player (cheat names such as all, weapons and health work). " +
@@ -1332,6 +1688,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "take",
     {
+      demo: netcmdUnlessTid,
       title: "Take item",
       description:
         "Remove an inventory item. Without a tid, the stock `take` command on the player. " +
@@ -1347,21 +1704,37 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "load_map",
     {
+      demo: "load",
       title: "Load map",
       description:
-        "Load a map by its lump name (e.g. MAP01, E1M1). Cheats such as god and notarget reset with the map: set them again with set_cheat.",
+        "Load a map by its lump name (e.g. MAP01, E1M1). The engine unpauses to load; a pause found before the load is put back once it settles " +
+        "(not while a demo records, where a paused tic desyncs it, nor while the load is still pending). " +
+        "Cheats such as god and notarget reset with the map: set them again with set_cheat.",
       inputSchema: { instance: instanceArg, mapName: z.string().min(1) },
     },
     async ({ instance, mapName }) => {
-      const client = await ctx.clientFor(instance);
-      const output = await runLoad(client, command("map", mapName));
-      return { content: [{ type: "text", text: output.join("\n") || `loaded ${mapName}` }] };
+      const client = await ticsClient(instance);
+      // Only a real pause: a focus pause reads -1 and is the window's, not the caller's.
+      const wasPaused = client.supports("time") && client.lastStatus?.paused === "1";
+      const loaded = await loadAndWait(client, command("map", mapName));
+      const lines = [loaded.lines.join("\n") || `loaded ${mapName}`];
+      // A settled load was seen by a status read, so lastStatus is that read.
+      const recording = loaded.settled && demoState(client.lastStatus).recording;
+      if (wasPaused && loaded.settled && !recording) {
+        client.setPause(true);
+        // So the footer and a following load see the pause put back.
+        await client.refreshStatus();
+      } else if (wasPaused) {
+        lines.push(`(the pause found before the load was not put back: ${recording ? "a demo is recording" : "the load is still pending"})`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     },
   );
 
   registerLive(
     "list_running_scripts",
     {
+      demo: "read",
       title: "List running ACS scripts",
       description:
         "Run `scriptstat` and return the currently running ACS scripts and their states.",
@@ -1390,6 +1763,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "run_script",
     {
+      demo: "write",
       title: "Run ACS script",
       description:
         "Run an ACS script by number or name, with up to 4 integer arguments. `name` is an alias for a named `script`; a string is always a name, even one made of digits. " +
@@ -1411,13 +1785,15 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     async ({ instance, script: byScript, name, args, always, stepTics, logPattern }, extra) => {
       const script = scriptOrName(byScript, name);
       if (script == null) return fail("pass exactly one of script or name");
-      const client = await ctx.clientFor(instance);
+      const client = await clockedClient(instance);
       const stepError = stepArgsError(client, stepTics, logPattern);
       if (stepError) return fail(stepError);
       const respond = (lines: string[], structured?: Record<string, unknown>, notes?: string[]) =>
         replyAfterStep(client, instance, extra, { stepTics, logPattern }, lines, structured, notes);
       // The stock net command: the script runs a tic later, so there is no result to read.
       const puke = async (notes: string[]) => {
+        // puke runs the script on the next tic, which a frozen clock never starts by itself.
+        if (isFrozen(client)) return fail(FROZEN_REFUSAL);
         const cmd =
           typeof script === "number" ? buildPuke(script, args, always) : buildPukeName(script, args, always);
         const output = consoleLines(await client.runCommand(cmd));
@@ -1443,6 +1819,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "run_acs",
     {
+      demo: "write",
       title: "Hot-load and run an ACS snippet",
       description:
         `Compile full ACS source host-side (bcc by default: zt-bcc or bcc on PATH, with zt-bcc's lib/ found next to or one folder above the binary; or acc on PATH; ${ctx.env("BCC")}/${ctx.env("ACC")} override the executables) and load it into the running level as a temporary module, then optionally run one of its scripts by number or name with up to 4 args (a string script is always a name, even one made of digits; \`name\` is an alias for a named \`script\`). The script runs inside this call until its first delay, so its Log() output comes back in the reply (Print() is a HUD message: use read_hud); stepTics then runs the sim that many tics and returns the log lines printed meanwhile (logPattern filters them). A snippet that isn't a #library is compiled as one, so its strings resolve. It may #import a library the level already loaded (pass includeDirs for its source) and then shares that library's live functions and map vars; importing a library that isn't loaded is refused before anything is sent. ${ctx.env("RUNACS_PROFILES")} lists per-project profile files: a profile applies when the snippet #imports one of its libraries, adding its include dirs and its defines (which #import doesn't carry) ahead of the snippet, and the reply names it (profile: <file>); a profile with rawDefines makes the snippet's own #defines case-sensitive. open runs its OPEN scripts. Compile errors come back without touching the engine. ${notes.runAcs} save_game refuses: a save would fail to load (in-game saves and leaving a hub level carry the same hazard, which this tool can't intercept).`,
@@ -1530,16 +1907,15 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "screenshot",
     {
+      demo: "read",
       scenario: SCENARIO_REFUSALS.image,
       title: "Screenshot",
       description: "Take a screenshot of the game and return it as an image so it can be viewed.",
       inputSchema: { instance: instanceArg },
     },
     async ({ instance }, extra) => {
-      const client = await ctx.clientFor(instance);
-      const shot = await withProgress(extra, 19000, "capturing screenshot", () =>
-        ctx.io.capture(client, ctx.config.screenshotDir),
-      );
+      const client = await clockedClient(instance);
+      const shot = await withProgress(extra, 19000, "capturing screenshot", () => shoot(client));
       return { content: [{ type: "image", data: shot.base64, mimeType: "image/png" }] };
     },
   );
@@ -1547,6 +1923,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "screenshot_file",
     {
+      demo: "read",
       title: "Screenshot to a file",
       description:
         appendNote(
@@ -1563,10 +1940,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, name }, extra) => {
-      const client = await ctx.clientFor(instance);
-      const shot = await withProgress(extra, 19000, "capturing screenshot", () =>
-        ctx.io.capture(client, ctx.config.screenshotDir, { name, keep: true }),
-      );
+      const client = await clockedClient(instance);
+      const shot = await withProgress(extra, 19000, "capturing screenshot", () => shoot(client, { name, keep: true }));
       const file = path.resolve(shot.path);
       return { content: [{ type: "text", text: file }], structuredContent: { path: file } };
     },
@@ -1575,12 +1950,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "menu_key",
     {
+      demo: "menu",
       title: "Press a menu key",
       description: "Send a single menu navigation key (GUI key event) to the active menu.",
       inputSchema: { instance: instanceArg, key: z.enum(MENU_KEYS) },
     },
     async ({ instance, key }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       postMenuKey(client, key);
       return { content: [{ type: "text", text: `sent ${key}` }] };
@@ -1590,13 +1966,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "menu_nav",
     {
+      demo: "menu",
       title: "Navigate a menu",
       description:
         'Send a sequence of menu keys (e.g. ["down","down","enter"]) with a small delay between each.',
       inputSchema: { instance: instanceArg, steps: z.array(z.enum(MENU_KEYS)).min(1) },
     },
     async ({ instance, steps }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       await withProgress(extra, steps.length * 60, "sending menu keys", async () => {
         for (const key of steps) {
@@ -1613,13 +1990,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "menu_text",
     {
+      demo: "menu",
       title: "Type into a menu text field",
       description:
         "Type a string into the active menu text-entry field (e.g. the player name box after pressing enter on it), one character at a time.",
       inputSchema: { instance: instanceArg, text: z.string().min(1) },
     },
     async ({ instance, text }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       await withProgress(extra, text.length * 40, "typing", async () => {
         for (const ch of text) {
@@ -1635,13 +2013,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "mouse_move",
     {
+      demo: "input",
       title: "Move the mouse pointer",
       description:
         "Move the pointer to a screen position, in pixels from the top-left of the game window. Drives hover-only UI -- tooltips, hot states -- which nothing else here can reach.",
       inputSchema: { instance: instanceArg, x: z.number().int(), y: z.number().int() },
     },
     async ({ instance, x, y }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       const ev = mouseMoveEvent(x, y);
       client.sendEvent(ev.evtype, ev.subtype, ev.data1, ev.data2);
@@ -1652,6 +2031,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "mouse_click",
     {
+      demo: "input",
       title: "Click or drag the mouse",
       description:
         "Press and release the left button at a position. Give toX/toY to DRAG: press at the first point, move through it, release at the second. `double` sends a double-click.",
@@ -1665,7 +2045,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, x, y, toX, toY, double }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       const post = (e: { evtype: number; subtype: number; data1: number; data2: number }) =>
         client.sendEvent(e.evtype, e.subtype, e.data1, e.data2);
@@ -1701,13 +2081,14 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "mouse_wheel",
     {
+      demo: "input",
       title: "Scroll the mouse wheel",
       description:
         "Wheel notches at the current pointer position. Positive scrolls up, negative down.",
       inputSchema: { instance: instanceArg, notches: z.number().int() },
     },
     async ({ instance, notches }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       requireCap(client, "event");
       const count = Math.min(Math.abs(notches), 30);
       for (let i = 0; i < count; i++) {
@@ -1724,6 +2105,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "verify_menu",
     {
+      demo: "menu",
       scenario: SCENARIO_REFUSALS.image,
       title: "Open, navigate, and screenshot a menu",
       description:
@@ -1735,7 +2117,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, open, steps }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       if (steps.length > 0) requireCap(client, "event");
       // Opening a menu can load assets and the capture waits on a frame, so this
       // runs well past a default client timeout.
@@ -1752,6 +2134,26 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
+  /** set_pause under a demo, where a paused tic desyncs it, so pausing freezes the clock instead and
+   *  resuming thaws it (the engine leaves a demo unpaused), else clears the bridge pause. */
+  async function demoPause(client: BridgeClient, paused: boolean, activity: DemoActivity): Promise<{ ok: boolean; lines: string[] }> {
+    const why = `a demo is ${activity}, and a paused tic desyncs it`;
+    if (paused) {
+      if (isFrozen(client)) return { ok: true, lines: [`already frozen at maptime ${client.lastStatus?.maptime}`] };
+      const froze = await freezeClock(client);
+      if ("error" in froze) return { ok: false, lines: [`${why}, so pausing freezes the clock: ${froze.error}`] };
+      return { ok: true, lines: [`froze the clock at maptime ${froze.run.after.maptime} instead of pausing: ${why} (set_pause false thaws)`] };
+    }
+    if (!isFrozen(client)) {
+      client.setPause(false);
+      return { ok: true, lines: ["resumed"] };
+    }
+    const reply = await client.runCommand("mcp_clock thaw");
+    const rec = parseKvLines(reply, "MCP_CLOCK")[0];
+    if (!rec) return { ok: false, lines: [failureText(reply)] };
+    return { ok: true, lines: [`thawed at maptime ${rec.maptime}, left unpaused: ${why}`] };
+  }
+
   // --- time control ----------------------------------------------------------
   // An engine that pauses when its window loses focus freezes the simulation
   // whenever the MCP drives a backgrounded instance. These tools set the engine's pause flag directly so
@@ -1760,9 +2162,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_pause",
     {
+      demo: "gate",
       title: "Pause or resume the game",
       description:
-        `Set the engine's master pause flag directly${notes.setPause} all applies it to every instance this session has bound instead of one, with a line per instance (e.g. to resume a whole netgame). Pausing a netgame server or client adds what pause means for that role.`,
+        `Set the engine's master pause flag directly${notes.setPause} all applies it to every instance this session has bound instead of one, with a line per instance (e.g. to resume a whole netgame). Pausing a netgame server or client adds what pause means for that role. While a demo plays or records, pausing freezes the clock instead and resuming thaws it (a paused tic desyncs a demo).`,
       inputSchema: {
         instance: instanceArg,
         paused: z.boolean(),
@@ -1772,9 +2175,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     async ({ instance, paused, all }) => {
       const verb = paused ? "paused" : "resumed";
       const setOne = async (n: number): Promise<{ ok: boolean; lines: string[] }> => {
-        const client = await ctx.clientFor(n);
+        const client = await clockedClient(n);
         const noTime = missingCap(client, "time");
         if (noTime) return { ok: false, lines: [noTime] };
+        const activity = client.supports("clock") ? await demoActive(client) : undefined;
+        if (activity) return demoPause(client, paused, activity);
+        if (isFrozen(client)) throw new ToolRefusal(FROZEN_REFUSAL);
         client.setPause(paused);
         return { ok: true, lines: [verb, ...(paused ? netPauseNote(netInfo(n), false) : [])] };
       };
@@ -1798,11 +2204,131 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   );
 
   registerLive(
+    "freeze_time",
+    {
+      demo: "read",
+      title: "Freeze or resume the tic clock",
+      description:
+        "Freeze the game's tic clock with the sim unpaused, or resume it. Frozen, the engine keeps redrawing one frame through its normal interpolation, and only the MCP runs tics: step, stepTics and the stepping tools then run exactly the tics asked, one per frame, frame_sweep captures frames at chosen fractions of a tic, and screenshot captures the held frame (no PAUSE banner). Freezing unpauses, runs one live tic so the frame interpolates, and holds; it reports maptime, whether interpolation is on (sub-tic frames need it; cl_capfps 1 turns it off) and the pause it will restore. Refused on a netgame, during client-demo playback, outside a level, with a game action pending or a menu or console open. An offline demo playing frozen steps exactly, and a step that reaches its end stops with demo_end, still frozen. Resuming continues from the held tic with no catch-up and restores the pause found at the freeze, except while a demo plays or records, where it leaves the game unpaused (a paused tic desyncs a demo). While frozen, tools that need tics to run by themselves are refused: queued actions (give and take without tid and summon, except while recording, where they ride on the next step; set_cheat, run_script's puke fallback), load_map, load_game, save_game, play_demo, menu and mouse input, verify_menu, set_pause (except during a demo, where false thaws), move_to's host mode, add_bot, profile_window and record's run mode. input_timeline and move_to's engine mode run through exact steps. A queued console command (run_command give ...) waits for the next step; a direct write (set_actor_prop position) shows interpolated from the old value until a step. frameTime true also holds animated textures, warps, sky scroll, shader timers and the fps counter per tic; step advances them, but changing the frame fraction does not. The fps value is not meaningful while held. Omit frameTime to leave its mode unchanged, or toggle it while already frozen without another tic. Thaw releases it without wall-time catch-up. Without it renderer animation stays real-time (Zandronum software warps already hold but do not advance with frozen steps). Mod-side real time, menus, UI and frame-rate limiting remain real-time. ensure_live with fix also thaws.",
+      inputSchema: {
+        instance: instanceArg,
+        frozen: z.boolean(),
+        frameTime: z.boolean().optional().describe("Also hold renderer frame time per tic; only with frozen true. Omit to leave its current mode unchanged."),
+      },
+    },
+    async ({ instance, frozen, frameTime }) => {
+      if (!frozen && frameTime !== undefined) return fail("frameTime is only valid with frozen true; thaw releases it automatically");
+      const client = await ctx.clientFor(instance);
+      requireCap(client, "clock");
+      if (frameTime !== undefined && !client.supports("frametime")) {
+        return fail("This engine build has no frame-time hold (rebuild the engine with the latest overlay); nothing sent to the engine.");
+      }
+      if (!frozen) {
+        const reply = await client.runCommand("mcp_clock thaw");
+        const rec = parseKvLines(reply, "MCP_CLOCK")[0];
+        if (!rec) return failed(reply);
+        if (rec.maptime === undefined) return { content: [{ type: "text", text: "not frozen; nothing to do" }], structuredContent: { frozen: false } };
+        const paused = rec.paused !== 0;
+        const skipped = rec.restore_skipped === "demo";
+        const note = skipped ? ", unpaused: a demo is playing or recording, so the freeze's pause isn't restored" : paused ? ", paused as at the freeze" : "";
+        return {
+          content: [{ type: "text", text: `resumed at maptime ${rec.maptime}${note}` }],
+          structuredContent: { frozen: false, maptime: rec.maptime, paused, ...(skipped && { restoreSkipped: true }) },
+        };
+      }
+      const froze = await freezeClock(client);
+      if ("error" in froze) return fail(froze.error);
+      const { run } = froze;
+      const s = run.after;
+      let frame = {};
+      let frameNote = "";
+      if (frameTime !== undefined) {
+        const reply = await client.runCommand(`mcp_clock frametime ${+frameTime}`);
+        if (!parseKvLines(reply, "MCP_CLOCK")[0]) return failed(reply);
+        // A render after the toggle anchors the frame clock; its immediate reply is still cached.
+        const settled = await client.runCommand("mcp_clock status");
+        const rec = parseKvLines(settled, "MCP_CLOCK")[0];
+        if (!rec) return failed(settled);
+        frame = { frameTime: rec.frametime === 1, framems: rec.framems };
+        frameNote = `; frame time ${rec.frametime === 1 ? "held per tic (fps is not meaningful)" : "running"}`;
+      }
+      if (run.before.frozen) {
+        return { content: [{ type: "text", text: `already frozen at maptime ${s.maptime}${frameNote}` }], structuredContent: { frozen: true, maptime: s.maptime, interp: s.interp, ...frame } };
+      }
+      const restorePaused = statusRow(run.reply, "MCP_CLOCK", "restore")?.restore !== 0;
+      const interp = s.interp ? "interpolation on" : `interpolation off (${s.nointerp}): sub-tic frames are refused`;
+      const text = `frozen at maptime ${s.maptime}; ${interp}; freeze_time off resumes ${restorePaused ? "paused" : "running"}${frameNote}`;
+      return {
+        content: [{ type: "text", text }],
+        structuredContent: { frozen: true, maptime: s.maptime, interp: s.interp, ...(s.nointerp && { nointerp: s.nointerp }), restorePaused, ...frame },
+      };
+    },
+  );
+
+  registerLive(
+    "frame_sweep",
+    {
+      demo: "read",
+      title: "Capture frames across a tic",
+      description:
+        `On a frozen clock (freeze_time), capture frames at fractions k/of of a tic, for checking what the renderer interpolates: weapon psprites, monsters, projectiles, the view, sector movers. frames lists the k values (0..of, default 0..of-1); of/of is the tic's end state, and 0/of of one tic shows the same state as of/of of the tic before outside animated surfaces. tics 0 sweeps the last tic run; tics n steps one tic then sweeps it, n times. At most ${MAX_SWEEP_FRAMES} frames (frames x tics) and ${MAX_SWEEP_TICS} tics; output "image" returns up to ${MAX_SWEEP_IMAGES} images inline, "file" leaves the PNGs on disk and returns their paths (the only form run_scenario accepts). Returns one line per frame (tic +i, k/of, path) and the final maptime. Refused when interpolation is off (cl_capfps 1, or no tic run since a pause). freeze_time frameTime true holds renderer animation per tic too, so repeated fractions of the same tic match; animated surfaces may differ across a tic seam. Without it, mask real-time animated surfaces when comparing. Game notify lines age only with tics and need masking across different game messages; bridge replies stay out of the notify area.`,
+      inputSchema: {
+        instance: instanceArg,
+        of: z.number().int().min(2).max(MAX_SWEEP_FRAMES).describe("Fractions of a tic: frame k is at k/of."),
+        frames: z.array(z.number().int().min(0).max(MAX_SWEEP_FRAMES)).min(1).optional().describe("k values in capture order; default 0..of-1."),
+        tics: z.number().int().min(0).max(MAX_SWEEP_TICS).default(0),
+        output: z.enum(["image", "file"]).default("image"),
+      },
+    },
+    async ({ instance, of, frames, tics, output }, extra) => {
+      const seq = ++frameSeq;
+      const plan = planSweep({ of, frames, tics, output }, (i) => frameName(seq, i));
+      if ("error" in plan) return fail(plan.error);
+      const client = await clockedClient(instance);
+      requireCap(client, "clock");
+      if (!isFrozen(client)) return fail("time is not frozen: freeze_time on first");
+      const dir = ctx.config.screenshotDir;
+      const keep = output === "file";
+      const n = plan.frames.length;
+      const run = await withProgress(extra, plan.units * 30, `capturing ${n} frame(s)`, () => runClock(client, plan.jobs, plan.units));
+      // A failed sweep leaves no frames behind, kept or not: the reply names none.
+      const discard = () => plan.frames.forEach((f) => ctx.io.removeFile(path.join(dir, `${f.name}.png`)));
+      if (run.error !== undefined) {
+        discard();
+        return fail(`the sweep was refused: ${clockEndText(run.error)}`);
+      }
+      const short = shotShortfall(run, n);
+      if (short !== undefined) {
+        discard();
+        return fail(`the sweep stopped after ${run.after.shots - run.before.shots} of ${n} frame(s): ${short}`);
+      }
+      const shots: Array<{ base64: string; path: string }> = [];
+      try {
+        for (const f of plan.frames) shots.push(await ctx.io.readShot(dir, f.name, keep));
+      } catch (e) {
+        discard();
+        throw e;
+      }
+      const rows = plan.frames.map((f, i) => ({ tic: f.tic, k: f.k, of: f.of, frac: f.frac, ...(keep && { path: path.resolve(shots[i].path) }) }));
+      const lines = rows.map((r) => `tic +${r.tic}  ${r.k}/${r.of}${r.path ? `  ${r.path}` : ""}`);
+      const maptime = run.after.maptime;
+      return {
+        content: [
+          { type: "text", text: [...lines, `maptime ${maptime}`].join("\n") },
+          ...(keep ? [] : shots.map((s) => ({ type: "image" as const, data: s.base64, mimeType: "image/png" }))),
+        ],
+        structuredContent: { maptime, frames: rows },
+      };
+    },
+  );
+
+  registerLive(
     "step",
     {
+      demo: "gate",
       title: "Advance the game by N tics",
       description:
-        `Resume the game, let it run for the given number of tics (35 tics = 1 second), then pause again. Lets you advance the simulation a deterministic-ish amount to observe time-based effects (charging, projectiles, animations) without keeping the window focused. Returns the engine log lines printed meanwhile (up to ${STEP_LOG_MAX_LINES}, with a read_log resume point for the rest; logPattern filters them); a quiet step adds nothing. On a netgame the reply adds what pause means for the instance's role${clientRuns ? ", and a client is left running instead of paused again" : ""}.`,
+        `Resume the game, let it run for the given number of tics (35 tics = 1 second), then pause again. Lets you advance the simulation a deterministic-ish amount to observe time-based effects (charging, projectiles, animations) without keeping the window focused. Returns the engine log lines printed meanwhile (up to ${STEP_LOG_MAX_LINES}, with a read_log resume point for the rest; logPattern filters them); a quiet step adds nothing. On a frozen clock (freeze_time) it runs exactly the tics asked, one per frame, with no pause change, and reports the tics that ran and why a short run stopped. On a netgame the reply adds what pause means for the instance's role${clientRuns ? ", and a client is left running instead of paused again" : ""}.`,
       inputSchema: {
         instance: instanceArg,
         tics: z.number().int().positive().default(35),
@@ -1810,12 +2336,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, tics, logPattern }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await clockedClient(instance);
       requireCap(client, "time");
       const net = netInfo(instance);
-      const got = await stepAndCollect(client, instance, tics, extra, logPattern);
-      const block = stepLogReply(tics, got, logPattern, { quiet: true });
-      const head = [`advanced ~${tics} tic(s)`, ...netPauseNote(net, true)];
+      const { got, run } = await stepAndCollect(client, instance, tics, extra, logPattern);
+      const block = stepLogReply(run?.ran ?? tics, got, logPattern, { quiet: true });
+      const head = [run ? describeTicRun(run) : `advanced ~${tics} tic(s)`, ...netPauseNote(net, true)];
       return {
         content: [{ type: "text", text: [...head, ...block.text].join("\n") }],
         ...(block.structured && { structuredContent: withNotes(block.structured, [...head, ...block.notes]) }),
@@ -1826,9 +2352,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "ensure_live",
     {
+      demo: "gate",
       title: "Check that the sim is advancing",
       description:
-        `Prove the simulation actually advances: list what could block it (${notes.ensureLiveBlockers}, a pending map/save/demo load), then run it ~5 tics and check the map tic counter moved. A pending load is waited out first (up to ~5 s)${notes.ensureLiveLoadWait}. The pause state is left as found, since \`paused\` is the normal driving state and \`step\` runs through it. With fix, first closes the menu (\`closemenu\`)${notes.ensureLiveUnblock}. Returns live plus the blockers found, fixed and remaining.`,
+        `Prove the simulation actually advances: list what could block it (${notes.ensureLiveBlockers}, a pending map/save/demo load), then run it ~5 tics and check the map tic counter moved. A pending load is waited out first (up to ~5 s)${notes.ensureLiveLoadWait}. The pause state is left as found, since \`paused\` is the normal driving state and \`step\` runs through it. With fix, first closes the menu (\`closemenu\`)${notes.ensureLiveUnblock}. While a demo plays or records it reports from status without the probe, which would advance the demo; fix probes anyway, freezing the clock first as step does. Returns live plus the blockers found, fixed and remaining.`,
       inputSchema: { instance: instanceArg, fix: z.boolean().default(false) },
     },
     async ({ instance, fix }) => {
@@ -1852,13 +2379,31 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       if ("failed" in early) return early.failed;
       const s = early.status;
       const found = statusBlockers(s);
-      const wasPaused = isPaused(s);
+      const frozen = isFrozen(client);
+      if (frozen && !fix) {
+        const at = Number(s.maptime);
+        return {
+          content: [{ type: "text", text: `time is frozen at maptime ${at}: not probed (freeze_time off resumes, fix thaws)` }],
+          structuredContent: { live: false, frozen: true, maptime: { before: at, after: at }, found, remaining: found },
+        };
+      }
+      const what = demoActivity(s);
+      if (!fix && what) {
+        const at = Number(s.maptime);
+        return {
+          content: [{ type: "text", text: `a demo is ${what} at maptime ${at}: liveness probe skipped (it would advance the demo)` }],
+          structuredContent: { live: false, demo: what, maptime: { before: at, after: at }, found, remaining: found },
+        };
+      }
+      let wasPaused = isPaused(s);
       if (fix) {
         await client.runCommand("closemenu");
         await client.runCommand("mcp_unblock");
         await awaitPending();
         const late = liveness();
         if ("failed" in late) return late.failed;
+        // The thaw restores the pause found at the freeze, which the frozen status (paused=0) hid.
+        if (frozen) wasPaused = isPaused(client.lastStatus);
       }
       // Fresh either way: the read above, a fix command's own sentinel, or the load wait.
       const before = Number(client.lastStatus?.maptime);
@@ -1896,6 +2441,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "step_until",
     {
+      demo: "gate",
       title: "Step until a condition holds",
       description:
         "Advance the sim in chunks of chunkTics until a condition holds or maxTics run out, then leave it paused like `step`. The condition compares a map var, map array element, ACS world/global var, player field (x, y, z, angle, floorHeight, sector, light, health, armor) or the count of actors find_actors' class/tid/radius/flags filter matches (a corpse counts unless flags rules it out, e.g. {alive: true}) against a number, or a player field against another field (e.g. z == floorHeight); or, kind log, holds once a line matching pattern (a case-insensitive regex) is printed after the call starts (value is the matching-line count). Reports the map tics that actually elapsed. Fails fast with the blocker list if the map tic counter stops for " + STALL_TICS + " tics, and fails if it goes back (a map change). On a netgame the reply adds what pause means for the instance's role" +
@@ -1916,12 +2462,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const snap = statusField(client, "maptime");
       if ("error" in snap) return fail(`can't count tics: ${snap.error}`);
       const net = netInfo(instance);
+      const stepper = chunkStepper(client, instance);
       const { value, elapsed, maptime, end } = await withProgress(extra, (maxTics / TICRATE) * 1000, "stepping until condition", () =>
         stepWithin({
           budget: maxTics,
           chunkTics,
           first,
-          step: (n) => runStep(client, instance, n),
+          step: stepper.step,
           read,
           done: (r) => "error" in r || r.met,
           levelChange: "stop",
@@ -1933,7 +2480,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const counted = statusField(client, "maptime");
       if (!client.lastStatus && "error" in counted) return fail(`can't count tics: ${counted.error}`);
       const now = Number(client.lastStatus?.maptime);
-      if (end === "stalled") return stalledResult(client, now);
+      if (end === "stalled") return stepper.stalled(now);
       if (end === "level_change") {
         return fail(`the map changed (maptime went from ${maptime} to ${now}) after ${elapsed} tic(s); the condition was not met`);
       }
@@ -1950,6 +2497,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "watch_actors",
     {
+      demo: "read",
       title: "Watch actors for N tics",
       description:
         "Sample the actors of a class (subclasses included) and/or TID over the next `tics` map tics (35 = 1 second) in one call: snapshot with `findactors`, step everyTics paused, repeat, then leave the game paused like `step` (" +
@@ -1978,6 +2526,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       const client = await ctx.clientFor(instance);
       requireCap(client, "time");
       const cmd = command("findactors", ...kvArgs({ class: cls, tid, radius, limit, detail: needsDetail(columns) ? 1 : undefined }));
+      const stepper = chunkStepper(client, instance);
       const port: WatchPort = {
         snapshot: async () => {
           const output = await client.runCommand(cmd);
@@ -1985,7 +2534,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
           if (!found) return { error: failureText(output) };
           return { maptime: Number(client.lastStatus?.maptime), actors: found.actors, truncated: !!found.truncated };
         },
-        step: (n) => runStep(client, instance, n),
+        step: stepper.step,
       };
       // The first snapshot's own sentinel is the fresh status the maptime baseline comes from.
       const first = await port.snapshot();
@@ -1998,7 +2547,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       if ("error" in result) return fail(result.error);
       const target = [cls, tid !== undefined ? `tid ${tid}` : undefined].filter(Boolean).join(" ");
       if (result.reason === "stalled") {
-        return { ...stalledResult(client, Number(client.lastStatus?.maptime)), structuredContent: { ...result } };
+        return { ...stepper.stalled(Number(client.lastStatus?.maptime)), structuredContent: { ...result } };
       }
       const role = netPauseNote(netInfo(instance), true);
       const text = [describeWatch(target, result), ...role].join("\n");
@@ -2006,27 +2555,227 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
+  /** Admission before recorder commands or run-mode status blockers; an attached role remains engine-checked. */
+  function recordNetgameRefusal(instance: number, client: BridgeClient, run: boolean): string | undefined {
+    const net = netInfo(instance);
+    const args = ctx.launchArgsFor(instance)?.args.extraArgs ?? [];
+    if (!engine.netgame && (hasArg(args, "-host") || hasArg(args, "-join"))) {
+      return "can't record in a netgame: this engine supports offline recording only";
+    }
+    if (net?.role === "client") {
+      return "can't record on a netgame client: record on the server instance (a client's sim is predicted, not authoritative)";
+    }
+    if (net?.role === "server") {
+      if (run) return "a netgame server's sim ignores pause, so run mode can't count its tics: use run: false, then record_read";
+      const noHost = missingCap(client, "rechost");
+      if (noHost) return noHost;
+    }
+    return undefined;
+  }
+
+  const RECORD_REPLY =
+    `a table (columns t, kind, id, class, the fields, then info: the row's other keys as k=v; at most maxRows, events and vars kept first), a summary per actor (its #id, class, latest tid, first and last tic, spawned, destroyed, died), per script (serial, start, end, activator) and per var (name, up to 50 [t, value] pairs, changes, valuesOmitted), up to ${EVENT_LINES} event lines, and the path of a file holding every row`;
+  registerLive(
+    "record",
+    {
+      demo: writesWithCommand,
+      title: "Record actors, events and ACS vars per tic",
+      description:
+        `Record what happens to chosen actors over the next \`tics\` map tics (35 = 1 second), counted exactly by the engine: a sample row per tracked actor per tic (its fields; with onChange only when they changed, everyTics thins it) and an event row per spawn, destroy, damage and death (state changes opt in; script start/end rows with scripts), each stamped t = the maptime when it was written: a sample at t=M is the state at maptime M, an event at t=M happened during the tic from M to M+1. For "which path fired", short-lived projectiles and puffs, or a fight, instead of step and find_actors polling. ` +
+        `watch entries are OR-ed, each class (subclasses too), tid and/or player, AND-ed within one; a class-only watch catches an actor on the tic it spawns, a tid or player watch adopts new matches at each tic end (a seen row). Each tracked actor gets a recorder id (#n), stable for the recording; damage is recorded on a tracked target, and also when the source or inflictor is tracked (srcid=, infid=). ` +
+        `vars watches map scalars/array elements or world/global vars/array elements: a baseline then a row on each changed tic-end value, not thinned by everyTics/onChange. A var at t=M is the value at maptime M; a script starting at t=M shows its first write at t=M+1 or later. sourceFile map expressions reach private vars, cost two bcc builds per identical sourceFile/object/includeDirs group, and all groups resolve before any engine command; a refusal names the var position and guard. ` +
+        `Player bodies (not voodoo dolls) can sample raw buttons and modbuttons after mods with input, and ready/pending weapon, refire, weapon flags and weapon-layer state with weaponstate. These fields are absent on non-players; bit fields are decoded in the table, decimal in the file. Opt-in psprite events record changes on every layer, not repeated entries of the same state; bypassed removals reconcile at tic end as wstate=none. Their w* columns show the layer named in info (GZDoom numbering: weapon 1, flash 1000, plus overlay layers). Use w* samples for a two-state idle loop, which still emits events. ` +
+        `run: true (default) unpauses, runs exactly \`tics\` tics (up to ${MAX_RUN_TICS}) and leaves the game paused, like step (a run that ends at an intermission leaves it unpaused; refused while a demo records unfrozen, since a paused tic desyncs it, and a demo playing or recording is never left paused); command is console text run right after arming, before any tic (+attack, pukename X), so what it spawns or starts is recorded. An engine setup/go failure does not stop command: it follows go on the same console line and still runs with nothing armed. run: false only arms (up to ${MAX_REC_TICS} tics) and records whatever drives the sim: input_timeline (use it around one, since run mode would take over the pause), move_to, step, run_script, a human; read it with record_read. A schedule first ends any recording still armed; host-side validation, capability or source resolution refusals send no recorder commands and leave it alone. ` +
+        `Returns ${RECORD_REPLY}. Reason done, stopped, level_change (the map changed or reloaded: nothing past it is recorded), map_reset (a game-mode round reset: nothing past it is recorded) or stalled (tics stopped running; the only run error). ${notes.recordNetgame} Run mode is refused with a menu, console, chat or automap open, a dead player or a frozen clock (ensure_live with fix). ` +
+        `Not seen: tid, special and args set after a spawn row; damage vetoed or fully absorbed, or health set directly (give, ACS, set_actor_prop, poison), makes no damage row (hp samples show it); psprites need the opt-in psprite event, and a Zandronum removal and same-state re-entry within one tic is invisible; a var set and reset within one tic or between tic ends is invisible; a suspended script resuming makes no start row, and scripts a map reset or level exit kills no end row. Same-maptime reload detection is best-effort, not guaranteed. Limits: ${MAX_WATCHES} watches, ${MAX_REC_SCRIPTS} script selectors, ${MAX_REC_VARS} vars, ${MAX_TRACKED} tracked actors at once (untracked counts the rest), ${MAX_ENGINE_ROWS} rows shared by samples/events/vars (engineDropped counts the rest). vars needs recvars, sourceFile needs mapslot, player fields/groups or psprite needs recplayer, passive server recording needs rechost; missing caps require an overlay rebuild.`,
+      inputSchema: {
+        instance: instanceArg,
+        watch: z
+          .array(
+            z
+              .object({
+                class: classArg.optional(),
+                tid: z.number().int().min(1).optional(),
+                player: z.number().int().min(0).max(63).optional(),
+              })
+              .strict(),
+          )
+          .max(MAX_WATCHES)
+          .default([])
+          .describe("Each needs class, tid or player."),
+        fields: z
+          .array(z.enum([...REC_FIELDS, "input", "weaponstate"]))
+          .min(1)
+          .optional()
+          .describe(`Sample columns; default ${DEFAULT_REC_FIELDS.join(", ")}. state, label and tics are the actor state's id (Owner.index), label and tics left. input expands to ${FIELD_GROUPS.input.join(", ")}; weaponstate to ${FIELD_GROUPS.weaponstate.join(", ")}, in order and de-duplicated. wstate/wlabel/wsprite/wframe/wtics describe the weapon layer; pending is absent for no change, none for no weapon.`),
+        events: z
+          .array(z.enum(REC_EVENTS))
+          .optional()
+          .describe(`Default ${DEFAULT_REC_EVENTS.join(", ")}; [] for none. state is high volume. psprite opts into every tracked player layer's state changes (weapon, flash, overlays), not repeated same-state entries.`),
+        scripts: z
+          .union([z.literal("all"), z.array(z.union([z.number().int().positive(), z.string().min(1)])).min(1).max(MAX_REC_SCRIPTS)])
+          .optional()
+          .describe("Record script start/end rows: all, or script numbers and names."),
+        vars: z
+          .array(z.object({
+            map: acsName.optional(),
+            world: z.number().int().min(0).max(255).optional(),
+            global: z.number().int().min(0).max(63).optional(),
+            index: z.number().int().min(0).optional(),
+            ...sourceFileArgs,
+          }).strict())
+          .max(MAX_REC_VARS)
+          .optional()
+          .describe("Exactly one of map, world or global per var; index selects an array element. sourceFile/object/includeDirs only with map; put the index in the source expression instead of index. Baseline and changed tic-end values are never thinned."),
+        tics: z.number().int().min(1).max(MAX_REC_TICS),
+        run: z.boolean().default(true),
+        command: z.string().min(1).optional().describe("run mode: console text run after arming, before the first tic."),
+        everyTics: z.number().int().positive().max(MAX_REC_TICS).default(1).describe("Sample every n-th tic; events are never thinned."),
+        onChange: z.boolean().default(true).describe("Skip a sample equal to that actor's previous one."),
+        maxRows: z.number().int().positive().default(200).describe("Table rows inline; the file has all."),
+      },
+    },
+    async ({ instance, watch, fields, events, scripts, vars: requestedVars, tics, run, command: then, everyTics, onChange, maxRows }, extra) => {
+      const vars: RecVar[] | undefined = requestedVars?.map((v) => ({ ...v }));
+      const opts: RecordOptions = {
+        watch,
+        fields: expandFields(fields ?? DEFAULT_REC_FIELDS),
+        events: [...new Set(events ?? DEFAULT_REC_EVENTS)],
+        scripts,
+        vars,
+        tics,
+        run,
+        everyTics,
+        onChange,
+      };
+      const problem = recordProblem(opts);
+      if (problem) return fail(problem);
+      if (then !== undefined && !run) return fail("command needs run: true (with run: false, arm first, then run_command)");
+      const refusal = then !== undefined ? engine.refuseCommand(then) : undefined;
+      if (refusal) return fail(refusal);
+      const client = await ctx.clientFor(instance);
+      requireCap(client, "rec");
+      const netRefusal = recordNetgameRefusal(instance, client, run);
+      if (netRefusal) return fail(netRefusal);
+      if (vars?.length) requireCap(client, "recvars");
+      if (needsPlayerCap(opts)) requireCap(client, "recplayer");
+      const groups = groupVarsBySource(vars ?? []);
+      if (groups.length) requireCap(client, "mapslot");
+      const resolved = groups.flatMap((positions) => {
+        const v = vars![positions[0]];
+        const slots = slotsFromSource(instance, { ...v, sourceFile: v.sourceFile! }, positions.map((i) => vars![i].map!));
+        return (Array.isArray(slots) ? slots : positions.map(() => ({ guard: "deployed", refused: slots.refused })))
+          .map((result, i) => ({ result, position: positions[i] }));
+      });
+      for (const { result, position } of resolved) {
+        if ("refused" in result) return fail(`var ${position + 1}: ${vars![position].map} refused by the ${result.guard} check, nothing sent to the engine: ${result.refused}`);
+        vars![position].resolved = result;
+      }
+      // All sources and sendable tokens pass before even stopping an abandoned recording.
+      const schedule = recordSchedule(opts, then);
+      const refusedDir = recDumpRefusal();
+      if (refusedDir) return fail(refusedDir);
+      if (run) {
+        // Also the first status read: an abandoned run is stopped first, which puts its pause back.
+        await client.runCommand("mcp_rec stop");
+        const snap = statusField(client, "paused");
+        if ("error" in snap) return fail(`can't record: ${snap.error}`);
+        const blockers = statusBlockers(snap.status);
+        if (blockers.length) return fail(`can't record: ${blockers.join(", ")}. Try ensure_live with fix.`);
+      }
+      const reply = await client.runCommand(schedule);
+      const armed = parseRecArmed(reply);
+      if (!armed) {
+        const failed = failedRecVar(consoleLines(reply));
+        const v = failed === undefined ? undefined : vars?.[failed];
+        return fail((v?.resolved && sourceMismatch(reply, v.resolved, v.sourceFile!)) ?? failureText(reply));
+      }
+      if (!run) return { content: [{ type: "text", text: `armed for ${tics} tic(s) at maptime ${armed.maptime}` }] };
+
+      let status: RecStatus | undefined;
+      try {
+        status = await withProgress(extra, (tics / TICRATE) * 1000, `recording ${tics} tic(s)`, () =>
+          pollArmedRun(() => readOrThrow(client, "mcp_rec status", parseRecStatus), (s) => s.ran, { tics, runMs: (tics / TICRATE) * 1000, sleep }),
+        );
+      } finally {
+        // The engine re-pauses a run on every disarm; a failed stop must not hide the error that got here.
+        if (status?.active !== false) await client.runCommand("mcp_rec stop", ARMED_STOP_MS).catch(() => {});
+      }
+      if (status.active) return stalledReply(client, { tics: status.ran });
+      return recordingReply(client, instance, maxRows, status.untracked);
+    },
+  );
+
+  registerLive(
+    "record_read",
+    {
+      demo: "read",
+      title: "Read (and stop) a recording",
+      description: `Read the recording record armed with run: false (or the last one) and, by default, stop it first. Returns what record does: ${RECORD_REPLY}. stop: false reads one still armed (reason recording) and leaves it running. Says nothing recorded when no recording has been armed. done, stopped, level_change and map_reset retain the rows recorded before disarming. ${notes.recordNetgame} Client and unsupported netgame/old server builds are refused before any recorder command. Player fields and psprite layers, var tic-end semantics, blind spots and caps are as in record.`,
+      inputSchema: {
+        instance: instanceArg,
+        stop: z.boolean().default(true),
+        maxRows: z.number().int().positive().default(200).describe("Table rows inline; the file has all."),
+      },
+    },
+    async ({ instance, stop, maxRows }) => {
+      const client = await ctx.clientFor(instance);
+      requireCap(client, "rec");
+      const netRefusal = recordNetgameRefusal(instance, client, false);
+      if (netRefusal) return fail(netRefusal);
+      const refusedDir = recDumpRefusal();
+      if (refusedDir) return fail(refusedDir);
+      const reply = await client.runCommand(stop ? "mcp_rec stop; mcp_rec status" : "mcp_rec status");
+      const status = parseRecStatus(reply);
+      if (!status) return fail(failureText(reply));
+      // Reason "-" and idle means nothing armed since the last clear, unlike a run that matched nothing.
+      if (!status.active && status.reason === "-") {
+        return { content: [{ type: "text", text: "nothing recorded: no recording has been armed (arm one with record)" }] };
+      }
+      return recordingReply(client, instance, maxRows, status.untracked);
+    },
+  );
+
   registerLive(
     "move_to",
     {
+      demo: "timeline",
       title: "Walk the player to a point, actor or route",
       description:
-        "Walk the player to a map point ({x, y}), an actor ({tid}: the nearest with that TID, followed if it moves; {class}: the nearest of that class when its leg starts, walked to where it stood then) or through a route of up to 32 of them, with the steering loop inside the server: holds +forward, re-aims whenever the heading drifts and times the release from the player's measured speed, thrust and friction, without pausing between chunks. Straight legs only: walls are not avoided, so route around them with waypoints (pre-check a leg with trace_move). Intermediate waypoints are passed through; the last counts once the player is within radius (plus an actor target's own radius) and has stopped. Reports reason arrived, stuck (no progress in stuckTics: the closest approach gained under 8 units and the player didn't speed up toward the target), timeout (maxTics, whole route), died, player_gone (no player, or a level change), target_gone, or stalled (sim not advancing; the only error), plus the map tics elapsed, the final position and speed (above 0 after timeout/died/target_gone, the player is still sliding). +forward is always released and the pause state is left as found. Unverified on a netgame client. For setup moves where movement isn't under test, use run_command `warp x y` (cheats on) plus set_view instead.",
+        "Use move_to for plain routes; use input_timeline to mix walks with timed input. " +
+        "Walk the player to a map point ({x, y}), an actor ({tid}: the nearest with that TID, followed if it moves; {class}: the nearest of that class when its leg starts, walked to where it stood then) or through a route of up to 32 of them. Straight legs only: walls are not avoided, so route around them with waypoints. " +
+        'Optional precheck: "actors" traces every leg before moving, "geometry" ignores actors; omitted means no precheck. It shares trace_move\'s probe limits (no momentum, line specials or moving sectors). Actor targets are resolved at precheck time, not rechecked if they move or the nearest class match changes later; chained traces approximate the route, not the walk. A block returns blocked with its leg and trace details and nothing moves; a missing target returns target_gone with 0 tics; a refused probe is an error (drop precheck to walk without it). A clear route adds precheck: "clear". ' +
+        `Two modes, reported as mode. Engine mode (offline, on an engine build with walk support): the engine steers every tic, setting heading, forward and strafe input, so a ground leg ends exactly on its point (within 0.05 units; held up within 0.5 of it, by a wall say, also counts) and stopped, with no overshoot; every waypoint is such a stop unless it has pass: true; radius is the exact stand-off (default 0; a solid actor target adds both radii and a 1-unit gap, since Doom blocks on bounding boxes); speed caps the thrust; maxTics is capped at ${MAX_TICS}; the real keyboard is ignored while it runs; a moving tid target is caught (its pace matched over 12 tics, within 0.5 units plus a striding monster's stride) rather than stopped on; airborne stretches steer straight with no exactness promise. ` +
+        "Host mode (a netgame, or an engine build without walk support): the steering loop runs in the server, holding +forward, re-aiming when the heading drifts and timing the release from the measured speed, thrust and friction; intermediate waypoints are always passed through and the last counts once within radius (default 32, at least 16, plus an actor's own radius) and stopped. " +
+        `Engine mode on a frozen clock runs through exact steps, ${FROZEN_WALK_CHUNK} at a time (ranPast: tics stepped past the end); on a paused, unfrozen demo recording it freezes the clock first (one live tic), since a paused tic desyncs the demo. Host mode is refused on a frozen clock and while recording (it turns the view directly); move_to is refused while a demo plays. ` +
+        "Reports reason arrived, blocked (precheck, nothing moved), stuck (no progress in stuckTics: engine mode requires more than 1 unit of closest-approach improvement, or more than 8 after a blocked step; host mode needs 8 units without speeding up toward the target), timeout (maxTics, whole route), died, player_gone (no player, or a level change), target_gone, stopped (engine mode: another caller's mcp_input stop), or stalled (the sim stopped advancing, in host mode for " + STALL_TICS + " tics; the only movement error), plus the map tics elapsed, the waypoints reached, the final position, the distance to the target's centre and speed (above 0 after timeout/died/target_gone, or a caught moving target). The pause state is left as found. For setup moves where movement isn't under test, use run_command `warp x y` (cheats on) plus set_view instead.",
       inputSchema: {
         instance: instanceArg,
         to: z
-          .array(z.object(waypointFields))
+          .array(
+            z.object({
+              ...waypointFields,
+              pass: z.boolean().optional().describe("Engine mode: run through this waypoint instead of stopping on it."),
+            }),
+          )
           .min(1)
           .max(32)
           .describe("Waypoints in order, each exactly one of {x, y}, {tid} or {class}."),
-        radius: z.number().min(16).default(32).describe("Arrival radius in map units; the shortest tap is ~33 units, so smaller radii would oscillate."),
+        radius: z
+          .number()
+          .min(0)
+          .max(32767)
+          .optional()
+          .describe("How close to get, in map units. Engine mode: the exact stand-off, default 0. Host mode: the arrival radius, default 32, raised to 16 if lower."),
+        speed: z.number().min(0.001).max(1).default(1).describe("Engine mode: thrust cap, 1 = running, 0.5 ~ walking."),
         maxTics: z.number().int().positive().default(350),
-        chunkTics: z.number().int().positive().default(3),
+        chunkTics: z.number().int().positive().default(3).describe("Host mode only: tics per control period."),
         stuckTics: z.number().int().positive().default(35),
-        trail: z.boolean().default(false).describe("Add per-chunk [maptime, x, y] samples."),
+        trail: z.boolean().default(false).describe("Add [maptime, x, y] samples: per tic in engine mode, per chunk in host mode."),
+        precheck: z.enum(["actors", "geometry"]).optional().describe("Trace every leg before moving; actors includes actor collisions, geometry ignores actors. Omitted: no precheck."),
       },
     },
-    async ({ instance, to, radius, maxTics, chunkTics, stuckTics, trail }, extra) => {
+    async ({ instance, to, radius, speed, maxTics, chunkTics, stuckTics, trail, precheck }, extra) => {
       const waypoints: Waypoint[] = [];
       for (const [i, w] of to.entries()) {
         const waypoint = toWaypoint(w);
@@ -2035,25 +2784,69 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         }
         waypoints.push(waypoint);
       }
-      const client = await ctx.clientFor(instance);
+      const client = await clockedClient(instance);
       requireCap(client, "time");
+      // Engine mode needs walk support and an offline game (net=), and stopping first ends an
+      // abandoned run, putting its pause back.
+      const mode =
+        client.supports("walk") && parseInputStatus(await client.runCommand("mcp_input stop; mcp_input status"))?.net === false
+          ? "engine"
+          : "host";
+      // Host mode steers by wall-clock tics and turns with mcp_setview, a direct write a recording misses.
+      if (mode === "host" && isFrozen(client)) return fail(FROZEN_REFUSAL);
+      if (mode === "host" && demoState(client.lastStatus).recording) {
+        return fail("a demo is recording: host-mode move_to turns the view directly, which isn't recorded, so the replay desyncs");
+      }
+      let prechecked = false;
+      const reply = (result: MoveResult) => ({
+        content: [{ type: "text" as const, text: describeMove(result) }],
+        structuredContent: { ...result, mode, ...(prechecked ? { precheck: "clear" } : {}) },
+      });
       const toRead = (s: PlayerState) => ({ x: s.x, y: s.y, z: s.z, dead: s.player === "dead" || s.spectating === true });
       const start = await readPlayerState(client);
       if (!start) return fail("no player (not in a level?)");
       const snap = statusField(client, "maptime");
       if ("error" in snap) return fail(`can't count tics: ${snap.error}`);
+      if (toRead(start).dead) {
+        return reply({ reason: "died", reached: 0, waypoints: waypoints.length, tics: 0, x: start.x, y: start.y, z: start.z, speed: 0 });
+      }
+      const standoff = mode === "engine" ? radius ?? 0 : Math.max(16, radius ?? 32);
+      if (precheck) {
+        const checked = await runPrecheck({
+          resolve: async (w) => {
+            const a = await nearestActor(client, w);
+            return a ? { x: Number(a.x), y: Number(a.y), radius: Number(a.radius) || 0, ref: a.player !== undefined ? `player${a.player}` : `${a.class}#${a.tid}` } : null;
+          },
+          trace: async (leg) => {
+            const { output, records } = await traceMove(instance, leg);
+            if (!records) throw new ToolRefusal(`${failureText(output)}; drop precheck to walk without it.`);
+            const [raw] = records;
+            return { ...raw, ok: raw.ok === 1 } as TraceReply;
+          },
+        }, waypoints, {
+          stops: to.map((w, i) => mode === "engine" ? !w.pass : i === to.length - 1),
+          standoff,
+          actors: precheck === "actors",
+        }, toRead(start));
+        if ("result" in checked) return reply(checked.result);
+        prechecked = true;
+      }
+      if (mode === "engine") return moveToEngine(client, instance, extra, waypoints, {
+        passes: to.map((w) => w.pass ?? false),
+        radius: standoff,
+        speed,
+        limits: { maxTics: Math.min(maxTics, MAX_TICS), stuckTics },
+        trail,
+        prechecked,
+        reply,
+      });
       const port: MovePort = {
         readPlayer: async () => {
           const s = await readPlayerState(client);
           return s && toRead(s);
         },
         resolveTarget: async (w) => {
-          const by = "tid" in w ? { tid: w.tid } : { class: w.class };
-          const output = await client.runCommand(command("findactors", ...kvArgs({ ...by, limit: 2, detail: 1 })));
-          const found = parseFoundReply(output);
-          if (!found) throw new Error(failureText(output));
-          // findactors includes the console player's own match at distance 0.
-          const a = found.actors.find((r) => r.player === undefined || Number(r.dist) > 0);
+          const a = await nearestActor(client, w);
           return a ? { x: Number(a.x), y: Number(a.y), radius: Number(a.radius) || 0 } : null;
         },
         setAngle: async (deg) => {
@@ -2069,74 +2862,122 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       // Decided after the first read refreshed the status.
       const wasPaused = isPaused(client.lastStatus);
       client.setPause(false);
+      const opts = { radius: standoff, maxTics, chunkTics, stuckTics, trail };
       let result;
       try {
         result = await withProgress(extra, (maxTics / TICRATE) * 1000, "walking the player", () =>
-          runMoveTo(port, waypoints, { radius, maxTics, chunkTics, stuckTics, trail }, toRead(start)),
+          runMoveTo(port, waypoints, opts, toRead(start)),
         );
       } finally {
         if (wasPaused) client.setPause(true);
       }
       // A frozen maptime at an intermission is a level exit, not a stall.
       if (result.reason === "stalled" && client.lastStatus?.gamestate === "level") {
-        return { ...stalledResult(client, port.maptime()), structuredContent: { ...result } };
+        return { ...stalledResult(client, port.maptime()), structuredContent: { ...result, mode, ...(prechecked ? { precheck: "clear" } : {}) } };
       }
       if (result.reason === "stalled") result = { ...result, reason: "player_gone" as const };
-      return { content: [{ type: "text", text: describeMove(result) }], structuredContent: { ...result } };
+      return reply(result);
     },
   );
+
+  /** Nearest non-self actor, shared by host steering and route prechecks. */
+  async function nearestActor(client: BridgeClient, w: { tid: number } | { class: string }) {
+    const by = "tid" in w ? { tid: w.tid } : { class: w.class };
+    const output = await client.runCommand(command("findactors", ...kvArgs({ ...by, limit: 2, detail: 1 })));
+    const found = parseFoundReply(output);
+    if (!found) throw new Error(failureText(output));
+    // findactors includes the console player's own match at distance 0.
+    return found.actors.find((r) => r.player === undefined || Number(r.dist) > 0);
+  }
+
+  /** move_to's engine mode: one mcp_input walk entry per waypoint, steered by the engine. */
+  async function moveToEngine(
+    client: BridgeClient,
+    instance: number,
+    extra: ToolExtra,
+    waypoints: Waypoint[],
+    o: {
+      passes: boolean[];
+      radius: number;
+      speed: number;
+      limits: ScheduleLimits;
+      trail: boolean;
+      prechecked: boolean;
+      reply: (r: MoveResult) => { content: { type: "text"; text: string }[]; structuredContent: Record<string, unknown> };
+    },
+  ) {
+    const entries = waypoints.map((w, i) => walkCommand({ target: w, standoff: o.radius, pass: o.passes[i], speed: o.speed }));
+    const ran = await runSchedule(client, instance, extra, {
+      what: "move_to",
+      entries,
+      tics: o.limits.maxTics,
+      nominalTics: 0,
+      walks: true,
+      limits: o.limits,
+      progress: "walking the player",
+    });
+    if ("refused" in ran) return fail(ran.refused);
+    const { status } = ran;
+    if (status.active) return stalledReply(client, { mode: "engine", tics: status.consumed, ...(o.prechecked ? { precheck: "clear" } : {}) });
+    const parsed = await readTrail(client, o.trail);
+    if ("error" in parsed) return fail(parsed.error);
+    const reply = o.reply(engineResult(status, parsed.start, parsed.rows, waypoints, o.trail));
+    const caveats = frozenScheduleNotes(ran);
+    if (caveats.length === 0) return reply;
+    return {
+      content: [...reply.content, { type: "text" as const, text: caveats.join("\n") }],
+      structuredContent: withNotes({ ...reply.structuredContent, ...(ran.ranPast !== undefined && { ranPast: ran.ranPast }) }, caveats),
+    };
+  }
 
   registerLive(
     "input_timeline",
     {
+      demo: "timeline",
       title: "Run scripted player input, tic-exact",
       description:
-        `Run a list of input segments in one call, each holding buttons, movement and a heading for N tics, injected into the player's input by the engine every tic for exactly the tics asked (35 tics = 1 second, up to ${MAX_SEGMENTS} segments and 60 s). A tap is a 1-tic segment, a hold is one long segment, a release is a segment without the button. Returns one line per segment with the map tics it ran in, where the player went, the heading and health after it, and the log lines printed during it; trail adds a per-tic row (position, angle, pitch, momentum, health, buttons). While it runs, the real keyboard and console-held buttons (+attack, +forward) are ignored; they come back after. Button rules: use needs a released tic between presses; attack refires while held unless the weapon has NOAUTOFIRE; jump needs the ground; a freshly spawned player needs one released tic before its first attack or use counts. Switch weapons with run_command first: a weapon change is not an input field. Offline only (refused on a server or client), and refused with a menu, console, chat or automap open or a dead player (ensure_live with fix clears those). Death mid-run doesn't stop it (health shows it). Reports reason done, level_change (the map ended or changed; later segments didn't run), stopped, or stalled (tics stopped running; the only error). The pause state is left as found (a run that ends at an intermission leaves it unpaused). A demo recorded meanwhile holds the real input, not the injected one.`,
+        `Run up to ${MAX_SEGMENTS} input segments in order, tic-exact (35 tics = 1 second). Each gives tics for timed buttons/movement/heading, or to for a walk to {x, y}, {tid} or {class}, as one move_to waypoint. Use move_to for plain routes. A walk accepts held buttons, radius (stand-off, default 0), speed (thrust cap, default 1) and pass (run through), but no movement or heading fields; it needs the bridge's walk cap. A stop walk ends at rest; its heading is roughly the direction travelled, so give angle in a following use or attack segment. maxTics limits the whole run (1..${MAX_TICS}, default ${MAX_TICS} with walks; never below the timed total); stuckTics (default 35) is the walk's no-progress window. The timed total is capped at ${MAX_TICS}. A tap is a 1-tic segment, a hold is one long segment, a release has no button. Returns each reached segment's map tics, positions, heading, health and log; walks add target/outcome/distance (a zero-tic walk still has a summary); trail adds per-tic input rows. Real keyboard and console-held input are ignored during the run and return after. use needs a released tic between presses; held use on a walk presses once. attack refires unless NOAUTOFIRE; jump needs ground; a fresh player needs one released tic before its first attack/use. Switch weapons with run_command first. Offline only; refused with a menu, console, chat or automap open or a dead player (ensure_live with fix clears blockers). On a frozen clock it runs through exact steps: a timed-only timeline steps exactly its tics; with walks it steps ${FROZEN_WALK_CHUNK} tics at a time, so up to ${FROZEN_WALK_CHUNK - 1} tics can run past its end (ranPast). Reports done, level_change (map ended/changed), stopped, stuck (walk made no progress), timeout (whole-run limit), target_gone (walk target disappeared), died (only a walk stops on death; timed segments keep running), or stalled (tics stopped; the only error). A failed walk ends the timeline and later segments do not run. Pause is left as found (intermission unpaused). A demo recorded meanwhile holds the injected input. On a paused, unfrozen demo recording it freezes the clock first (one live tic), since a paused tic desyncs the demo; refused while a demo plays.`,
       inputSchema: {
         instance: instanceArg,
         segments: z.array(segmentArg).min(1).max(MAX_SEGMENTS).describe("Run in order."),
+        maxTics: z.number().int().min(1).max(MAX_TICS).optional().describe("Whole-run tic limit; default 2100 with walks, never below the timed total."),
+        stuckTics: z.number().int().positive().default(35).describe("Walk segments only: no-progress window in tics."),
         trail: z.boolean().default(false).describe("Add one row per tic to structuredContent."),
       },
     },
-    async ({ instance, segments, trail }, extra) => {
-      const plan = planTimeline(segments);
+    async ({ instance, segments, maxTics, stuckTics, trail }, extra) => {
+      const plan = planTimeline(segments, maxTics, stuckTics);
       if ("error" in plan) return fail(plan.error);
       const client = await ctx.clientFor(instance);
       requireCap(client, "input");
+      if (plan.walks) requireCap(client, "walk");
       // Also the first status read: an abandoned run is stopped first, which puts its pause back.
       await client.runCommand("mcp_input stop");
-      const snap = statusField(client, "paused");
-      if ("error" in snap) return fail(`can't run a timeline: ${snap.error}`);
-      const blockers = statusBlockers(snap.status);
-      if (blockers.length) return fail(`can't run a timeline: ${blockers.join(", ")}. Try ensure_live with fix.`);
-      const wasPaused = isPaused(snap.status);
-      const readLater = logSince(instance);
-      const armed = await client.runCommand(scheduleCommand(plan.commands, wasPaused));
-      if (!parseInputArmed(armed)) return fail(failureText(armed));
-
-      const runMs = (plan.total / TICRATE) * 1000;
-      let status: InputStatus | undefined;
-      try {
-        status = await withProgress(extra, runMs, `running ${plan.total} tic(s) of input`, () =>
-          pollArmedRun(() => readOrThrow(client, "mcp_input status", parseInputStatus), (s) => s.consumed, { tics: plan.total, runMs, sleep }),
-        );
-      } finally {
-        // The engine restores the pause on every disarm; a failed stop (the bridge died) mustn't hide the error.
-        if (status?.active !== false) await client.runCommand("mcp_input stop", ARMED_STOP_MS).catch(() => {});
-      }
+      const ran = await runSchedule(client, instance, extra, {
+        what: "a timeline",
+        entries: plan.commands,
+        tics: plan.walks ? plan.limits!.maxTics : plan.segTics,
+        nominalTics: plan.segTics,
+        walks: plan.walks > 0,
+        limits: plan.limits,
+        progress: `running ${plan.segTics} tic(s) of input${plan.walks ? ` and ${plan.walks} walk(s)` : ""}`,
+      });
+      if ("refused" in ran) return fail(ran.refused);
+      const { status, readLater } = ran;
       if (status.active) return stalledReply(client, { tics: status.consumed });
 
       // Before the trail fetch, whose rows would otherwise crowd the window.
-      const log = readLater(TIMELINE_LOG_BASE + TIMELINE_LOG_PER_TIC * plan.total);
+      const log = readLater(TIMELINE_LOG_BASE + TIMELINE_LOG_PER_TIC * status.consumed);
       const parsed = await readTrail(client, trail);
       if ("error" in parsed) return fail(parsed.error);
       const logs = splitLog(consoleLines(log?.lines.map((l) => l.text) ?? []));
-      const summaries = summarizeSegments(parsed.start, parsed.rows, logs);
+      const summaries = summarizeSegments(parsed.start, parsed.rows, logs, plan.walks ? { entries: segments, done: status.done!, reason: status.reason, dist: status.dist, target: status.target } : undefined);
       const caveats = [
         ...(log ? [] : ["(no engine log to read)"]),
         ...(log?.omitted ? [`(${log.omitted} more log line(s) not read)`] : []),
+        ...frozenScheduleNotes(ran),
       ];
-      const head = describeTimeline(status.reason, summaries, { segments: segments.length, tics: plan.total }, status.consumed);
+      const head = describeTimeline(status.reason, summaries, { segments: segments.length, tics: plan.segTics, walks: plan.walks, limit: plan.limits?.maxTics, done: status.done }, status.consumed);
       return {
         content: [{ type: "text", text: [head, ...caveats].join("\n") }],
         structuredContent: withNotes(
@@ -2144,6 +2985,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
             reason: status.reason,
             tics: status.consumed,
             segments: summaries,
+            ...(plan.walks ? { limit: plan.limits!.maxTics } : {}),
+            ...(ran.ranPast !== undefined && { ranPast: ran.ranPast }),
             ...(trail ? { trail: parsed.rows } : {}),
           },
           caveats,
@@ -2156,6 +2999,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "get_acs_var",
     {
+      demo: "read",
       title: "Get ACS variable",
       description: "Read an ACS world or global variable by index.",
       inputSchema: { instance: instanceArg, scope: acsScope, index: z.number().int().min(0) },
@@ -2174,6 +3018,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_acs_var",
     {
+      demo: "write",
       title: "Set ACS variable",
       description: "Write an ACS world or global variable by index.",
       inputSchema: {
@@ -2200,6 +3045,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_acs_vars",
     {
+      demo: "read",
       title: "List non-zero ACS variables",
       description:
         "Run `dumpacsvars` and return all non-zero ACS world/global variables, optionally filtered by scope.",
@@ -2334,6 +3180,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "save_game",
     {
+      demo: "write",
       title: "Save the game",
       description:
         appendNote("Run `save` to write a savegame (single-player / cooperative only).", notes.saveGame),
@@ -2344,7 +3191,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, name, description }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       // A run_acs module in the level makes the save unloadable (module-count I_Error), so a
       // status read that times out fails closed.
       const { status } = await client.readStatus(STATUS_READ_MS);
@@ -2368,29 +3215,246 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "load_game",
     {
+      demo: "load",
       title: "Load a savegame",
       description: "Run `load` to restore a savegame by name.",
       inputSchema: { instance: instanceArg, name: z.string().min(1) },
     },
     async ({ instance, name }) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       const out = (await runLoad(client, command("load", name))).join("\n");
       return { content: [{ type: "text", text: out.trim() || "(loaded)" }] };
     },
   );
 
+  /** A path or lump as one console token; throws the refusal when it can't be one. */
+  function pathToken(p: string): string {
+    const tok = consolePath(p, engine.ansiPaths);
+    if ("refused" in tok) throw new ToolRefusal(`can't pass ${p} to the console: ${tok.refused}`);
+    return tok.token;
+  }
+
+  /** Start `demo` held by arming the frozen clock for its first tic, thawing a frozen one first since
+   *  the engine won't arm it, then poll until it engages. */
+  async function holdDemo(client: BridgeClient, demo: PlayedDemo): Promise<{ maptime: number } | { error: string }> {
+    let thaw = isFrozen(client) ? ["mcp_clock thaw"] : [];
+    if (thaw.length && (await readOrThrow(client, "mcp_clock status", parseClockStatus)).reason === "demo_end") {
+      // The ended demo's first live tic drops to the console (Zandronum via a stock NetUpdate error), dropping a playdemo queued with the thaw.
+      await client.runCommand("mcp_clock thaw");
+      const settled = async () => (await client.refreshStatus(), client.lastStatus?.gamestate);
+      await pollUntil(settled, (g) => g !== "level", { waits: LOAD_WAITS, wait: () => sleep(LOAD_WAIT_MS) });
+      thaw = [];
+    }
+    const reply = await client.runCommand([...thaw, "mcp_clock freeze demo", demo.start].join(" ; "));
+    const refused = firstError(reply);
+    const printed: string[] = [];
+    const read = async () => {
+      const lines = await client.runCommand("mcp_clock status");
+      printed.push(...consoleLines(lines).filter((l) => !l.startsWith("MCP_CLOCK")));
+      return parseClockStatus(lines);
+    };
+    const { value } = refused !== undefined
+      ? { value: undefined }
+      : await pollUntil(read, (s) => s?.frozen === true, { waits: LOAD_WAITS, wait: () => sleep(LOAD_WAIT_MS) });
+    if (value?.frozen) return { maptime: value.maptime };
+    await client.runCommand("mcp_clock stop");
+    const why = refused ?? [...new Set(printed)].join("; ");
+    return { error: `${demo.name} didn't start held within ~5 s${why ? `: ${why}` : ""} (disarmed)` };
+  }
+
+  /** The instance's launch as a sidecar (its iwad and files hashed), or undefined for an attached one. */
+  function currentSidecar(instance: number): Sidecar | undefined {
+    const last = ctx.launchArgsFor(instance);
+    return last && launchSidecar(last.args, launchDir(last), { engine: engine.id, bridge: undefined }, ctx.io);
+  }
+
+  /** The engine's cwd, which relative launch files resolve against: its log sits there. */
+  function launchDir(last: LastLaunch): string {
+    return path.dirname(last.logFile);
+  }
+
+  /** What `name` plays and how to start it, throwing when its sidecar doesn't match the instance. */
+  function prepareDemo(instance: number, name: string) {
+    const demoDir = ctx.config.demoDir ?? (ctx.config.exe && path.dirname(ctx.config.exe));
+    const target = resolvePlayTarget(name, demoDir, (p) => ctx.io.existsSync(p));
+    const notes: string[] = [];
+    let sidecar: Sidecar | undefined;
+    let current: Sidecar | undefined;
+    let changes: FileChange[] = [];
+    if ("file" in target && ctx.io.existsSync(sidecarPaths(target.file).json)) {
+      const json = sidecarPaths(target.file).json;
+      const parsed = parseSidecar(ctx.io.readTextSync(json), json);
+      if ("error" in parsed) throw new ToolRefusal(parsed.error);
+      sidecar = parsed.sidecar;
+      current = currentSidecar(instance);
+      const checked = checkSidecar(sidecar, engine.id, current);
+      if (checked.refuse !== undefined) throw new ToolRefusal(`${target.file}: ${checked.refuse}`);
+      notes.push(...checked.notes);
+      changes = checked.changes;
+    }
+    const shown = "file" in target ? target.file : target.lump;
+    const save = sidecar?.save?.path;
+    const demo: PlayedDemo = {
+      name: shown,
+      start: [...(save ? [`load ${pathToken(save)}`] : []), `playdemo ${pathToken(shown)}`].join(" ; "),
+      lastPlayable: sidecar?.checkpoints?.lastPlayable,
+      end: sidecar?.checkpoints?.end,
+    };
+    return { file: "file" in target ? target.file : undefined, sidecar, current, demo, notes, changes };
+  }
+
   registerLive(
     "play_demo",
     {
+      demo: "load",
       title: "Play a demo",
       description:
-        "Run `playdemo` to play back a recorded .lmp demo. (Recording is via the -record launch arg, not a console command.)",
-      inputSchema: { instance: instanceArg, name: z.string().min(1) },
+        `Play back a demo: a bare name is <dir>/<name>.lmp when that exists (dir: ${ctx.env("DEMO_DIR")}, else the engine's folder), an absolute path as is, anything else goes to playdemo as given (a WAD lump like DEMO1). ` +
+        "A <name>.json sidecar beside the .lmp (launch_instance record writes one) is checked first: another engine or iwad refuses, a changed or missing file is noted; with a save in it, the demo starts with load <save> first. " +
+        "hold: true (needs the bridge's demo support) holds the demo frozen at its first tic (maptime 1, or the save's maptime + 1) for step and seek_demo, thawing a frozen clock first; without it a frozen clock refuses. " +
+        "Prefer this to a launch-time -playdemo, which runs about 12 tics before the bridge attaches. Recording is launch_instance's record option.",
+      inputSchema: { instance: instanceArg, name: z.string().min(1), hold: z.boolean().default(false) },
     },
-    async ({ instance, name }) => {
-      const client = await ctx.clientFor(instance);
-      const out = (await runLoad(client, command("playdemo", name))).join("\n");
-      return { content: [{ type: "text", text: out.trim() || "(playing)" }] };
+    async ({ instance, name, hold }) => {
+      const { demo, notes } = prepareDemo(instance, name);
+      const shown = demo.name;
+      if (!hold) {
+        const client = await ticsClient(instance);
+        const out = (await runLoad(client, demo.start)).join("\n");
+        ctx.rememberDemo(instance, demo);
+        return { content: [{ type: "text", text: [out.trim() || "(playing)", ...notes].join("\n") }] };
+      }
+      const client = await clockedClient(instance);
+      if (!client.supports("demo")) return fail("hold needs a bridge with demo support: rebuild the engine with the current overlay");
+      const held = await holdDemo(client, demo);
+      if ("error" in held) return fail([held.error, ...notes].join("\n"));
+      ctx.rememberDemo(instance, demo);
+      const text = [`holding ${shown} at maptime ${held.maptime}`, ...notes].join("\n");
+      return { content: [{ type: "text", text }], structuredContent: { maptime: held.maptime, lmp: shown, end: demo.end } };
+    },
+  );
+
+  registerLive(
+    "seek_demo",
+    {
+      // Needs a held demo itself; recording has none.
+      demo: "read",
+      title: "Seek a held demo to a maptime",
+      description:
+        "Move a demo held by play_demo (hold: true) to `maptime`, still frozen. Forward steps exactly; backward replays the demo held and steps from its start, so it needs a demo play_demo started on this instance. " +
+        "Past the end: refused up front when the sidecar is blessed (check_demo), otherwise it stops where the demo ended and says so.",
+      inputSchema: { instance: instanceArg, maptime: z.number().int().min(0) },
+    },
+    async ({ instance, maptime }) => {
+      const client = await clockedClient(instance);
+      if (!client.supports("demo")) return fail("seek_demo needs a bridge with demo support: rebuild the engine with the current overlay");
+      await client.refreshStatus();
+      const demo = ctx.demoFor(instance);
+      const { playing } = demoState(client.lastStatus);
+      if (!isFrozen(client) || (!playing && demo === undefined)) return fail("no held demo: play_demo with hold: true first");
+      if (demo?.lastPlayable !== undefined && maptime > demo.lastPlayable) {
+        return fail(`${demo.name} ends at maptime ${demo.lastPlayable} (blessed): seek to that or earlier`);
+      }
+      let now = (await readOrThrow(client, "mcp_clock status", parseClockStatus)).maptime;
+      let rewound = "";
+      if (!playing || maptime < now) {
+        if (demo === undefined) return fail(`maptime ${maptime} is behind ${now}, and a demo this session didn't start can't be replayed: play_demo it with hold: true`);
+        const held = await holdDemo(client, demo);
+        if ("error" in held) return fail(held.error);
+        if (maptime < held.maptime) return fail(`${demo.name} starts at maptime ${held.maptime}; held there`);
+        now = held.maptime;
+        rewound = " (replayed from its start)";
+      }
+      const run = maptime > now ? await clockStep(client, maptime - now) : { ran: 0, end: "done" };
+      const at = now + run.ran;
+      const ended = run.end === "demo_end" ? `: the demo ended at maptime ${at}, before ${maptime}` : run.end !== "done" ? `: ${clockEndText(run.end)}` : "";
+      return {
+        content: [{ type: "text", text: `at maptime ${at}${rewound}${ended}` }],
+        structuredContent: { maptime: at, ended: run.end === "demo_end" },
+      };
+    },
+  );
+
+  registerLive(
+    "check_demo",
+    {
+      // Plays the demo itself, which would end a take being recorded.
+      demo: "load",
+      title: "Bless or check a demo fixture",
+      description:
+        "Replay a demo file held (as play_demo hold: true) and checkpoint the playsim (mcp_checkpoint) at its first tic, every `every` tics and where it ends. A fixture covers one map: a demo that changes level can't be blessed. " +
+        "bless: true stores the checkpoints in its <name>.json sidecar (made from the instance's launch when the demo has none) and each actor's values in <name>.rows.json.gz. " +
+        "Without bless it compares against the blessed checkpoints at their maptimes, at the blessed interval: it stops at the first that differs, still frozen there for inspection, and names the first actor that differs and its fields, or the checkpoint fields when no actor row differs; " +
+        "a different start or end maptime, or stepping that stops short (a level change), is a desync too. It also lists loaded files whose sha1 or git rev changed since blessing. " +
+        "A demo changed since blessing (lmp sha1) refuses: re-bless it. A WAD lump (DEMO1) has no sidecar, so it refuses. Checkpoint values are engine-specific, so a sidecar blessed on one engine refuses on another. " +
+        "Recording at launch is launch_instance's record option.",
+      inputSchema: {
+        instance: instanceArg,
+        name: z.string().min(1),
+        bless: z.boolean().default(false),
+        every: z.number().int().min(1).default(35).describe("Tics between checkpoints when blessing (1 checks every tic). A check uses the blessed interval."),
+      },
+    },
+    async ({ instance, name, bless, every }, extra) => {
+      const prep = prepareDemo(instance, name);
+      const lmp = prep.file;
+      if (lmp === undefined) return fail(`${name} isn't a demo file (a WAD lump has no sidecar): give a name in the demo folder or an absolute .lmp path`);
+      const paths = sidecarPaths(lmp);
+      const blessed = prep.sidecar?.checkpoints;
+      const { sha1: lmpSha1, bytes } = ctx.io.sha1Of(lmp);
+      if (!bless) {
+        if (blessed === undefined) return fail(`${lmp} isn't blessed: check_demo with bless: true first`);
+        if (lmpSha1 !== blessed.lmpSha1) return fail(`${lmp} changed since it was blessed (sha1 ${blessed.lmpSha1} -> ${lmpSha1}): bless it again`);
+      }
+      const client = await clockedClient(instance);
+      if (!client.supports("demo")) return fail("check_demo needs a bridge with demo support: rebuild the engine with the current overlay");
+      const held = await holdDemo(client, prep.demo);
+      if ("error" in held) return fail(held.error);
+      ctx.rememberDemo(instance, prep.demo);
+      let at = held.maptime;
+      const driver: FixtureDriver = {
+        checkpoint: (rows) => readOrThrow(client, rows ? "mcp_checkpoint rows" : "mcp_checkpoint", parseCheckpoint),
+        step: (tics) => clockStep(client, tics),
+        progress: (t) => void (at = t),
+      };
+      // Only the progress ratio's denominator: a blessed length, else a guess from the take's size.
+      const expectedMs = ((blessed ? blessed.end - blessed.start : bytes / 4) / TICRATE) * 1000;
+      const verb = bless ? "blessing" : "checking";
+      const progress = () => `${verb} ${path.basename(lmp)}: maptime ${at}`;
+      const current = prep.current ?? currentSidecar(instance);
+      if (bless) {
+        const run = await withProgress(extra, expectedMs, progress, () => blessDemo(driver, held.maptime, every));
+        ctx.io.writeFileAtomic(paths.rows, encodeRows(run.rows));
+        const lmpEntry = { file: path.basename(lmp), bytes, sha1: lmpSha1 };
+        const sidecar = blessedSidecar(prep.sidecar ?? minimalSidecar(engine.id, client.bridgeVersion, lmpEntry, current), run.checkpoints, {
+          at: ctx.io.now().toISOString(),
+          lmp: lmpEntry,
+          files: current?.files ?? [],
+          rows: path.basename(paths.rows),
+        });
+        ctx.io.writeFileAtomic(paths.json, serializeSidecar(sidecar));
+        const { checkpoints } = sidecar;
+        ctx.rememberDemo(instance, { ...prep.demo, lastPlayable: checkpoints.lastPlayable, end: checkpoints.end });
+        const { start, end, heads } = checkpoints;
+        return {
+          content: [{ type: "text", text: [`blessed ${lmp}: ${heads.length} checkpoint(s) every ${every} tic(s), maptime ${start}..${end}`, ...prep.notes].join("\n") }],
+          structuredContent: { checkpoints: heads.length, start, end, lastPlayable: checkpoints.lastPlayable },
+        };
+      }
+      const sealed = blessed!;
+      const rowsAt = (i: number, maptime: number) => {
+        const file = path.join(path.dirname(lmp), sealed.rows);
+        const decoded = ctx.io.existsSync(file) ? decodeRows(ctx.io.readFileSync(file), file) : { error: `${file} is missing` };
+        const got = rowsForCheckpoint(decoded, file, i, maptime);
+        if ("rows" in got) return got.rows;
+        prep.notes.push(got.note);
+        return undefined;
+      };
+      const result = await withProgress(extra, expectedMs, progress, () => checkDemo(driver, held.maptime, sealed, rowsAt));
+      return {
+        content: [{ type: "text", text: [describeCheck(result), ...prep.notes].join("\n") }],
+        structuredContent: { ...result, changed: prep.changes.map((c) => c.path) },
+      };
     },
   );
 
@@ -2398,6 +3462,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "player_state",
     {
+      demo: "read",
       title: "Player state",
       description:
         "Run `currentpos` and return the player's position, angle, floor height, sector, light level, and (on a status-capable bridge) health, armor, and whether the player is alive, dead, or spectating.",
@@ -2419,6 +3484,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "actor_state",
     {
+      demo: "read",
       title: "Actor state (DECORATE)",
       description:
         "Run `dumpactor` and return an actor's live state: class, health, position, angle, pitch, current DECORATE state (sprite/frame/tics, e.g. TNT1 A 0, plus id Owner.index and label e.g. See+2), inventory, and (for players) ready weapon + morph status. " +
@@ -2446,6 +3512,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "read_hud",
     {
+      demo: "read",
       title: "Read on-screen HUD",
       description:
         `Run \`dumphud\` and return what the engine painted last frame: HUD text strings (with screen x/y), images (by texture name + position), and active ${notes.hudMessages} (full composed text, layer, position, remaining tics). Captures menus too. ` +
@@ -2482,6 +3549,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "actors_near",
     {
+      demo: "read",
       title: "Actors near the player",
       description:
         "Run `actorsnear` and return actors within a radius (map units, default 512) of the player: class, health, position, and current sprite.",
@@ -2501,6 +3569,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "inspect_target",
     {
+      demo: "read",
       title: "Inspect aimed target",
       description:
         "Run `linetarget` and return the actor the player is aiming at (class, health, spawn health).",
@@ -2522,6 +3591,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_view",
     {
+      demo: "write",
       title: "Set the player's view",
       description:
         "Point the player's view: an absolute angle (degrees, Doom convention: 0 east, 90 north) with optional pitch (degrees, negative looks up), or face an actor by tid (first actor with it) or class (nearest map actor of that class, aiming at its mid-height). Give exactly one of angle, tid, class.",
@@ -2556,6 +3626,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_players",
     {
+      demo: "read",
       title: "List players",
       description:
         `Run \`dumpplayers\` and return every in-game player: ${notes.playerFields}. Bots join at slot 1+.`,
@@ -2576,6 +3647,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "add_bot",
     {
+      demo: "write",
       title: "Add bots",
       description:
         "Add count bots (`addbot`), step the sim until each has joined, and return each one's slot, name and TID. A join can take a tic or two; the sim runs in chunks of chunkTics, up to maxTics. A bot that joins as a spectator (a join queue) is reported as one. A bot whose TID is 0 is waited on up to tidTics more for a script to assign one (tidTics 0 skips that); it stays 0 when nothing does. Reports the map tics elapsed (across a map change mid-wait, the old map's plus the new one's). A bot that joined and then a map change removed mid-wait is listed as lost (reason level_change); the call fails when none is left. Fails fast when the map tic counter stops for " + STALL_TICS + " tics. The pause state is left as found. Fails with what addbot printed when no bot joins (an unknown name, no free slot, not in a level). For a team, use run_command `addbot <name> <team>`.",
@@ -2589,7 +3661,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, name, count, maxTics, tidTics, chunkTics }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       const start = await client.runCommand("dumpplayers");
       const present = playersReply(start);
       if (!present) return failed(start);
@@ -2676,6 +3748,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "find_actors",
     {
+      demo: "read",
       title: "Find actors map-wide",
       description:
         `Run \`findactors\` and list map actors (owned inventory excluded), optionally filtered by class (includes subclasses), TID and radius around the player, sorted by distance. Each has class, tid, hp/spawnhp, x/y/z, angle, pitch, dist, sprite/frame, flags (monster, friendly, corpse, dormant, shootable, solid, invulnerable, ambush) and target. detail adds master/tracer, special + args, vel, radius/height, floorz and player index. flags keeps only actors matching every given key (true = must have, false = must not), each a flag name above or alive (derived: hp > 0 and not a corpse; decorations count, so pair it with monster); use {monster: true} for all monsters instead of guessing a base class, and with flags, limit (default ${FIND_ACTORS_LIMIT}) applies after filtering. ${notes.findActors}`,
@@ -2706,6 +3779,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_scripts",
     {
+      demo: "read",
       title: "List ACS scripts",
       description:
         "Run `dumpscripts` and return every script across loaded modules (module, number, name, type, arg count).",
@@ -2724,6 +3798,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_functions",
     {
+      demo: "read",
       title: "List ACS functions",
       description: "Run `dumpfunctions` and return named ACS functions across loaded modules.",
       inputSchema: { instance: instanceArg },
@@ -2741,6 +3816,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "profile_scripts",
     {
+      demo: "read",
       title: "Profile ACS scripts",
       description: `Run \`acsprofile\` and return per-script/function execution stats (total instructions, runs, avg/min/max). ${profileRows(notes.profileScripts)}`,
       inputSchema: { instance: instanceArg, sort: profileSort, limit: profileLimit },
@@ -2751,6 +3827,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "profile_window",
     {
+      demo: "read",
       title: "Profile a time window",
       description: `Clear ACS profiling, wait N seconds, then return what ran during that window — \`what's hot right now\` rather than cumulative since map start. ${profileRows(notes.profileScripts)}`,
       inputSchema: {
@@ -2761,7 +3838,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, seconds, sort, limit }, extra) => {
-      const client = await ctx.clientFor(instance);
+      const client = await ticsClient(instance);
       await client.runCommand("acsprofile clear");
       await withProgress(extra, seconds * 1000, `sampling for ${seconds}s`, () =>
         sleep(seconds * 1000),
@@ -2774,6 +3851,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "list_modules",
     {
+      demo: "read",
       title: "List loaded ACS modules",
       description:
         "Run `dumpmodules` and return the loaded ACS modules (id + name). Map vars live only while a map is loaded.",
@@ -2789,9 +3867,32 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
   );
 
-  /** The engine's cwd, which relative launch files resolve against: its log sits there. */
-  function launchDir(last: LastLaunch): string {
-    return path.dirname(last.logFile);
+  /** Resolve a source group without any engine command, shared by record and the map-var tools. */
+  function slotsFromSource(instance: number, { sourceFile, object, includeDirs }: SourceArgs & { sourceFile: string }, exprs: string[]): MapSlotResult[] | { refused: string } {
+    const last = ctx.launchArgsFor(instance);
+    const files = object !== undefined ? [object] : last?.args.files?.map((f) => path.resolve(launchDir(last), f));
+    if (!files?.length) {
+      return { refused: `instance ${instance} has no launch files to find the source's build in (attached, or launched without files): pass object, the deployed file` };
+    }
+    const deployed: AcsModule[] = [];
+    for (const f of files) {
+      try {
+        deployed.push(...ctx.deployedModules(f));
+      } catch (e) {
+        return { refused: `can't read ${f} to find the source's build in: ${(e as Error).message}` };
+      }
+    }
+    const exe = ctx.config.bcc?.trim() || undefined;
+    return ctx.io.resolveMapSlot({ sourceFile, exprs, exe, includeDirs, deployed, engine });
+  }
+
+  /** Translate the digest guard's engine refusal identically for map-var access and recorder vars. */
+  function sourceMismatch(reply: string[], res: MapSlot, sourceFile: string): string | undefined {
+    const nomatch = parseMapSlotNoMatch(reply);
+    if (!nomatch) return undefined;
+    const marker = res.module.map ? `the BEHAVIOR of map ${res.module.map}` : "a library";
+    return `The loaded module isn't the one resolved: none of the ${nomatch.modules} loaded on map ${nomatch.map} matches ${res.module.name} (${marker}), built from ${sourceFile}. ` +
+      "Another map is loaded, the map has no BEHAVIOR of its own, or the file was rebuilt after launch (relaunch to load it).";
   }
 
   /** The four map-var tools' sourceFile path (undefined without one), resolving the slot host-side for
@@ -2803,36 +3904,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     }
     const client = await ctx.clientFor(instance);
     requireCap(client, "mapslot");
-    const last = ctx.launchArgsFor(instance);
-    const files = object !== undefined ? [object] : last?.args.files?.map((f) => path.resolve(launchDir(last), f));
-    if (!files?.length) {
-      return fail(`instance ${instance} has no launch files to find the source's build in (attached, or launched without files): pass object, the deployed file`);
-    }
-    const deployed: AcsModule[] = [];
-    for (const f of files) {
-      try {
-        deployed.push(...ctx.deployedModules(f));
-      } catch (e) {
-        return fail(`can't read ${f} to find the source's build in: ${(e as Error).message}`);
-      }
-    }
     const expr = array ? `${name}[${index}]` : name;
-    const exe = ctx.config.bcc?.trim() || undefined;
-    const res = ctx.io.resolveMapSlot({ sourceFile, expr, exe, includeDirs, deployed, engine });
+    const slots = slotsFromSource(instance, { sourceFile, object, includeDirs }, [expr]);
+    if (!Array.isArray(slots)) return fail(slots.refused);
+    const [res] = slots;
     if ("refused" in res) return fail(`${expr} refused by the ${res.guard} check, nothing sent to the engine: ${res.refused}`);
     const { len, first, md5 } = res.digest;
     const sent = command("mcp_mapslot", res.slot, ...kvArgs({ v: 1, code: len, first, md5, index: res.index, set: value }));
     const output = await client.runCommand(sent);
     const reply = parseMapSlot(output);
-    if (!reply) {
-      const nomatch = parseMapSlotNoMatch(output);
-      if (!nomatch) return failed(output);
-      const marker = res.module.map ? `the BEHAVIOR of map ${res.module.map}` : "a library";
-      return fail(
-        `The loaded module isn't the one resolved: none of the ${nomatch.modules} loaded on map ${nomatch.map} matches ${res.module.name} (${marker}), built from ${sourceFile}. ` +
-          "Another map is loaded, the map has no BEHAVIOR of its own, or the file was rebuilt after launch (relaunch to load it).",
-      );
-    }
+    if (!reply) return fail(sourceMismatch(output, res, sourceFile) ?? failureText(output));
     const echoed = reply.slot === res.slot && reply.index === res.index && (value === undefined || reply.value === value);
     if (!echoed) return fail(`the engine's reply doesn't echo the slot, index and value sent (${sent}): ${output.join("\n")}`);
     const at = `slot ${res.slot}${res.index !== undefined ? `[${res.index}]` : ""} of module ${reply.module} ${reply.name}, ${res.module.name}`;
@@ -2853,6 +3934,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "get_map_var",
     {
+      demo: "read",
       title: "Get map variable",
       description:
         "Read a map-scope ACS variable by name (searched across loaded modules, exported names only), or with sourceFile any map var by expression.",
@@ -2872,6 +3954,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_map_var",
     {
+      demo: "write",
       title: "Set map variable",
       description: "Write a map-scope ACS variable by name (exported names only), or with sourceFile any map var by expression.",
       inputSchema: { instance: instanceArg, name: acsName, value: z.number().int(), ...sourceFileArgs },
@@ -2895,6 +3978,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "get_map_array",
     {
+      demo: "read",
       title: "Get map array element",
       description:
         "Read one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, read at name[index]).",
@@ -2917,6 +4001,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "set_map_array",
     {
+      demo: "write",
       title: "Set map array element",
       description:
         "Write one element of a map-scope ACS array by name (exported names only) and index, or with sourceFile of any map array (name is then an expression, written at name[index]).",
@@ -2955,6 +4040,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "renderer_info",
     {
+      demo: "read",
       title: "Renderer info",
       description:
         notes.rendererInfo,
@@ -2988,6 +4074,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "viewport_info",
     {
+      demo: "read",
       title: "Viewport info",
       description: "The 3D view window rect (x/y/width/height) and screenblocks size.",
       inputSchema: { instance: instanceArg },
@@ -3007,6 +4094,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "hud_info",
     {
+      demo: "read",
       title: "HUD info",
       description: "Status bar Y position, status bar / HUD scale, alt HUD, crosshair.",
       inputSchema: { instance: instanceArg },
@@ -3123,9 +4211,19 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     return { output, records: bad ? undefined : [main, ...rest] };
   }
 
+  /** The same trace command and refusal handling for trace_move and move_to prechecks. */
+  async function traceMove(
+    instance: number,
+    { to, from, mover, radius, height, actors }: { to: { x: number; y: number }; from?: { x: number; y: number }; mover?: RefArg; radius?: number; height?: number; actors?: boolean },
+  ) {
+    const kv = kvArgs({ from: from && `${realToken(from.x)},${realToken(from.y)}`, mover: mover && refToken(mover), radius, height, actors: actors === false ? 0 : undefined });
+    return runProbe(instance, command("mcp_tracemove", realToken(to.x), realToken(to.y), ...kv), "MCP_TRACE", ["trace"]);
+  }
+
   registerLive(
     "point_info",
     {
+      demo: "read",
       title: "Point info (live map)",
       description:
         "Run `mcp_pointinfo`: the live sector at map x/y with its floor and ceiling height (the bare planes, as GetSectorFloorZ/CeilingZ; floor3d/ceiling3d when a solid 3D floor around z differs), floor and ceiling texture (the surfaces around z, as CheckActorFloorTexture sees them), light, special and tag, and inmap (0 in the void; omitted when the map has no GL nodes). " +
@@ -3158,6 +4256,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "check_sight",
     {
+      demo: "read",
       title: "Check line of sight (live map)",
       description:
         "Run `mcp_checksight`: whether the engine sees a line of sight between two actors or map points, as ACS CheckSight does (from the eye at 3/4 of from's height to any part of to; invisibility ignored). A point ({x, y, z?}) is a 1-unit-high probe at z or the floor, so its eye is 0.75 above that: pass z (e.g. floor + 41 for a player's view) to look from eye height. " +
@@ -3187,6 +4286,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "trace_move",
     {
+      demo: "read",
       title: "Trace a straight move (live map)",
       description:
         "Run `mcp_tracemove`: whether the mover (default the player, none on a netgame server; its size and step/dropoff limits, radius/height override the size) walks straight from `from` (default its position) to `to`, stepping a probe at most radius-1 units at a time and testing each step as the engine's movement does. " +
@@ -3203,15 +4303,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ instance, to, from, mover, radius, height, actors }) => {
-      const kv = kvArgs({
-        from: from && `${realToken(from.x)},${realToken(from.y)}`,
-        mover: mover && refToken(mover),
-        radius,
-        height,
-        actors: actors === false ? 0 : undefined,
-      });
-      const cmd = command("mcp_tracemove", realToken(to.x), realToken(to.y), ...kv);
-      const { output, records } = await runProbe(instance, cmd, "MCP_TRACE", ["trace"]);
+      const { output, records } = await traceMove(instance, { to, from, mover, radius, height, actors });
       if (!records) return failed(output);
       const [raw] = records;
       const text =
@@ -3245,6 +4337,37 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     if (args.config === "isolated" && hasArg(args.extraArgs, "-config")) {
       return `config: "isolated" and a -config in extraArgs both pick the config file; drop one of them.`;
     }
+  }
+
+  /** `args` with record/save resolved (`resolveRecordArgs`), or why they can't launch. */
+  function recordArgs(args: LaunchArgs, exe: string): { args: LaunchArgs } | { error: string } {
+    const setup = {
+      demoDir: ctx.config.demoDir ?? path.dirname(exe),
+      saveDir: ctx.config.saveDir,
+      recordFromSave: engine.demoRecordFromSave,
+      saveDirEnv: ctx.env("SAVE_DIR"),
+    };
+    return resolveRecordArgs(args, setup, ctx.io);
+  }
+
+  /** Write a recording launch's sidecar; the reply line saying where the take goes, none without one. */
+  function startRecording(instance: number, exe: string, args: LaunchArgs): string[] {
+    if (args.record === undefined) return [];
+    const json = sidecarPaths(args.record).json;
+    try {
+      const meta = { engine: engine.id, bridge: ctx.launchArgsFor(instance)?.bridge };
+      ctx.io.writeFileAtomic(json, serializeSidecar(launchSidecar(args, path.dirname(exe), meta, ctx.io)));
+      return [`recording to ${args.record} (sidecar ${json}); kill_instance writes the take`];
+    } catch (e) {
+      return [`recording to ${args.record}; sidecar not written: ${(e as Error).message}`];
+    }
+  }
+
+  /** After a quit, whether the instance's recording was written; none when it wasn't recording. */
+  function finishedRecording(instance: number, result: QuitResult): string[] {
+    const last = ctx.launchArgsFor(instance);
+    if (result === "absent" || last?.args.record === undefined) return [];
+    return [finishRecording(last.args.record, last.bridge, ctx.io)];
   }
 
   function readIfExists(file: string): string | undefined {
@@ -3290,6 +4413,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       );
       // A spawn that reported no PID skipped the handshake, so the bridge's own PID is all there is.
       if (child.pid === undefined) ctx.rememberEngine(instance, client.enginePid);
+      ctx.rememberBridge(instance, client);
     } catch (e) {
       // Nothing was spawned, so any log on this port is an earlier run's.
       if (e instanceof LaunchSetupError) return { port, logFile, error: e.message };
@@ -3324,6 +4448,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "launch_instance",
     {
+      demo: "read",
       scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Launch a ${engine.displayName} instance`,
       description:
@@ -3337,13 +4462,20 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       }
       const checked = launchableExe();
       if ("error" in checked) return fail(checked.error);
-      const args = { iwad: iwad ?? ctx.config.iwad, ...rest };
-      const invalid = launchArgsError(args);
+      const given = { iwad: iwad ?? ctx.config.iwad, ...rest };
+      const invalid = launchArgsError(given);
       if (invalid) return fail(invalid);
+      const resolved = recordArgs(given, checked.exe);
+      if ("error" in resolved) return fail(resolved.error);
+      const { args } = resolved;
       const r = await launchWith(instance, checked.exe, args, extra);
       if (r.error) return fail(r.error);
       const verb = r.pending ? "spawned" : "launched";
-      const lines = [`${verb} instance ${instance} on bridge port ${r.port}${configNote(r)}`, ...pendingLines(r)];
+      const lines = [
+        `${verb} instance ${instance} on bridge port ${r.port}${configNote(r)}`,
+        ...pendingLines(r),
+        ...startRecording(instance, checked.exe, args),
+      ];
       return { content: [{ type: "text", text: lines.join("\n") }] };
     },
   );
@@ -3351,10 +4483,11 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "relaunch_instance",
     {
+      demo: "read",
       scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Relaunch a ${engine.displayName} instance with its last options`,
       description:
-        `Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config, wait), e.g. to pick up ${notes.reloadLumps} edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs. Refuses for an attached instance.`,
+        `Quit an instance this session launched and start it again with the same options (iwad, files, map, skill, window, extraArgs, config, wait, save, mouse), e.g. to pick up ${notes.reloadLumps} edits. Any option given here replaces the stored one for this and later relaunches; [] clears files/extraArgs, "" clears record/save. Refuses for an attached instance, and for a recording one unless given a new record name or "" (the quit writes its take, as kill_instance does).`,
       inputSchema: {
         instance: instanceArg,
         ...launchArgsSchema,
@@ -3366,15 +4499,23 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       if (!last) {
         return fail(`Instance ${instance} has no launch options to reuse: it was attached with attach_instance, or not launched in this MCP session. Use launch_instance.`);
       }
+      // Checked up front: the new take's existence check runs before the quit that writes the old one.
+      if (last.args.record !== undefined && overrides.record === undefined) {
+        return fail(`Instance ${instance} records to ${last.args.record}: give a new record name, or record: "" to stop recording.`);
+      }
       const checked = launchableExe();
       if ("error" in checked) return fail(checked.error);
       const given = Object.entries(overrides).filter(([, v]) => v !== undefined);
-      const args: LaunchArgs = { ...last.args, ...Object.fromEntries(given) };
-      const invalid = launchArgsError(args);
+      const merged: LaunchArgs = { ...last.args, ...Object.fromEntries(given) };
+      const invalid = launchArgsError(merged);
       if (invalid) return fail(invalid);
+      const resolved = recordArgs(merged, checked.exe);
+      if ("error" in resolved) return fail(resolved.error);
+      const { args } = resolved;
 
       const quit = await ctx.quit(instance);
       const stopped = { clean: "old engine stopped", forced: "force-killed", absent: "was not running", unbridged: "killed before its bridge came up" }[quit];
+      const finished = finishedRecording(instance, quit);
       ctx.forgetInstance(instance);
       // A force-killed engine can hold its port briefly; wait so the relaunch keeps it.
       await pollUntil(() => ctx.io.findFreePort(last.port), (p) => p === last.port, {
@@ -3383,10 +4524,12 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       });
 
       const r = await launchWith(instance, checked.exe, args, extra);
-      if (r.error) return fail(r.error);
+      if (r.error) return fail([...finished, r.error].join("\n"));
       const lines = [
+        ...finished,
         `relaunched instance ${instance} on bridge port ${r.port}${configNote(r)} (${stopped})`,
         ...pendingLines(r),
+        ...startRecording(instance, checked.exe, args),
       ];
       if (r.port !== last.port) {
         lines.push(`The bridge port changed from ${last.port}, so the engine log is now ${r.logFile}.`);
@@ -3406,6 +4549,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "attach_instance",
     {
+      demo: "read",
       scenario: SCENARIO_REFUSALS.lifecycle,
       title: "Attach to an engine you started yourself",
       description:
@@ -3539,11 +4683,13 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       scenario: SCENARIO_REFUSALS.lifecycle,
       title: `Kill a ${engine.displayName} instance`,
       description:
-        "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit. A wait: false instance not attached yet is attached first if its bridge is up; one whose bridge isn't up is force-killed at once.",
+        "Stop a launched instance and detach from it. Asks the engine to quit itself first (a hard kill mid-render can wedge macOS GPU teardown and leave an unkillable process), then force-kills if it doesn't exit. A wait: false instance not attached yet is attached first if its bridge is up; one whose bridge isn't up is force-killed at once. " +
+        "A recording instance's quit writes its take: the reply says recorded (size, and the sidecar gets the lmp's sha1) or not written.",
       inputSchema: { instance: instanceArg },
     },
     async ({ instance }) => {
       const result = await ctx.quit(instance);
+      const finished = finishedRecording(instance, result);
       ctx.forgetInstance(instance);
       const text = {
         clean: `instance ${instance} quit cleanly`,
@@ -3551,7 +4697,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
         absent: `no instance ${instance} attached, nothing to kill`,
         unbridged: `instance ${instance} killed before its bridge came up`,
       }[result];
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text: [text, ...finished].join("\n") }] };
     },
   );
 
@@ -3561,7 +4707,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       scenario: SCENARIO_REFUSALS.lifecycle,
       title: "Reset — reap this session's engine instances",
       description:
-        "Kill every instance this session launched, and reap engines ORPHANED by earlier sessions (whose launcher is gone) that could otherwise squat bridge ports. Engines belonging to another running editor window are left alone. Pass all:true to also kill those — only do that if you know no other session is using this engine build.",
+        "Kill every instance this session launched, and reap engines ORPHANED by earlier sessions (whose launcher is gone) that could otherwise squat bridge ports. Engines belonging to another running editor window are left alone. Pass all:true to also kill those — only do that if you know no other session is using this engine build. A recording instance is quit first, so its take is written (as kill_instance).",
       inputSchema: {
         all: z
           .boolean()
@@ -3570,20 +4716,22 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     async ({ all }) => {
+      // closeAll's SIGTERM would lose a take, so recording instances quit first.
+      const recorded: string[] = [];
+      for (const n of ctx.boundInstances().filter((i) => ctx.launchArgsFor(i)?.args.record !== undefined)) {
+        recorded.push(...finishedRecording(n, await ctx.quit(n)).map((line) => `instance ${n}: ${line}`));
+      }
       ctx.registry.closeAll();
       ctx.forgetAll();
       if (!ctx.config.exe) {
-        return {
-          content: [
-            { type: "text", text: `Reset tracked instances. (${ctx.env("EXE")} unset, so no orphan sweep.)` },
-          ],
-        };
+        const text = [...recorded, `Reset tracked instances. (${ctx.env("EXE")} unset, so no orphan sweep.)`].join("\n");
+        return { content: [{ type: "text", text }] };
       }
       // Orphans-only by default: a process whose parent is still alive belongs to
       // somebody else's session, and killing it would take down their game.
       const r = await ctx.io.reap(ctx.config.exe, { onlyOrphans: !all });
       const scope = all ? "engine process(es)" : "orphaned engine process(es)";
-      const lines = [`Reset complete. Reaped ${r.killed.length} ${scope}.`];
+      const lines = [...recorded, `Reset complete. Reaped ${r.killed.length} ${scope}.`];
       if (r.survivors.length) {
         lines.push(
           `${r.survivors.length} process(es) survived SIGKILL (PIDs ${r.survivors.join(", ")}) — ` +
@@ -3842,6 +4990,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerLive(
     "run_scenario",
     {
+      demo: "read",
       scenario: SCENARIO_REFUSALS.nested,
       title: "Run a batch of tool calls in one reply",
       description:

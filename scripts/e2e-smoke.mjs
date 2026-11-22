@@ -428,6 +428,61 @@ try {
     `${textOf(gone)} / ${textOf(afterRemove)}`,
   );
 
+  // The per-tic recorder (rec cap). step leaves the game paused, so maptime holds between the reads.
+  await call("step", { tics: 1 });
+  const maptime = async () => (await call("run_command", { text: "echo e2e_rec" }), Number(client.lastStatus?.maptime));
+  const recBefore = await maptime();
+  const rec = await call("record", {
+    watch: [{ player: 0 }], tics: 10,
+    ...(client.supports("recplayer") ? { fields: ["weaponstate"] } : {}),
+  });
+  const recMoved = (await maptime()) - recBefore;
+  if (client.supports("rec")) {
+    const r = rec.structuredContent ?? {};
+    check(
+      "record runs a player watch for exactly 10 tics: maptime moves by 10, with player samples",
+      !rec.isError && r.reason === "done" && r.tics === 10 && recMoved === 10 && (r.counts?.sample ?? 0) > 0,
+      `maptime +${recMoved} / ${textOf(rec).split("\n")[0]}`,
+    );
+    if (client.supports("recplayer")) {
+      const column = r.table?.columns.indexOf("wstate") ?? -1;
+      check("record samples the player's weapon-layer state", column >= 0 && r.table.rows.some((row) => row[column] !== null), textOf(rec));
+    }
+    if (client.supports("recvars") && client.supports("clock")) {
+      // Freeze before arming: the freeze itself advances one live tic.
+      const frozen = await call("freeze_time", { frozen: true });
+      check("freeze_time enables exact recorder smoke stepping", !frozen.isError, textOf(frozen));
+      if (!frozen.isError) {
+        try {
+          await call("set_acs_var", { scope: "world", index: 5, value: 0 });
+          const armed = await call("record", { vars: [{ world: 5 }], run: false, tics: 10 });
+          await call("set_acs_var", { scope: "world", index: 5, value: 9 });
+          const stepped = await call("step", { tics: 1 });
+          const read = await call("record_read");
+          const r = read.structuredContent ?? {};
+          const variable = r.vars?.[0];
+          check(
+            "record vars-only keeps world[5]'s baseline and its exact changed value one tic later",
+            !armed.isError && !stepped.isError && !read.isError && r.tics === 1 && r.counts?.var === 2 &&
+              r.actors?.length === 0 && r.vars?.length === 1 && variable.var === 1 &&
+              variable.name === "world[5]" && variable.changes === 1 && variable.values.length === 2 &&
+              variable.values[0][1] === 0 && variable.values[1][1] === 9 &&
+              variable.values[0][0] === r.start && variable.values[1][0] === r.start + 1,
+            textOf(read),
+          );
+        } finally {
+          await call("set_acs_var", { scope: "world", index: 5, value: 0 });
+          const thawed = await call("freeze_time", { frozen: false });
+          check("freeze_time releases the recorder smoke clock", !thawed.isError, textOf(thawed));
+        }
+      }
+    } else if (client.supports("recvars")) {
+      say("SKIP  exact one-tic recorder vars check (bridge has no clock cap)");
+    }
+  } else {
+    check("record is refused without the rec cap", rec.isError && /no per-tic recorder/.test(textOf(rec)) && recMoved === 0, textOf(rec));
+  }
+
   const shotFile = await call("screenshot_file", { name: "e2e_shot" });
   const shotPath = shotFile.structuredContent?.path;
   check(
@@ -607,6 +662,20 @@ try {
       !notify.structuredContent?.text?.some((t) => /damaged class=/.test(t.text)), textOf(notify));
   }
 
+  const walkStart = (await call("player_state")).structuredContent;
+  const heading = walkStart.angle * Math.PI / 180;
+  const mixed = await call("input_timeline", { segments: [
+    { to: { x: walkStart.x + 64 * Math.cos(heading), y: walkStart.y + 64 * Math.sin(heading) } },
+    { tics: 5 },
+    { to: { x: walkStart.x, y: walkStart.y } },
+  ] });
+  const walkEnd = mixed.structuredContent?.segments?.at(-1)?.to;
+  check(
+    "input_timeline mixes walks and a 5-tic segment, returning exactly to its start",
+    !mixed.isError && mixed.structuredContent?.reason === "done" && walkEnd && Math.hypot(walkEnd.x - walkStart.x, walkEnd.y - walkStart.y) <= 0.05,
+    textOf(mixed),
+  );
+  // After the walk check, which needs the start it measured its route from.
   const timedStart = (await call("player_state")).structuredContent;
   const timed = await call("input_timeline", { segments: [{ tics: 5, forward: 1 }] });
   const timedEnd = (await call("player_state")).structuredContent;
@@ -615,6 +684,19 @@ try {
     !timed.isError && timed.structuredContent?.reason === "done" && Math.hypot(timedEnd.x - timedStart.x, timedEnd.y - timedStart.y) > 1,
     textOf(timed),
   );
+
+  // Engine mode (walk cap): the engine steers each tic, so the leg ends on its point.
+  if (ctx.attachedClient(1)?.supports("walk")) {
+    const from = (await call("player_state")).structuredContent;
+    const goal = { x: from.x - 48 * Math.cos(from.angle * Math.PI / 180), y: from.y - 48 * Math.sin(from.angle * Math.PI / 180) };
+    const moved = await call("move_to", { to: [goal] });
+    const m = moved.structuredContent;
+    check(
+      "move_to engine mode arrives on its point",
+      !moved.isError && m?.mode === "engine" && m.reason === "arrived" && Math.hypot(m.x - goal.x, m.y - goal.y) <= 0.05,
+      textOf(moved),
+    );
+  } else say("SKIP  move_to engine mode (no walk cap)");
 
   // Last before the relaunch, which drops the bot again.
   const bot = await call("add_bot");
@@ -631,6 +713,23 @@ try {
     !relaunched.isError && newPid !== undefined && newPid !== oldPid,
     `${textOf(relaunched)} (PID ${oldPid} -> ${newPid})`,
   );
+
+  // A demo fixture round trip (demo cap): record a take at launch, bless it, check its replay.
+  if (ctx.attachedClient(1)?.supports("demo")) {
+    const lmp = path.join(saveDir, "e2edemo.lmp");
+    const recording = await call("relaunch_instance", { record: lmp });
+    const walked = await call("input_timeline", { segments: [{ tics: 20, forward: 1 }, { tics: 15, forward: 1, turn: 2 }] });
+    const written = await call("relaunch_instance", { record: "" });
+    check(
+      "relaunch_instance records a take and the next relaunch writes it",
+      !recording.isError && !walked.isError && !written.isError && existsSync(lmp),
+      `${textOf(recording)} / ${textOf(walked)} / ${textOf(written)}`,
+    );
+    const blessed = await call("check_demo", { name: lmp, bless: true, every: 10 });
+    check("check_demo blesses the take", !blessed.isError && blessed.structuredContent?.checkpoints > 1, textOf(blessed));
+    const checked = await call("check_demo", { name: lmp });
+    check("check_demo replays it in sync", checked.structuredContent?.inSync === true, textOf(checked));
+  } else say("SKIP  demo record/bless/check round trip (no demo cap)");
 
   const killed = await call("kill_instance");
   check("kill_instance", !killed.isError, textOf(killed));

@@ -36,7 +36,7 @@ export interface StepWithinOptions<T> {
   chunkTics: number;
   /** The read taken before any step. */
   first: Reading<T>;
-  step(n: number): Promise<void>;
+  step(n: number): Promise<unknown>;
   /** Read after each step; run serially, never beside `step`. */
   read(): Promise<Reading<T>>;
   /** Stop early on a met condition or an error value, checked before the chunk's stall or level change. */
@@ -87,7 +87,7 @@ export async function stepWithin<T>(o: StepWithinOptions<T>): Promise<StepWithin
   return result("budget");
 }
 
-// An armed engine run (input_timeline) is polled about once a second through its nominal
+// An armed engine run (input_timeline, record) is polled about once a second through its nominal
 // time, then every 100 ms; ~1 s without a tic is a stall.
 export const ARMED_CHUNK_MS = 1000;
 export const ARMED_POLL_MS = 100;

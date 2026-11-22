@@ -64,15 +64,24 @@ export async function captureScreenshot(
 ): Promise<Screenshot> {
   const name = options.name ?? screenshotName(++counter);
   const path = join(options.dir, `${name}.png`);
-  const attempts = options.attempts ?? 40;
-  const intervalMs = options.intervalMs ?? 100;
 
   // A kept file from an earlier capture under this name would satisfy the poll
   // below before the engine writes the new frame.
   if (options.keep) await io.unlink(path).catch(() => {});
 
   await client.runCommand(`screenshot ${name}`, options.commandTimeoutMs ?? 15000);
+  return readShot({ ...options, name }, io);
+}
 
+/** Wait for `<name>.png` in `dir` and return it base64-encoded (deleted unless `keep`), for a shot something else issued. */
+export async function readShot(
+  options: Pick<CaptureOptions, "dir" | "keep" | "attempts" | "intervalMs"> & { name: string },
+  io: CaptureIo = defaultIo,
+): Promise<Screenshot> {
+  const { name } = options;
+  const path = join(options.dir, `${name}.png`);
+  const attempts = options.attempts ?? 40;
+  const intervalMs = options.intervalMs ?? 100;
   for (let i = 0; i < attempts; i++) {
     let buf: Buffer;
     try {

@@ -79,6 +79,13 @@ describe("describeStatus", () => {
     );
   });
 
+  it("reports a frozen clock as a blocker", () => {
+    const status = { paused: "0", frozen: "1" };
+    expect(describeStatus(status)).toBe("Engine state: time is frozen (freeze_time off resumes).");
+    expect(statusBlockers(status)).toEqual(["time is frozen (freeze_time off resumes)"]);
+    expect(statusBlockers({ frozen: "0" })).toEqual([]);
+  });
+
   it("reports an open menu with no class, and no player as distinct from a dead one", () => {
     const status = {
       paused: "0",

@@ -61,6 +61,7 @@ export class FakeBridge {
   private readonly pauseWaiters: Array<(v: number) => void> = [];
   readonly events: RecordedEvent[] = [];
   readonly pauses: number[] = [];
+  private pauseInStatus = false;
   /** Fields echoed back on the mcp_status correlator line. Override with `setStatus`. */
   private status: Record<string, string | undefined> = DEFAULT_STATUS;
   port = 0;
@@ -189,6 +190,8 @@ export class FakeBridge {
         } else if (msg.t === "setpause") {
           const v = Number(msg.paused);
           this.pauses.push(v);
+          // As the engine's master pause flag, which mcp_status reports (opt-in: trackPause).
+          if (this.pauseInStatus) this.status = { ...this.status, paused: String(v) };
           for (const w of this.pauseWaiters.splice(0)) w(v);
         }
       }
@@ -246,6 +249,12 @@ export class FakeBridge {
   /** Resolve with the next input event the client posts. */
   waitForEvent(): Promise<RecordedEvent> {
     return new Promise((resolve) => this.eventWaiters.push(resolve));
+  }
+
+  /** Let each setpause the client posts set the status snapshot's paused field, as the engine does. */
+  trackPause(): this {
+    this.pauseInStatus = true;
+    return this;
   }
 
   /** Resolve with the next setpause value (0/1) the client posts. */

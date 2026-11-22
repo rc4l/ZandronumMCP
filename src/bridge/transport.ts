@@ -72,6 +72,7 @@ export class BridgeClient extends EventEmitter {
   private readonly commandTimeoutMs: number;
   private enginePidValue?: number;
   private engineNameValue?: string;
+  private bridgeVersionValue?: string;
 
   constructor(opts: BridgeClientOptions) {
     super();
@@ -90,6 +91,11 @@ export class BridgeClient extends EventEmitter {
   /** Engine name the bridge advertised in its hello (the adapter's `id`), or undefined if it sent none. */
   get engineName(): string | undefined {
     return this.engineNameValue;
+  }
+
+  /** The bridge version from the hello (e.g. "0.16.0"), or undefined if it sent none. */
+  get bridgeVersion(): string | undefined {
+    return this.bridgeVersionValue;
   }
 
   /** The engine-state fields from the most recent completed round trip (a real
@@ -150,6 +156,9 @@ export class BridgeClient extends EventEmitter {
             }
             if (typeof hello.engine === "string") {
               this.engineNameValue = hello.engine;
+            }
+            if (typeof hello.bridge === "string") {
+              this.bridgeVersionValue = hello.bridge;
             }
             resolve(hello);
           }

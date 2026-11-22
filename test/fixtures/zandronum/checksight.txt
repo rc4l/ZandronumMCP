@@ -1,2 +1,2 @@
 MCP_SIGHT
-sight visible=1 from=player0 to=DoomImp#269827475
+sight visible=1 from=player0 to=DoomImp#568587182

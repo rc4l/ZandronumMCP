@@ -1,0 +1,2 @@
+MCP_INPUT cleared
+error target must be pt:x,y, tid:N or class:Name

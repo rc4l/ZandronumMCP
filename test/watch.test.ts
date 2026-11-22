@@ -158,9 +158,20 @@ describe("tableOf", () => {
   it("keeps parsed numbers, turns number lists into arrays and a missing key into null", () => {
     const a: KvRecord = { class: "DoomImp", hp: 60, vel: "1.50,-2.00,0.00", args: "0,0,0,0,0", flags: "monster,solid", target: "player0" };
     const b: KvRecord = { class: "TeleportFog", hp: 1000, flags: "" };
-    expect(tableOf(5, [a, b], ["class", "hp", "vel", "args", "flags", "target", "sprite"])).toEqual([
+    expect(tableOf([a, b], () => [5], ["class", "hp", "vel", "args", "flags", "target", "sprite"])).toEqual([
       [5, "DoomImp", 60, [1.5, -2, 0], [0, 0, 0, 0, 0], "monster,solid", "player0", null],
       [5, "TeleportFog", 1000, null, null, "", null, null],
+    ]);
+  });
+
+  it("puts the keys neither the head nor the fields show in an overflow cell, null when none are left", () => {
+    const rows: KvRecord[] = [
+      { t: 3, k: "damage", id: 1, amount: 9, type: "None", hp: 51 },
+      { t: 3, k: "sample", id: 1, hp: 51 },
+    ];
+    expect(tableOf(rows, (r) => [r.t, r.k], ["hp"], ["t", "k", "id"])).toEqual([
+      [3, "damage", 51, "amount=9 type=None"],
+      [3, "sample", 51, null],
     ]);
   });
 });

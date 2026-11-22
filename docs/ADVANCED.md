@@ -115,10 +115,12 @@ gamelog (the bridge log `read_marks` and log waits read is rewritten each launch
 `read_marks gamelog=` reads an earlier session's marks from these), by default under a per-user folder in
 the system temp dir; `ZANDRONUM_BRIDGE_GAMELOG` sets the path prefix instead. Set it
 to keep playtest marks across reboots (temp dirs get cleaned), and on Windows when the
-temp path has non-ASCII characters (the engine can't open those):
+temp path has non-ASCII characters (the engine can't open those). A bare demo name
+(`launch_instance` `record`, `play_demo`) resolves in `ZANDRONUM_DEMO_DIR`, else the
+engine's folder:
 
 ```json
-"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD", "ZANDRONUM_BRIDGE_GAMELOG": "/path/to/logs/zagamelog" }
+"env": { "ZANDRONUM_EXE": "...", "ZANDRONUM_CONFIG": "/path/to/zandronum-mcp.ini", "ZANDRONUM_IWAD": "/path/to/DOOM2.WAD", "ZANDRONUM_BRIDGE_GAMELOG": "/path/to/logs/zagamelog", "ZANDRONUM_DEMO_DIR": "/path/to/demos" }
 ```
 
 ### Gatekeeper / "Apple could not verify…"
@@ -143,8 +145,8 @@ and notarize the app in CI — not wired up here.)
 
 `run_acs` compiles its snippet on the host before loading it into the game, so it needs
 [zt-bcc](https://github.com/zeta-group/zt-bcc) (the default) or
-[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. The map-var tools'
-`sourceFile` builds the named source with zt-bcc too. Nothing else needs a
+[acc](https://github.com/ZDoom/acc) (`compiler: "acc"`) installed. The map-var tools' and
+`record`'s `sourceFile` build the named source with zt-bcc too. Nothing else needs a
 compiler: without one, the server and every other tool work as usual, and these calls return
 an error naming what to install and which variable to set, without touching the game.
 

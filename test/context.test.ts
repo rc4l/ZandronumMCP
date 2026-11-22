@@ -488,13 +488,19 @@ describe("configFromEnv", () => {
     const env = {
       ENG_EXE: "/g/Eng.app/", ENG_BRIDGE_HOST: "10.0.0.2", ENG_BRIDGE_PORT: "9000", ENG_SCREENSHOT_DIR: "/shots",
       ENG_IWAD: "/w/doom.wad", ENG_ACS_SRC: "/acs", ENG_BCC: "/bin/bcc", ENG_ACC: "/bin/acc", ENG_BRIDGE_GAMELOG: "/gl/prefix",
-      ENG_RUNACS_PROFILES: "/a/p.json",
+      ENG_RUNACS_PROFILES: "/a/p.json", ENG_DEMO_DIR: "/demos",
     };
     expect(configFromEnv(E, env)).toEqual({
       host: "10.0.0.2", basePort: 9000, exe: path.join("/g/Eng.app", "Contents", "MacOS", "eng-hooks"),
       screenshotDir: "/shots", iwad: "/w/doom.wad",
       acsSrc: "/acs", saveDir: "/saves", bcc: "/bin/bcc", acc: "/bin/acc", runAcsProfiles: ["/a/p.json"], gamelog: "/gl/prefix",
+      demoDir: "/demos",
     });
+  });
+
+  it("puts demos in the engine's folder unless the demo dir is set", () => {
+    expect(configFromEnv(E, { ENG_EXE: "/g/eng" }).demoDir).toBe("/g");
+    expect(configFromEnv(E, {}).demoDir).toBeUndefined();
   });
 
   it("splits the run_acs profile list on the path delimiter, dropping blank entries", () => {
@@ -565,12 +571,40 @@ describe("defaultContextIo", () => {
     expect(built).toMatchObject({ ok: false, diagnostics: expect.stringContaining(notFound) });
     defaultContextIo.removeDir(built.dir);
     expect(defaultContextIo.existsSync(built.dir)).toBe(false);
+    const made = defaultContextIo.mkdtemp(path.join(tmpdir(), "zmcp-io-"));
+    expect(defaultContextIo.isDirSync(made)).toBe(true);
+    const file = path.join(made, "x.txt");
+    await writeFile(file, "x");
+    defaultContextIo.removeFile(file);
+    expect(defaultContextIo.existsSync(file)).toBe(false);
+    // A missing file is no error.
+    defaultContextIo.removeFile(file);
+    defaultContextIo.removeDir(made);
     expect(typeof defaultContextIo.launchIo.spawn).toBe("function");
     // Reads the real source and builds in a real temp dir, refused here at its compiler.
-    expect(defaultContextIo.resolveMapSlot({ sourceFile: here, expr: "x", exe: "/no/such/bcc", deployed: [], engine })).toEqual({
+    expect(defaultContextIo.resolveMapSlot({ sourceFile: here, exprs: ["x"], exe: "/no/such/bcc", deployed: [], engine })).toEqual([{
       guard: "compile",
       refused: expect.stringContaining(`build A of ${here} failed:\n${notFound}`),
-    });
+    }]);
+  });
+
+  it("makes dirs, hashes, writes atomically and reads git revs through the real helpers", () => {
+    const root = defaultContextIo.mkdtemp(path.join(tmpdir(), "zmcp-rec-"));
+    const dir = path.join(root, "a", "b");
+    defaultContextIo.mkdirp(dir);
+    defaultContextIo.mkdirp(dir);
+    const file = path.join(dir, "x.json");
+    defaultContextIo.writeFileAtomic(file, "abc");
+    defaultContextIo.writeFileAtomic(file, "abcd");
+    expect(readFileSync(file, "utf8")).toBe("abcd");
+    expect(defaultContextIo.readdirSync(dir)).toEqual(["x.json"]);
+    expect(defaultContextIo.sha1Of(file)).toEqual({ sha1: "81fe8bfe87576c3ecb22426f8e57847382917acf", bytes: 4 });
+    expect(defaultContextIo.gitRevOf(file)).toBeUndefined();
+    defaultContextIo.removeDir(root);
+    const here = fileURLToPath(import.meta.url);
+    expect(defaultContextIo.gitRevOf(here)).toMatchObject({ rev: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    expect(defaultContextIo.gitRevOf(path.dirname(here))?.rev).toBe(defaultContextIo.gitRevOf(here)?.rev);
+    expect(Math.abs(defaultContextIo.now().getTime() - Date.now())).toBeLessThan(60_000);
   });
 
   it("finds a free port and captures a screenshot through the real helpers", async () => {
@@ -593,5 +627,8 @@ describe("defaultContextIo", () => {
     };
     const shot = await defaultContextIo.capture(client as never, dir);
     expect(shot.base64).toBe(Buffer.from([0x89, 0x50]).toString("base64"));
+    // A frozen clock's capture job writes the PNG itself; readShot only reads it.
+    await writeFile(path.join(dir, "frame.png"), Buffer.from([0x89]));
+    expect(await defaultContextIo.readShot(dir, "frame", false)).toMatchObject({ base64: Buffer.from([0x89]).toString("base64") });
   });
 });

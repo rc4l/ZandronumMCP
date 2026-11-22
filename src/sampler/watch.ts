@@ -22,7 +22,7 @@ export interface Snapshot {
 export interface WatchPort {
   snapshot(): Promise<Snapshot | { error: string }>;
   /** Run the sim about `n` tics, then leave it paused. */
-  step(n: number): Promise<void>;
+  step(n: number): Promise<unknown>;
 }
 
 export interface WatchOptions {
@@ -67,9 +67,19 @@ function cell(v: string | number | undefined): Cell {
   return typeof v === "string" && NUMBER_LIST.test(v) ? v.split(",").map(Number) : v;
 }
 
-/** One fixed-width row per actor, `maptime` first. */
-export function tableOf(maptime: number, actors: KvRecord[], fields: readonly Field[]): Cell[][] {
-  return actors.map((a) => [maptime, ...fields.map((f) => cell(a[f]))]);
+/** One fixed-width row per record, where `overflow` (the keys `head` shows) adds a last cell of every other key as `k=v` text. */
+export function tableOf(
+  records: KvRecord[],
+  head: (r: KvRecord) => Cell[],
+  fields: readonly string[],
+  overflow?: readonly string[],
+): Cell[][] {
+  return records.map((r) => {
+    const row = [...head(r), ...fields.map((f) => cell(r[f]))];
+    if (!overflow) return row;
+    const rest = Object.entries(r).filter(([k]) => !overflow.includes(k) && !fields.includes(k));
+    return [...row, rest.length ? rest.map(([k, v]) => `${k}=${v}`).join(" ") : null];
+  });
 }
 
 /** Fold one sample into the per-class summary. */
@@ -101,7 +111,7 @@ export async function runWatch(port: WatchPort, opts: WatchOptions, first: Snaps
   const take = (s: Snapshot) => {
     samples++;
     if (s.truncated) truncatedSamples++;
-    const got = tableOf(s.maptime, s.actors, opts.fields);
+    const got = tableOf(s.actors, () => [s.maptime], opts.fields);
     const room = Math.max(0, opts.maxRows - rows.length);
     rows.push(...got.slice(0, room));
     rowsDropped += got.length - Math.min(room, got.length);

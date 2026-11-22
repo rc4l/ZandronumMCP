@@ -35,6 +35,7 @@ const T: EngineAdapter = {
   launchPins: (_o, env) => ["+set", "pin", env.PIN ?? "0"],
   launchEnv: (base, platform) => (platform === "linux" && base.POS ? { WIN_POS: base.POS } : {}),
   gamelogDefault: (exe) => `${exe}.gamelog`,
+  loadSaveArgs: (save) => ["-loadgame", save],
 };
 
 describe("resolveEngineExe", () => {
@@ -195,7 +196,7 @@ describe("buildLaunchArgs", () => {
   });
 
   it("puts +map after every +set pin, so a launch with `map` can't load a live level on the saved values", () => {
-    const args = buildLaunchArgs({ map: "MAP01", width: 640 }, T, {});
+    const args = buildLaunchArgs({ map: "MAP01", mouse: false, width: 640 }, T, {});
     const mapIndex = args.indexOf("+map");
     const lastSetIndex = args.lastIndexOf("+set");
     expect(mapIndex).toBeGreaterThan(lastSetIndex);
@@ -211,6 +212,31 @@ describe("buildLaunchArgs", () => {
 
   it("reads the server's own env for the pins by default", () => {
     expect(buildLaunchArgs({}, T)).toEqual(buildLaunchArgs({}, T, process.env));
+  });
+
+  it("pins use_mouse only when mouse is set, and on by default for a recording", () => {
+    const mouse = (o: Parameters<typeof buildLaunchArgs>[0]) => {
+      const args = buildLaunchArgs(o, T, {});
+      return args.includes("use_mouse") ? args.slice(args.indexOf("use_mouse") - 1, args.indexOf("use_mouse") + 2) : [];
+    };
+    expect(mouse({})).toEqual([]);
+    expect(mouse({ mouse: true })).toEqual(["+set", "use_mouse", "1"]);
+    expect(mouse({ mouse: false })).toEqual(["+set", "use_mouse", "0"]);
+    expect(mouse({ record: "/d/a.lmp" })).toEqual(["+set", "use_mouse", "1"]);
+    expect(mouse({ record: "/d/a.lmp", mouse: false })).toEqual(["+set", "use_mouse", "0"]);
+  });
+
+  it("passes save and record as -loadgame and -record before the +set pins", () => {
+    expect(buildLaunchArgs({ save: "/s/base.zds", record: "/d/a.lmp", mouse: false }, T, {}).slice(0, 4)).toEqual([
+      "-loadgame", "/s/base.zds", "-record", "/d/a.lmp",
+    ]);
+  });
+
+  it("builds the save args through the adapter, which sees the caller's extraArgs", () => {
+    const E: EngineAdapter = { ...T, loadSaveArgs: (save, extra) => ["-ls", save, ...(extra ?? [])] };
+    const args = buildLaunchArgs({ save: "/s/base.zds", extraArgs: ["-x"] }, E, {});
+    expect(args.slice(0, 4)).toEqual(["-ls", "/s/base.zds", "-x", "+set"]);
+    expect(buildLaunchArgs({ save: "/s/base.zds" }, E, {}).slice(0, 3)).toEqual(["-ls", "/s/base.zds", "+set"]);
   });
 
   it("pins vid_defwidth/vid_defheight only when given", () => {

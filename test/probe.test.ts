@@ -10,7 +10,7 @@ import {
   decodeProbes,
   probeAddresses,
   probeSource,
-  resolveMapSlot,
+  resolveMapSlot as resolveMapSlots,
   type MapSlotRequest,
   type ProbeIo,
 } from "../src/acs/probe.js";
@@ -19,6 +19,8 @@ import { defaultCompileDeps, findOnPath, removeDir, type CompileDeps } from "../
 import { engine } from "../src/engine.js";
 import { buildObject, chunk, funcChunk, nameChunk, u32 } from "./fakes/acs-builder.js";
 import { lf } from "./fakes/paths.js";
+
+const resolveMapSlot = (req: MapSlotRequest, io: ProbeIo) => resolveMapSlots(req, io)[0];
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "mapslot");
 const read = (p: string) => readFileSync(path.join(FIXTURE, p));
@@ -352,9 +354,9 @@ describe("resolveMapSlot", () => {
     };
     return { io, calls, removed };
   }
-  const req = (over: Partial<MapSlotRequest> = {}): MapSlotRequest => ({
+  const req = ({ expr, ...over }: Partial<MapSlotRequest> & { expr?: string } = {}): MapSlotRequest => ({
     sourceFile: SRC,
-    expr: "hid",
+    exprs: [expr ?? "hid"],
     exe: "/opt/bcc",
     deployed: DEPLOYED,
     engine,
@@ -387,6 +389,33 @@ describe("resolveMapSlot", () => {
   it("resolves an element", () => {
     const f = fakeIo({ probe: probeBuild([0xa7, 5, 0xcf, 6, 0xce]) });
     expect(resolveMapSlot(req({ expr: "hid_arr[2]" }), f.io)).toMatchObject({ slot: 6, index: 5 });
+  });
+
+  it("batches two expressions in exactly two builds and refuses only the out-of-bounds ref", () => {
+    const bodies = [0x1d, 4, 0xce, 0xa7, 14, 0xcf, 6, 0xce];
+    const probe = buildObject({ code: Buffer.concat([CODE, Buffer.from(bodies)]), chunks: [
+      funcChunk([12, 15]), nameChunk("FNAM", ["__mcp_p_0", "__mcp_p_1"]), ...LAYOUT,
+    ] });
+    const f = fakeIo({ probe });
+    const results = resolveMapSlots(req({ exprs: ["hid", "arr[14]"] }), f.io);
+    expect(f.calls).toHaveLength(2);
+    expect(results).toEqual([
+      { slot: 4, digest: imageDigest(PLAIN), module: DEPLOYED[1] },
+      { guard: "bounds", refused: "index 14 is past the 14 elements of the array in slot 6" },
+    ]);
+    expect(f.calls[1].source).toBe(f.calls[0].source + probeSource(["hid", "arr[14]"]));
+  });
+
+  it("names every expression in build-wide refusals and validates all before compiling", () => {
+    const f = fakeIo({ failPlain: true });
+    const results = resolveMapSlots(req({ exprs: ["hid", "arr[1]"] }), f.io);
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]).toMatchObject({ guard: "compile", refused: expect.stringContaining("hid, arr[1]: build A") });
+    const invalid = fakeIo();
+    expect(resolveMapSlots(req({ exprs: ["hid", "arr + 1"] }), invalid.io)).toHaveLength(2);
+    expect(invalid.calls).toHaveLength(0);
+    expect(resolveMapSlots(req({ exprs: [] }), invalid.io)).toEqual([]);
   });
 
   it("refuses an expression outside the grammar before reading anything", () => {
@@ -505,7 +534,7 @@ describe.skipIf(BCC === undefined)("resolveMapSlot with the real compiler", () =
   const io: ProbeIo = { readFile: (p) => readFileSync(p), compile: defaultCompileDeps, removeDir };
   const deployed = ["mapslot", "mapslotn"].map((lib) => ({ name: `acs/${lib}.o`, data: read(`res/acs/${lib}.o`) }));
   const resolve = (lib: string, expr: string, over: Partial<MapSlotRequest> = {}) =>
-    resolveMapSlot({ sourceFile: path.join(FIXTURE, `${lib}.bcs`), expr, deployed, engine, ...over }, io);
+    resolveMapSlot({ sourceFile: path.join(FIXTURE, `${lib}.bcs`), exprs: [expr], deployed, engine, ...over }, io);
 
   it("resolves every kind of var in both formats", () => {
     for (const { lib, q } of LIBS) {

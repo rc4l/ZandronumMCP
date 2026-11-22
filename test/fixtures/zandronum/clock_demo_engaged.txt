@@ -1,0 +1,7 @@
+Playing demo mcp-demo-conf.lmp
+
+
+
++MAP01 - entryway
+
+MCP_CLOCK frozen=1 maptime=1 restore=0 jobs=0 armed=demo

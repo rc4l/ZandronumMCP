@@ -26,6 +26,7 @@ const SHAPES: Record<string, ZodRawShape> = {
   screenshot: { instance },
   run_scenario: { instance },
   map_info: { map: z.string() },
+  frame_sweep: { instance, output: z.enum(["image", "file"]).default("image") },
 };
 const REFUSALS: Record<string, string> = {
   kill_instance: SCENARIO_REFUSALS.lifecycle,
@@ -98,6 +99,8 @@ describe("run_scenario validation", () => {
         call("step", { instance: 2 }),
         { repeat: [{ expect: { kind: "log" } }, call("step", { tics: "x" }), call("find_actors", { to: { x: "a" } })], maxIterations: 2 },
         call("step", { tic: 5 }),
+        call("frame_sweep"),
+        call("frame_sweep", { output: "file" }),
       ]),
     );
     expect(out).toBe(
@@ -112,6 +115,7 @@ describe("run_scenario validation", () => {
         "step 7.1 (step): tics: Expected number, received string",
         "step 7.2 (find_actors): to.x: Expected number, received string",
         "step 8 (step): args: Unrecognized key(s) in object: 'tic'",
+        'step 9 (frame_sweep): output "image" replies with inline images; pass output: "file"',
       ].join("\n"),
     );
     expect(scenarioRefusal(port, scenario([call("step", { tics: 1 })]))).toBeUndefined();

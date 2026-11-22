@@ -15,12 +15,21 @@ import { parseRunAcs, parseRunScript, scriptOutput } from "../src/parsers/runacs
 import { parseInputArmed, parseInputStatus, parseInputTrail, type InputRow } from "../src/parsers/input.js";
 import { splitLog } from "../src/input/timeline.js";
 import { parseMarks } from "../src/parsers/marks.js";
+import { parseRecArmed, parseRecFile, parseRecStatus, parseRecWrote } from "../src/parsers/rec.js";
+import { DEFAULT_REC_FIELDS } from "../src/recorder/record.js";
+import { parseClockStatus, type ClockStatus } from "../src/parsers/clock.js";
+import { parseCheckpoint, type Checkpoint } from "../src/parsers/checkpoint.js";
 import { ENGINES, engineFixture, type Engine } from "./fakes/fixtures.js";
 
 // The PROTOCOL.md contract, checked against one real captured reply per CCMD from each engine in ENGINES.
 const capture = (engine: Engine, name: string): string[] => engineFixture(engine, `${name}.txt`);
 
 const status = (lines: string[]) => parseStatus(lines[0], lines[0].split(" ")[0]);
+// Keep wire fields that the host's clock status parser intentionally omits.
+const clockStatus = (lines: string[]) => ({ clock: parseClockStatus(lines)!, raw: parseKvLines(lines, "MCP_CLOCK")[0] });
+
+/** Every row kind of a dumped recording (PROTOCOL.md, Per-tic recorder). */
+const REC_KINDS = ["seen", "spawn", "sample", "destroy", "state", "damage", "death", "script_start", "script_end", "var"];
 
 /** A value's structure: key names and value types, never the values themselves. */
 function shapeOf(v: unknown): unknown {
@@ -453,7 +462,7 @@ const CONTRACT: Contract<unknown>[] = [
     capture: "input_go",
     parse: (l) => ({ armed: parseInputArmed(l)!, segs: [...splitLog(l).keys()], end: parseKvLines(l, "MCP_INPUT_END")[0] }),
     expect: ({ armed, segs, end }) => {
-      expect(armed).toMatchObject({ segs: 2, tics: 5 });
+      expect(armed).toMatchObject({ segs: 2, tics: 5, limit: 5 });
       expect(segs).toEqual([1, 2]);
       expect(end).toEqual({ reason: "done", consumed: 5, maptime: armed.maptime + 5 });
     },
@@ -461,7 +470,8 @@ const CONTRACT: Contract<unknown>[] = [
   contract({
     capture: "input_status",
     parse: (l) => parseInputStatus(l)!,
-    expect: (s) => expect(s).toMatchObject({ active: false, consumed: 5, total: 5, seg: 2, reason: "done" }),
+    expect: (s) =>
+      expect(s).toEqual({ active: false, consumed: 5, total: 5, seg: 2, maptime: s.maptime, reason: "done", done: 2, limit: 5, net: false }),
   }),
   contract({
     capture: "input_trail",
@@ -487,6 +497,274 @@ const CONTRACT: Contract<unknown>[] = [
     expect: ({ rows }: { rows: InputRow[] }) => expect(rows.map((r) => r.seg)).toEqual([1, 2]),
   }),
   contract({ capture: "input_stop", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_INPUT idle"]) }),
+  contract({
+    capture: "input_walk_bad",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("target must be pt:x,y, tid:N or class:Name"),
+  }),
+  contract({
+    capture: "input_walk",
+    parse: (l) => l,
+    expect: (l) => expect(l).toEqual(["MCP_INPUT cleared", "MCP_INPUT walk 1"]),
+  }),
+  contract({
+    // A walk has no nominal tics: the limit defaults to 2100, here passed as 350.
+    capture: "input_walk_go",
+    parse: (l) => ({ armed: parseInputArmed(l)!, segs: [...splitLog(l).keys()], end: parseKvLines(l, "MCP_INPUT_END")[0] }),
+    expect: ({ armed, segs, end }) => {
+      expect(armed).toMatchObject({ segs: 1, tics: 0, limit: 350 });
+      expect(segs).toEqual([1]);
+      expect(end.reason).toBe("done");
+      expect(end.consumed).toBeGreaterThan(0);
+      expect(end.maptime).toBe(armed.maptime + Number(end.consumed));
+    },
+  }),
+  contract({
+    // After the 100-unit walk above: on the point, with the tics its end line counted.
+    capture: "input_walk_status",
+    parse: (l) => parseInputStatus(l)!,
+    expect: (s, engine) => {
+      expect(s).toMatchObject({ active: false, total: 0, seg: 1, reason: "done", done: 1, limit: 350, net: false });
+      expect(s.target).toEqual({ x: -800, y: 800 });
+      expect(s.dist).toBeLessThanOrEqual(0.1);
+      expect(s.consumed).toBe(parseKvLines(capture(engine, "input_walk_go"), "MCP_INPUT_END")[0].consumed);
+    },
+  }),
+  contract({
+    // A 70-tic run-mode recording: a rocket kills a watched imp, ConfHud runs, world[5] is sampled.
+    capture: "rec_file",
+    parse: (l) => {
+      const f = parseRecFile(l.join("\n"))!;
+      return { header: f.header, count: f.rows.length, kinds: Object.fromEntries(REC_KINDS.map((k) => [k, f.rows.find((r) => r.k === k)])) };
+    },
+    expect: ({ header, count, kinds }, engine) => {
+      expect(header).toMatchObject({ map: "MAP01", ran: 70, dropped: 0, reason: "done", fields: [...DEFAULT_REC_FIELDS] });
+      expect(count).toBe(header.rows);
+      for (const k of REC_KINDS) expect(kinds[k], `a ${k} row`).toBeDefined();
+      expect(kinds.damage).toMatchObject({ src: "player0", inf: expect.stringMatching(/^Rocket#/) });
+      expect(kinds.script_start).toMatchObject({ script: -1, module: "MCPCONF", act: "player0", name: "ConfHud" });
+      expect(kinds.var).toEqual({ t: header.start, k: "var", var: 1, value: 0, name: "world[5]" });
+      // The finished status and the dump count the rows the file holds.
+      expect(parseRecStatus(capture(engine, "rec_status_done"))?.rows).toBe(header.rows);
+      expect(parseRecWrote(capture(engine, "rec_dump"))?.rows).toBe(header.rows);
+    },
+  }),
+  contract({
+    capture: "rec_file_player",
+    parse: (l) => parseRecFile(l.join("\n"))!,
+    expect: ({ header, rows }) => {
+      expect(header).toMatchObject({ map: "MAP01", ran: 35, dropped: 0, reason: "done" });
+      expect(rows).toHaveLength(header.rows);
+      const samples = rows.filter((r) => r.k === "sample");
+      expect(samples).toHaveLength(36);
+      expect(samples[0]).toMatchObject({ buttons: 0, modbuttons: 0, wclass: "Pistol", wlabel: "Ready" });
+      for (const row of samples.slice(1)) {
+        expect(row).toMatchObject({ buttons: 1, modbuttons: 1, wclass: "Pistol", wstate: expect.any(String),
+          wlabel: expect.any(String), wsprite: "PISG", wframe: expect.any(String), wtics: expect.any(Number) });
+      }
+      expect(samples.at(-1)!.refire).toBeGreaterThan(0);
+      const events = rows.filter((r) => r.k === "psprite");
+      expect(events).toContainEqual(expect.objectContaining({ layer: 1, wlabel: "Fire", wtics: 4 }));
+      expect(events).toContainEqual(expect.objectContaining({ layer: 1000, wlabel: "Flash", wtics: 7 }));
+      expect(events).toContainEqual(expect.objectContaining({ layer: 1000, wstate: "none" }));
+      expect(new Set(events.map((r) => `${r.t}:${r.layer}:${r.wstate}`)).size).toBe(events.length);
+    },
+  }),
+  contract({
+    capture: "rec_status_done",
+    parse: parseRecStatus,
+    expect: (s) => expect(s).toMatchObject({ active: false, ran: 70, tics: 70, dropped: 0, untracked: 0, reason: "done" }),
+  }),
+  contract({ capture: "rec_dump", parse: parseRecWrote, expect: (w) => expect(w).toMatchObject({ dropped: 0 }) }),
+  contract({ capture: "rec_stop_idle", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_REC idle"]) }),
+  contract({
+    capture: "rec_watch_bad",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("unknown class NoSuchClass"),
+  }),
+  contract({
+    capture: "rec_go_refused",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("bad setup: a line failed, mcp_rec clear first"),
+  }),
+  contract({
+    capture: "rec_var",
+    parse: (l) => parseKvLines(l, "MCP_REC var"),
+    expect: (v) => expect(v).toEqual([{ n: 1 }]),
+  }),
+  contract({
+    capture: "rec_var_bad",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("mapvar NoSuchRecorderVar not found"),
+  }),
+  contract({
+    capture: "rec_go_nothing",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("nothing to record: add a watch, scripts or a var"),
+  }),
+  contract({ capture: "rec_clear", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_REC cleared"]) }),
+  contract({ capture: "rec_watch", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_REC watch n=1"]) }),
+  contract({
+    capture: "rec_armed",
+    parse: parseRecArmed,
+    expect: (a) => expect(a).toMatchObject({ watches: 1, tracked: 1, vars: 1, tics: 500 }),
+  }),
+  contract({
+    // Armed while paused, so no tic has run: baseline actor and variable rows only.
+    capture: "rec_status",
+    parse: parseRecStatus,
+    // The armed watch's baseline rows plus the world[5] var's baseline.
+    expect: (s) => expect(s).toMatchObject({ active: true, ran: 0, tics: 500, rows: 3, tracked: 1, reason: "-" }),
+  }),
+  contract({ capture: "rec_stop", parse: (l) => l, expect: (l) => expect(l).toEqual(["MCP_REC stopped ran=0"]) }),
+  contract({ capture: "clock_step_refused", parse: firstError, expect: (e) => expect(e).toBe("not frozen") }),
+  contract({ capture: "clock_frametime_refused", parse: firstError, expect: (e) => expect(e).toBe("not frozen") }),
+  contract({
+    capture: "clock_frametime_on",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: (f) => expect(f).toEqual([{ frametime: 1, framems: 0 }]),
+  }),
+  contract({
+    capture: "clock_frametime_off",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: (f, engine) => expect(f).toEqual([
+      { frametime: 0, framems: clockStatus(capture(engine, "clock_status_after")).raw.framems },
+    ]),
+  }),
+  contract({
+    capture: "clock_freeze",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: ([f]) => {
+      expect(f).toMatchObject({ frozen: 1, restore: 0, jobs: 1 });
+      expect(f.maptime).toBeGreaterThan(0);
+    },
+  }),
+  contract({
+    // The freeze's own live tic has run and counts as a step.
+    capture: "clock_status",
+    parse: clockStatus,
+    expect: ({ clock, raw }, engine) => {
+      expect(clock).toMatchObject({ frozen: true, interp: true, jobs: 0, steps: 1, shots: 0, reason: "done", armedDemo: false });
+      expect(raw).toMatchObject({ frametime: 0, framems: 0, armed: 0 });
+      expect(clock.maptime).toBe(Number(parseKvLines(capture(engine, "clock_freeze"), "MCP_CLOCK")[0].maptime) + 1);
+    },
+  }),
+  contract({ capture: "clock_step", parse: (l) => parseKvLines(l, "MCP_CLOCK queued"), expect: (q) => expect(q).toEqual([{ jobs: 1 }]) }),
+  contract({ capture: "clock_shot", parse: (l) => parseKvLines(l, "MCP_CLOCK queued"), expect: (q) => expect(q).toEqual([{ jobs: 1 }]) }),
+  contract({
+    // After `step 3` and one shot: exactly 3 more tics.
+    capture: "clock_status_after",
+    parse: clockStatus,
+    expect: ({ clock, raw }, engine) => {
+      expect(clock).toMatchObject({ frozen: true, jobs: 0, steps: 4, shots: 1, reason: "done", armedDemo: false });
+      expect(raw).toMatchObject({ frametime: 1, armed: 0 });
+      expect(Number.isInteger(raw.framems)).toBe(true);
+      expect(raw.framems).toBeGreaterThan(0);
+      expect(clock.maptime).toBe(parseClockStatus(capture(engine, "clock_status"))!.maptime + 3);
+    },
+  }),
+  contract({
+    capture: "clock_stop",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK stopped"),
+    expect: (r) => expect(r).toEqual([{ dropped: 1 }]),
+  }),
+  contract({
+    capture: "clock_thaw",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: ([t], engine) =>
+      expect(t).toEqual({ frozen: 0, maptime: parseClockStatus(capture(engine, "clock_status_after"))!.maptime, paused: 0 }),
+  }),
+  // The demo_* run (fixtures README): checkpoints and refusals while recording, then the held playback.
+  contract({
+    capture: "checkpoint",
+    parse: parseCheckpoint,
+    expect: (c: Checkpoint) => {
+      expect(c.maptime).toBeGreaterThan(0);
+      expect(c.actors).toBeGreaterThan(0);
+      for (const v of [c.rng, c.hash, ...Object.values(c.groups)]) expect(v).toMatch(/^[0-9a-f]{8}$/);
+      expect(c.rows).toEqual([]);
+    },
+  }),
+  contract({
+    capture: "checkpoint_rows",
+    parse: parseCheckpoint,
+    expect: (c: Checkpoint) => {
+      expect(c.rows).toHaveLength(c.actors);
+      expect(c.rows.map((r) => r.i)).toEqual(c.rows.map((_, k) => k));
+      expect(c.rows.some((r) => r.class === "DoomPlayer")).toBe(true);
+      for (const r of c.rows) {
+        expect(r.h).toMatch(/^[0-9a-f]{8}$/);
+        expect(r.sprite).toMatch(/^\S{4}$/);
+        expect(r.frame).toMatch(/^[A-Z\\[\]^]$/);
+      }
+    },
+  }),
+  contract({
+    // Held at the demo's first tic: every field replay-stable, so no gametic.
+    capture: "checkpoint_demo",
+    parse: parseCheckpoint,
+    expect: (c: Checkpoint) => expect(c).toMatchObject({ maptime: 1, rows: [] }),
+  }),
+  contract({
+    capture: "input_go_recording",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("recording: a pause would desync the demo; freeze the clock first"),
+  }),
+  contract({
+    capture: "rec_go_recording",
+    parse: firstError,
+    expect: (e) => expect(e).toBe("recording: a pause would desync the demo; freeze the clock first"),
+  }),
+  contract({
+    // Frozen over a bridge pause while recording: thaw restores none.
+    capture: "clock_freeze_recording",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: ([f]) => expect(f).toMatchObject({ frozen: 1, restore: 1, jobs: 1 }),
+  }),
+  contract({
+    capture: "clock_thaw_recording",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: ([t], engine) =>
+      expect(t).toEqual({
+        frozen: 0,
+        maptime: Number(parseKvLines(capture(engine, "clock_freeze_recording"), "MCP_CLOCK")[0].maptime) + 1,
+        paused: 0,
+        restore_skipped: "demo",
+      }),
+  }),
+  contract({
+    capture: "clock_freeze_demo",
+    parse: (l) => l,
+    expect: (l) => expect(l).toEqual(["MCP_CLOCK armed=demo frozen=0"]),
+  }),
+  contract({
+    // The engage line, gamelog only, after the tic that started the demo ran its first ticcmd.
+    capture: "clock_demo_engaged",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: (e) => expect(e).toEqual([{ frozen: 1, maptime: 1, restore: 0, jobs: 0, armed: "demo" }]),
+  }),
+  contract({
+    // Engaging queues no step and clears the arm.
+    capture: "clock_demo_status",
+    parse: parseClockStatus,
+    expect: (s) => expect(s).toMatchObject({ frozen: true, maptime: 1, jobs: 0, steps: 0, reason: "done", armedDemo: false }),
+  }),
+  contract({
+    // `step 5000` past the end: the tic that read DEM_STOP counts, and the clock stays frozen.
+    capture: "clock_demo_end",
+    parse: parseClockStatus,
+    expect: (s: ClockStatus) => {
+      expect(s).toMatchObject({ frozen: true, jobs: 0, reason: "demo_end" });
+      expect(s.steps).toBe(s.maptime - 1);
+    },
+  }),
+  contract({
+    // Demo over, so a plain thaw.
+    capture: "clock_demo_thaw",
+    parse: (l) => parseKvLines(l, "MCP_CLOCK"),
+    expect: ([t], engine) =>
+      expect(t).toEqual({ frozen: 0, maptime: parseClockStatus(capture(engine, "clock_demo_end"))!.maptime, paused: 0 }),
+  }),
 ];
 
 describe("bridge contract (PROTOCOL.md) over the captured replies", () => {
